@@ -378,9 +378,11 @@ func (pm *MultipoolerManager) dropOrphanedFailoverSlots(ctx context.Context) err
 
 	execCtx, cancel := context.WithTimeout(ctx, logicalSlotWriteTimeout)
 	defer cancel()
-	if err := pm.adminExecArgs(execCtx, dropOrphanedFailoverSlotsSQL); err != nil {
+	result, err := pm.adminQueryArgs(execCtx, dropOrphanedFailoverSlotsSQL)
+	if err != nil {
 		return mterrors.Wrap(err, "failed to drop orphaned logical failover slots")
 	}
+	pm.metrics.recordSlotsDropped(ctx, slotsDroppedReasonOrphaned, int64(len(result.Rows)))
 
 	return nil
 }
@@ -453,6 +455,7 @@ func (pm *MultipoolerManager) ReconcileFollowers(ctx context.Context, followerID
 		if err := pm.DropLogicalSlot(ctx, name); err != nil {
 			return mterrors.Wrapf(err, "drop departed managed physical slot %q", name)
 		}
+		pm.metrics.recordSlotsDropped(ctx, slotsDroppedReasonDepartedFollower, 1)
 		pm.logger.InfoContext(ctx, "dropped departed follower physical slot during reconcile", "slot", name)
 	}
 	return nil

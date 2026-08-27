@@ -22,10 +22,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/multigres/multigres/go/common/constants"
 	clustermetadatapb "github.com/multigres/multigres/go/pb/clustermetadata"
 	"github.com/multigres/multigres/go/services/multipooler/internal/executor/mock"
+	"github.com/multigres/multigres/go/tools/telemetry"
 )
 
 // slotNameCharset matches a fully-sanitized multigres slot name: the fixed
@@ -518,6 +520,29 @@ func TestDropOrphanedFailoverSlots(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to drop orphaned logical failover slots")
 	})
+
+	t.Run("records the number of slots dropped", func(t *testing.T) {
+		setup := telemetry.SetupTestTelemetry(t)
+		require.NoError(t, setup.Telemetry.InitTelemetry(t.Context(), "test-multipooler"))
+
+		pm, m := newTestManagerWithMock(t, constants.DefaultTableGroup, constants.DefaultShard)
+		enableSlotBasedReplication(pm)
+		metrics, err := newManagerMetrics()
+		require.NoError(t, err)
+		pm.metrics = metrics
+		// Two orphaned originals dropped by the single bulk statement.
+		m.AddQueryPatternOnce("synced", mock.MakeQueryResult(
+			[]string{"pg_drop_replication_slot"}, [][]any{{nil}, {nil}}))
+
+		require.NoError(t, pm.dropOrphanedFailoverSlots(t.Context()))
+		assert.NoError(t, m.ExpectationsWereMet())
+
+		sum, ok := findMetric(t, setup.MetricReader, "mg.pooler.logical_failover.slots_dropped").Data.(metricdata.Sum[int64])
+		require.True(t, ok)
+		require.Len(t, sum.DataPoints, 1)
+		assert.Equal(t, int64(2), sum.DataPoints[0].Value)
+		assert.Equal(t, string(slotsDroppedReasonOrphaned), attrValue(t, sum.DataPoints[0].Attributes, "reason"))
+	})
 }
 
 func TestReconcileFollowers(t *testing.T) {
@@ -529,8 +554,14 @@ func TestReconcileFollowers(t *testing.T) {
 	})
 
 	t.Run("creates the missing follower slot and drops only inactive departed managed slots", func(t *testing.T) {
+		setup := telemetry.SetupTestTelemetry(t)
+		require.NoError(t, setup.Telemetry.InitTelemetry(t.Context(), "test-multipooler"))
+
 		pm, m := newTestManagerWithMock(t, constants.DefaultTableGroup, constants.DefaultShard)
 		enableSlotBasedReplication(pm)
+		metrics, err := newManagerMetrics()
+		require.NoError(t, err)
+		pm.metrics = metrics
 		// Create-missing half: one follower (replica-a → mg_replica_a); self skipped.
 		m.AddQueryPatternOnce("SELECT EXISTS", mock.MakeQueryResult([]string{"exists"}, [][]any{{false}}))
 		m.AddQueryPatternOnce("pg_create_physical_replication_slot", mock.MakeQueryResult(nil, nil))
@@ -547,6 +578,12 @@ func TestReconcileFollowers(t *testing.T) {
 
 		require.NoError(t, pm.ReconcileFollowers(t.Context(), selfAndFollowerCohort()))
 		assert.NoError(t, m.ExpectationsWereMet())
+
+		sum, ok := findMetric(t, setup.MetricReader, "mg.pooler.logical_failover.slots_dropped").Data.(metricdata.Sum[int64])
+		require.True(t, ok)
+		require.Len(t, sum.DataPoints, 1)
+		assert.Equal(t, int64(1), sum.DataPoints[0].Value)
+		assert.Equal(t, string(slotsDroppedReasonDepartedFollower), attrValue(t, sum.DataPoints[0].Attributes, "reason"))
 	})
 
 	t.Run("propagates a create-missing error", func(t *testing.T) {

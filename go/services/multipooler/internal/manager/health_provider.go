@@ -69,8 +69,16 @@ type healthStreamer struct {
 	// Zero on the primary or when not yet measured. Updated via SetReplicationLag.
 	replicationLagNs atomic.Int64
 
-	// metrics publishes replication lag and serving-state transitions as OTel
-	// metrics. Always non-nil after newHealthStreamer.
+	// failoverSlotsReady/failoverSlotsTotal hold the most recent logical
+	// failover-slot readiness counts (see failoverSlotReadiness). Zero when
+	// slot-based replication is disabled or not yet measured. Updated via
+	// SetFailoverSlotReadiness.
+	failoverSlotsReady atomic.Int64
+	failoverSlotsTotal atomic.Int64
+
+	// metrics publishes replication lag, serving-state transitions, and
+	// failover-slot readiness as OTel metrics. Always non-nil after
+	// newHealthStreamer.
 	metrics *healthMetrics
 }
 
@@ -86,8 +94,12 @@ func newHealthStreamer(logger *slog.Logger, poolerID *clustermetadatapb.ID, tabl
 		servingStatus:               clustermetadatapb.PoolerServingStatus_DISABLED,
 	}
 
-	// The observable gauge samples the lag atomic at collection time.
-	metrics, err := newHealthMetrics(func() int64 { return hs.replicationLagNs.Load() })
+	// The observable gauges sample these atomics at collection time.
+	metrics, err := newHealthMetrics(
+		func() int64 { return hs.replicationLagNs.Load() },
+		func() int64 { return hs.failoverSlotsReady.Load() },
+		func() int64 { return hs.failoverSlotsTotal.Load() },
+	)
 	if err != nil && logger != nil {
 		logger.Warn("failed to initialise some health metrics", "error", err)
 	}
@@ -178,6 +190,15 @@ func (hs *healthStreamer) Broadcast() {
 // Safe to call concurrently with any method.
 func (hs *healthStreamer) SetReplicationLag(lagNs int64) {
 	hs.replicationLagNs.Store(lagNs)
+}
+
+// SetFailoverSlotReadiness updates the logical failover-slot readiness counts
+// sampled by the mg.pooler.logical_failover.slots_ready/slots_total gauges.
+// Called by the manager's heartbeat loop with the latest measured counts.
+// Safe to call concurrently with any method.
+func (hs *healthStreamer) SetFailoverSlotReadiness(ready, total int) {
+	hs.failoverSlotsReady.Store(int64(ready))
+	hs.failoverSlotsTotal.Store(int64(total))
 }
 
 // buildStateLocked builds the current health state. Caller must hold hs.mu.
@@ -324,6 +345,14 @@ func (pm *MultipoolerManager) runHealthHeartbeat(ctx context.Context, interval t
 			if pm.healthStreamer != nil {
 				if lag, err := pm.ReplicationLag(ctx); err == nil {
 					pm.healthStreamer.SetReplicationLag(lag.Nanoseconds())
+				}
+				// Steady-state failover-slot readiness, so it's visible before a
+				// failover is ever needed, not just via the advisory check at
+				// promotion time. Best-effort, like replication lag above.
+				if pm.slotBasedReplicationEnabled() {
+					if ready, total, err := pm.failoverSlotReadiness(ctx); err == nil {
+						pm.healthStreamer.SetFailoverSlotReadiness(ready, total)
+					}
 				}
 			}
 			pm.broadcastHealth()

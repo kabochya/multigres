@@ -565,7 +565,19 @@ func (pm *MultipoolerManager) promoteLocked(ctx context.Context, req *consensusd
 		reason = "promote"
 	}
 
-	promotionHook := func(hookCtx context.Context) error {
+	promotionHook := func(hookCtx context.Context) (err error) {
+		// mg.pooler.logical_failover.duration/count cover this hook end to end:
+		// this is the SLO-relevant "failover time" from the o11y guidelines for
+		// the slot-based logical-replication path.
+		start := time.Now()
+		defer func() {
+			status := logicalFailoverStatusSuccess
+			if err != nil {
+				status = logicalFailoverStatusFailure
+			}
+			pm.metrics.recordLogicalFailover(hookCtx, status, time.Since(start))
+		}()
+
 		if err := pm.consensusMgr.ClearResignedLeaderAtTerm(ctx); err != nil {
 			return mterrors.Wrap(err, "failed to clear resigned primary term")
 		}
@@ -574,13 +586,17 @@ func (pm *MultipoolerManager) promoteLocked(ctx context.Context, req *consensusd
 		// standby, so a slot failure fails the promotion cleanly rather than
 		// leaving a promoted-but-unrecorded node. No-op when the flag is off.
 		cohortMembers := proposedRule.GetCohortMembers()
-		if err := pm.ensureFollowerPhysicalSlots(hookCtx, cohortMembers); err != nil {
+		if err := pm.timeLogicalFailoverStep(hookCtx, logicalFailoverStepEnsureFollowerSlots, func() error {
+			return pm.ensureFollowerPhysicalSlots(hookCtx, cohortMembers)
+		}); err != nil {
 			return err
 		}
 		// Hold the failover logical slots back to the followers' physical slots so
 		// a standby cannot outrun a slot's catalog_xmin and block slot-sync. Set
 		// before pg_promote so it is in effect the moment this node is primary.
-		if err := pm.setSynchronizedStandbySlots(hookCtx, cohortMembers); err != nil {
+		if err := pm.timeLogicalFailoverStep(hookCtx, logicalFailoverStepSetSynchronizedSlots, func() error {
+			return pm.setSynchronizedStandbySlots(hookCtx, cohortMembers)
+		}); err != nil {
 			return err
 		}
 		// Log any synced failover slots that are not failover-ready before
