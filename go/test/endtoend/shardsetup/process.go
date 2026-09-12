@@ -467,6 +467,9 @@ func (p *ProcessInstance) startMultiadmin(ctx context.Context, t *testing.T) err
 		"--hostname", "localhost",
 		"--log-level", p.logLevelOrDefault(),
 	}
+	// Append any extra args (e.g., TLS/client-cert auth flags from
+	// WithMultiadminExtraArgs). Placed last so they can override defaults.
+	args = append(args, p.ExtraArgs...)
 
 	p.Process = executil.Command(ctx, p.Binary, args...).WithProcessGroup()
 
