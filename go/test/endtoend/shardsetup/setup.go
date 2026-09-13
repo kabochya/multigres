@@ -85,6 +85,7 @@ type SetupConfig struct {
 	EnableMultigatewayReplicaPort      bool     // Enable replica-reads port on multigateway
 	MultigatewayExtraArgs              []string // Extra CLI flags for multigateway (e.g., buffer config)
 	MultipoolerExtraArgs               []string // Extra CLI flags appended to every multipooler (e.g., connpool capacity/timeout flags)
+	MultiadminExtraArgs                []string // Extra CLI flags for multiadmin (e.g., TLS/client-cert auth flags)
 	OTelCollectorEndpoint              string   // OTLP HTTP endpoint for multigateway span export (empty = disabled)
 	EnableMetricsExport                bool     // Enable Prometheus metrics export on all services
 	LogLevel                           string   // --log-level for multipooler/multiorch/multigateway (empty = "debug")
@@ -192,6 +193,17 @@ func WithMultigatewayExtraArgs(args ...string) SetupOption {
 func WithMultiadmin() SetupOption {
 	return func(c *SetupConfig) {
 		c.EnableMultiadmin = true
+	}
+}
+
+// WithMultiadminExtraArgs adds extra CLI flags to the multiadmin process in
+// the test setup. Implies WithMultiadmin(). Use for options with no
+// dedicated setup helper yet, e.g. the HTTP TLS/client-cert auth flags.
+// Flags are appended last, so they override the multiadmin defaults.
+func WithMultiadminExtraArgs(args ...string) SetupOption {
+	return func(c *SetupConfig) {
+		c.EnableMultiadmin = true
+		c.MultiadminExtraArgs = append(c.MultiadminExtraArgs, args...)
 	}
 }
 
@@ -760,6 +772,7 @@ func New(t *testing.T, opts ...SetupOption) *ShardSetup {
 
 		ma := setup.CreateMultiadminInstance(t, "multiadmin", httpPort, grpcPort)
 		ma.LogLevel = config.LogLevel
+		ma.ExtraArgs = config.MultiadminExtraArgs
 		t.Logf("Created multiadmin instance: HTTP=%d, gRPC=%d", httpPort, grpcPort)
 
 		if err := ma.Start(runningCtx, t); err != nil {
