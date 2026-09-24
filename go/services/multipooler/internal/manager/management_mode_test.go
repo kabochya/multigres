@@ -23,7 +23,7 @@ import (
 	pb "github.com/multigres/multigres/go/pb/clustermetadata"
 )
 
-func TestConstructorRejectsExternalOwnershipBeforeSideEffects(t *testing.T) {
+func TestConstructorRejectsUnknownManagementModeBeforeSideEffects(t *testing.T) {
 	for _, mode := range []pb.PoolerManagementMode{99} {
 		// Nil config would panic if construction got as far as creating clients.
 		mgr, err := NewMultipoolerManager(slog.Default(), &pb.Multipooler{ManagementMode: mode}, nil)

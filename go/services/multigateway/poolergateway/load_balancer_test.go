@@ -1061,3 +1061,20 @@ func TestUnmanagedStandaloneMembership(t *testing.T) {
 		})
 	}
 }
+
+// Reserved sessions must also fail closed when unsupported coexistence appears.
+func TestUnmanagedReservedConnectionRejectsMixedMembership(t *testing.T) {
+	lb := newTestLB(t, "zone1")
+	external := createTestMultipooler("external", "zone1", constants.DefaultTableGroup, "0", clustermetadatapb.PoolerType_PRIMARY)
+	external.ManagementMode = clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
+	addPoolerForTest(t, lb, external)
+	_, err := lb.getConnectionByID(external.Id)
+	require.NoError(t, err)
+	managed := createTestMultipooler("managed", "zone1", constants.DefaultTableGroup, "0", clustermetadatapb.PoolerType_REPLICA)
+	addPoolerForTest(t, lb, managed)
+	for _, p := range []*clustermetadatapb.Multipooler{external, managed} {
+		conn, err := lb.getConnectionByID(p.Id)
+		require.Nil(t, conn)
+		require.ErrorContains(t, err, "coexistence is not supported")
+	}
+}

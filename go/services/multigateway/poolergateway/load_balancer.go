@@ -450,6 +450,9 @@ func (lb *loadBalancer) getConnectionByID(poolerID *clustermetadatapb.ID) (*pool
 	idStr := topoclient.ComponentIDString(poolerID)
 	if lb.cache != nil {
 		if conn, ok := lb.cache.GetRider(idStr); ok && conn != nil {
+			if err := lb.validateStandaloneUnmanaged(&query.Target{ShardKey: conn.PoolerInfo().GetShardKey()}); err != nil {
+				return nil, err
+			}
 			return conn, nil
 		}
 	}
