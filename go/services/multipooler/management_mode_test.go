@@ -15,7 +15,6 @@
 package multipooler
 
 import (
-	"context"
 	"testing"
 
 	"github.com/spf13/pflag"
@@ -44,11 +43,11 @@ func TestManagementMode(t *testing.T) {
 	}
 }
 
-func TestUnmanagedStartupIsGated(t *testing.T) {
+func TestManagementModeFlag(t *testing.T) {
 	mp := NewMultipooler(nil)
 	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	mp.RegisterFlags(flags)
 	require.Equal(t, "managed", mp.managementMode.Get())
 	require.NoError(t, flags.Parse([]string{"--management-mode=unmanaged", "--backend-host=db.example.com"}))
-	require.ErrorContains(t, mp.Init(context.Background()), "unmanaged serving is not implemented yet")
+	require.Equal(t, "unmanaged", mp.managementMode.Get())
 }

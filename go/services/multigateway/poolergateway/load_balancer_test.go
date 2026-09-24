@@ -16,6 +16,7 @@ package poolergateway
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -1031,4 +1032,32 @@ func TestLoadBalancer_DrainingPrimaryStaysRoutable(t *testing.T) {
 	require.NoError(t, err,
 		"a cleanly-draining primary must stay routable so MTF01 buffering can engage")
 	assert.Equal(t, poolerID(primary), got.ID())
+}
+
+func TestUnmanagedStandaloneMembership(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		external, managed int
+		wantErr           bool
+	}{
+		{"sole external", 1, 0, false}, {"mixed", 1, 1, true}, {"duplicate external", 2, 0, true}, {"managed failover", 0, 2, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lb := newTestLB(t, "zone1")
+			for i := 0; i < tc.external+tc.managed; i++ {
+				p := createTestMultipooler(fmt.Sprintf("p%d", i), "zone1", constants.DefaultTableGroup, "0", clustermetadatapb.PoolerType_PRIMARY)
+				if i < tc.external {
+					p.ManagementMode = clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
+				}
+				addPoolerForTest(t, lb, p)
+			}
+			target := protoutil.NewTarget(constants.DefaultPostgresDatabase, constants.DefaultTableGroup, "0", query.Mode_MODE_WRITABLE)
+			err := lb.validateStandaloneUnmanaged(target)
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }

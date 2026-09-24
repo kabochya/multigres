@@ -576,6 +576,8 @@ func (pm *MultipoolerManager) openLocked(ctx context.Context, targetServingStatu
 
 	if !pm.IsUnmanaged() {
 		pm.startPostgresMonitorPollerLocked()
+	} else {
+		pm.startExternalMonitorLocked()
 	}
 
 	pm.isOpen = true

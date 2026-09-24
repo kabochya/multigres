@@ -714,3 +714,21 @@ func TestDeriveRoutingRole(t *testing.T) {
 		})
 	}
 }
+
+func TestUnmanagedRoutingWithoutConsensus(t *testing.T) {
+	initial := newTestMultipooler(clustermetadatapb.PoolerType_REPLICA, clustermetadatapb.PoolerServingStatus_DISABLED)
+	initial.ManagementMode = clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
+	record := newRecordFromProto(initial)
+	comp := &testComponent{}
+	ssm := NewStateManager(newTestLogger(), record, func() *clustermetadatapb.ConsensusStatus { return nil }, comp)
+	for _, mode := range []pgmode.Mode{pgmode.Unknown, pgmode.Primary, pgmode.InRecovery, pgmode.Unknown, pgmode.Primary} {
+		status := clustermetadatapb.PoolerServingStatus_DISABLED
+		if mode == pgmode.Primary {
+			status = clustermetadatapb.PoolerServingStatus_SERVING
+		}
+		require.NoError(t, ssm.Mutate(newActionLockedCtx(t), func(s *servingStateMutation) { s.PostgresMode = mode; s.ServingStatus = status }))
+		require.Equal(t, mode == pgmode.Primary, comp.lastRole.Writable())
+		require.Nil(t, record.RoutingState().GetRule())
+		require.Equal(t, status, record.ServingStatus())
+	}
+}
