@@ -35,6 +35,9 @@ type consensusService struct {
 func RegisterConsensusServices(senv *servenv.ServEnv, grpc *servenv.GrpcServer) {
 	// Register ourselves to be invoked when the manager starts
 	manager.RegisterPoolerManagerServices = append(manager.RegisterPoolerManagerServices, func(pm *manager.MultipoolerManager) {
+		if pm.IsUnmanaged() {
+			return
+		}
 		if grpc.CheckServiceMap("consensus", senv) {
 			srv := &consensusService{
 				manager: pm,

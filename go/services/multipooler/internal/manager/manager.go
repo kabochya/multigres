@@ -306,7 +306,7 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 	}
 	// Fail before constructing management clients for external or unknown modes.
 	switch multipooler.GetManagementMode() {
-	case clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNSPECIFIED, clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_MANAGED:
+	case clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNSPECIFIED, clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_MANAGED, clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED:
 	default:
 		return nil, mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "management mode is not supported by this manager")
 	}
@@ -338,7 +338,7 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 
 	// Create pgctld gRPC client
 	var pgctldClient pgctldpb.PgCtldClient
-	if config.PgctldAddr != "" {
+	if multipooler.GetManagementMode() != clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED && config.PgctldAddr != "" {
 		conn, err := grpccommon.NewClient(config.PgctldAddr, grpccommon.WithDialOptions(grpc.WithTransportCredentials(insecure.NewCredentials())))
 		if err != nil {
 			logger.ErrorContext(ctx, "failed to create pgctld gRPC client", "error", err, "addr", config.PgctldAddr)
@@ -422,7 +422,9 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 	// the consensus-enabled path; a missing file means term=0 (new node), and
 	// only an actual read/parse error fails the constructor. A test may inject a
 	// pre-built ConsensusManager (e.g. with a fake rule store) instead.
-	if ov.consensusMgr != nil {
+	if multipooler.GetManagementMode() == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED {
+		// External databases do not participate in consensus.
+	} else if ov.consensusMgr != nil {
 		pm.consensusMgr = ov.consensusMgr
 	} else {
 		pm.consensusMgr, err = consensus.NewConsensusManager(consensus.Deps{
@@ -446,12 +448,20 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 
 	// Create the serving state manager with the query service and health streamer as initial components.
 	// The ReplTracker is registered later when heartbeat is started.
-	pm.stateManager = NewStateManager(logger, pm.record, pm.consensusMgr.CachedConsensusStatus, pm.qsc, pm.healthStreamer)
+	status := func() *clustermetadatapb.ConsensusStatus { return nil }
+	if pm.consensusMgr != nil {
+		status = pm.consensusMgr.CachedConsensusStatus
+	}
+	pm.stateManager = NewStateManager(logger, pm.record, status, pm.qsc, pm.healthStreamer)
 	if stateAwareConnPoolMgr, ok := connPoolMgr.(StateAware); ok {
 		if err := registerAndSyncStateAware(ctx, pm.stateManager, stateAwareConnPoolMgr); err != nil {
 			cancel()
 			return nil, fmt.Errorf("failed to sync connection pool metrics state: %w", err)
 		}
+	}
+
+	if pm.IsUnmanaged() {
+		return pm, nil
 	}
 
 	// Construct the pgBackRest engine. It owns all pgBackRest interaction and its
@@ -538,6 +548,10 @@ func (pm *MultipoolerManager) adminExecArgs(ctx context.Context, sql string, arg
 // ctx must carry an action lock. The state transition publishes through
 // pm.record.Mutate, which asserts the lock.
 func (pm *MultipoolerManager) Open(ctx context.Context) {
+	if pm.IsUnmanaged() {
+		pm.openLocked(ctx, clustermetadatapb.PoolerServingStatus_DISABLED)
+		return
+	}
 	pm.openLocked(ctx, clustermetadatapb.PoolerServingStatus_SERVING)
 }
 
@@ -560,7 +574,9 @@ func (pm *MultipoolerManager) openLocked(ctx context.Context, targetServingStatu
 	pm.openConnectionsLocked()
 	pm.logger.InfoContext(pm.ctx, "MultipoolerManager opened database connection") //nolint:sloglint // message intentionally starts with an operation name or proper noun
 
-	pm.startPostgresMonitorPollerLocked()
+	if !pm.IsUnmanaged() {
+		pm.startPostgresMonitorPollerLocked()
+	}
 
 	pm.isOpen = true
 
@@ -817,6 +833,10 @@ func (pm *MultipoolerManager) openConnectionsLocked() {
 		pm.logger.Info("connection pool manager opened")
 	}
 
+	if pm.IsUnmanaged() {
+		return
+	}
+
 	// Create sidecar schema and start heartbeat before opening query service controller
 	// This ensures the schema exists before queries can be served
 	if pm.replTracker == nil {
@@ -931,6 +951,9 @@ func (pm *MultipoolerManager) shardKey() *clustermetadatapb.ShardKey {
 // BackupStatusSnapshot returns a consistent snapshot of the backup-health
 // tracker for the status page.
 func (pm *MultipoolerManager) BackupStatusSnapshot() backupengine.Snapshot {
+	if pm.backup == nil {
+		return backupengine.Snapshot{}
+	}
 	return pm.backup.Health().Snapshot()
 }
 
@@ -1709,7 +1732,14 @@ func (pm *MultipoolerManager) Start(senv *servenv.ServEnv) {
 	})
 
 	// Start loading multipooler record from topology asynchronously
-	go pm.loadShardConfigFromGlobalTopo()
+	if pm.IsUnmanaged() {
+		pm.mu.Lock()
+		pm.topoLoaded = true
+		pm.mu.Unlock()
+		pm.checkAndSetReady()
+	} else {
+		go pm.loadShardConfigFromGlobalTopo()
+	}
 
 	senv.OnRunE(func() error {
 		// Block until manager is ready or error before registering gRPC services
@@ -1755,6 +1785,9 @@ func (pm *MultipoolerManager) Start(senv *servenv.ServEnv) {
 // double wire-up cannot leak a duplicate poller goroutine (openLocked owns
 // relaunch from here on).
 func (pm *MultipoolerManager) StartBackupHealth() {
+	if pm.IsUnmanaged() {
+		return
+	}
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	if pm.backupHealthEnabled {
@@ -1901,4 +1934,9 @@ func (pm *MultipoolerManager) WaitUntilReady(ctx context.Context) error {
 			return fmt.Errorf("unexpected state after ready signal: %s", state)
 		}
 	}
+}
+
+// IsUnmanaged reports immutable backend ownership, independent of serving role.
+func (pm *MultipoolerManager) IsUnmanaged() bool {
+	return pm.record.desired.Load().GetManagementMode() == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
 }
