@@ -116,6 +116,14 @@ func (pm *MultipoolerManager) GracefulShutdown(ctx context.Context) {
 			"error", err)
 	}
 
+	if pm.IsUnmanaged() {
+		pm.closeLocked(lockCtx, "unmanaged shutdown")
+		if pm.shutdownCancel != nil {
+			pm.shutdownCancel()
+		}
+		return
+	}
+
 	// Advertise cohort ineligibility before stopping postgres just in case
 	// stopping is slow. We're favoring speed of failover rather than grace.
 	if err := pm.consensusMgr.SetCohortEligibility(lockCtx, clustermetadatapb.CohortEligibilitySignal_COHORT_ELIGIBILITY_SIGNAL_INELIGIBLE); err != nil {

@@ -448,7 +448,10 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 		return fmt.Errorf("resolve admin password: %w", err)
 	}
 
-	cipherKeys, err := mp.resolvePgBackRestCipherKeys()
+	var cipherKeys backup.CipherKeys
+	if mode != clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED {
+		cipherKeys, err = mp.resolvePgBackRestCipherKeys()
+	}
 	if err != nil {
 		return fmt.Errorf("resolve backup cipher keys: %w", err)
 	}
@@ -533,7 +536,7 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 		PgctldAddr:                     mp.pgctldAddr.Get(),
 		ConsensusEnabled:               mp.grpcServer.CheckServiceMap("consensus", mp.senv),
 		ConnPoolConfig:                 mp.connPoolConfig,
-		BackendVpidTrackingEnabled:     mp.backendVpidTrackingEnabled.Get(),
+		BackendVpidTrackingEnabled:     mp.backendVpidTrackingEnabled.Get() && mode != clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED,
 		SlotBasedReplicationEnabled:    mp.slotBasedReplicationEnabled.Get,
 		// pgBackRest TLS certificate paths for connecting to primary's pgBackRest server
 		PgBackRestCertFile: adopted.pgBackRestCertFile,
