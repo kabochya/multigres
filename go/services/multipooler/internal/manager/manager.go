@@ -770,6 +770,12 @@ func (pm *MultipoolerManager) openConnectionsLocked() {
 		if connConfig.SocketFile == "" {
 			connConfig.Host = pm.record.Hostname()
 		}
+		if pm.config.ExternalHost != "" {
+			connConfig.Host = pm.config.ExternalHost
+			if pm.config.ExternalDatabase != "" {
+				connConfig.Database = pm.config.ExternalDatabase
+			}
+		}
 		// Apply libpq-style TLS settings on the multipooler → postgres leg.
 		// TLS is honored only on TCP dials; Unix-socket connections always run
 		// plaintext, matching libpq behavior.
