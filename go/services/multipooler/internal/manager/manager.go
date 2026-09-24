@@ -304,6 +304,12 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 	if multipooler == nil {
 		return nil, mterrors.New(mtrpcpb.Code_INVALID_ARGUMENT, "multipooler is required")
 	}
+	// Fail before constructing management clients for external or unknown modes.
+	switch multipooler.GetManagementMode() {
+	case clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNSPECIFIED, clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_MANAGED:
+	default:
+		return nil, mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "management mode is not supported by this manager")
+	}
 	if multipooler.GetShardKey().GetTableGroup() == "" {
 		return nil, mterrors.New(mtrpcpb.Code_INVALID_ARGUMENT, "TableGroup is required")
 	}
