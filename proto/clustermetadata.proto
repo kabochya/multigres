@@ -231,6 +231,16 @@ message Multipooler {
   // that publish path (pooler_record.go), not a constraint of the
   // RoutingState message itself — see RoutingState below.
   RoutingState routing_state = 13;
+
+  // Ownership of the backend. Unspecified preserves legacy managed behavior.
+  PoolerManagementMode management_mode = 14;
+}
+
+// PoolerManagementMode is independent of query-serving role and readiness.
+enum PoolerManagementMode {
+  POOLER_MANAGEMENT_MODE_UNSPECIFIED = 0;
+  POOLER_MANAGEMENT_MODE_MANAGED = 1;
+  POOLER_MANAGEMENT_MODE_UNMANAGED = 2;
 }
 
 // Multigateway represents metadata about a running multigateway component instance in the cluster.
