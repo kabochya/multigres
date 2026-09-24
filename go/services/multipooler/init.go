@@ -392,11 +392,6 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 	if _, err := resolveExternalBackend(mode, mp.backendHost.Get(), mp.backendDatabase.Get(), mp.database.Get(), mp.pgPort.Get(), mp.socketFilePath.Get(), mp.poolerDir.Get()); err != nil {
 		return err
 	}
-	// Keep the mode fail-closed until the serving-only lifecycle is implemented.
-	if mode == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED {
-		return errors.New("unmanaged serving is not implemented yet")
-	}
-
 	startCtx, span := telemetry.Tracer().Start(startCtx, "Init")
 	defer span.End()
 

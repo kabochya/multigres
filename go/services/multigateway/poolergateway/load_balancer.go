@@ -355,6 +355,9 @@ func (lb *loadBalancer) getConnection(target *query.Target) (*poolerConnection, 
 	}
 
 	sk := target.GetShardKey()
+	if err := lb.validateStandaloneUnmanaged(target); err != nil {
+		return nil, err
+	}
 	key := shardKeyOf(sk)
 
 	// Look up the shard summary under lb.mu, release it, then read the elected
@@ -806,4 +809,28 @@ func (lb *loadBalancer) onPoolerGone(p *clustermetadatapb.Multipooler) {
 	lb.mu.Lock()
 	delete(lb.shards, key)
 	lb.mu.Unlock()
+}
+
+// M1 supports one unmanaged endpoint and no coexisting managed poolers per shard.
+// Check membership, not just serving claims: an unavailable source must not
+// cause routing to fall through to an independently writable managed target.
+func (lb *loadBalancer) validateStandaloneUnmanaged(target *query.Target) error {
+	if lb.cache == nil {
+		return nil
+	}
+	unmanaged, total := 0, 0
+	for _, entry := range lb.cache.All() {
+		conn := entry.Rider
+		if conn == nil || !matchesShardTarget(conn, target) {
+			continue
+		}
+		total++
+		if conn.PoolerInfo().GetManagementMode() == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED {
+			unmanaged++
+		}
+	}
+	if unmanaged > 0 && total != 1 {
+		return mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "unmanaged prototype requires a sole pooler per shard; coexistence is not supported")
+	}
+	return nil
 }
