@@ -304,7 +304,7 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 	if multipooler == nil {
 		return nil, mterrors.New(mtrpcpb.Code_INVALID_ARGUMENT, "multipooler is required")
 	}
-	// Fail before constructing management clients for external or unknown modes.
+	// Reject unknown ownership modes before constructing any clients.
 	switch multipooler.GetManagementMode() {
 	case clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNSPECIFIED, clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_MANAGED, clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED:
 	default:
