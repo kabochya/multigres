@@ -49,6 +49,6 @@ func TestUnmanagedStartupIsGated(t *testing.T) {
 	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	mp.RegisterFlags(flags)
 	require.Equal(t, "managed", mp.managementMode.Get())
-	require.NoError(t, flags.Parse([]string{"--management-mode=unmanaged"}))
+	require.NoError(t, flags.Parse([]string{"--management-mode=unmanaged", "--backend-host=db.example.com"}))
 	require.ErrorContains(t, mp.Init(context.Background()), "unmanaged serving is not implemented yet")
 }
