@@ -727,3 +727,17 @@ func (c *Config) NewManager(logger *slog.Logger) *Manager {
 	mgr.setLifecycle(lifecycleClosed) // Manager is closed until Open() is called
 	return mgr
 }
+
+// SetSourceCredentials is a startup-only catalog bootstrap hook. Passwords stay
+// in the existing memory cache rather than becoming a flag/config value.
+func (c *Config) SetSourceCredentials(user, password, mode, rootCert, negotiation string) error {
+	c.pgUser.Set(user)
+	c.pgPasswordCached = password
+	c.pgPasswordSource = pwSourceFile
+	c.pgSSLMode.Set(mode)
+	c.pgSSLRootCert.Set(rootCert)
+	if negotiation != "" {
+		c.pgSSLNegotiation.Set(negotiation)
+	}
+	return nil
+}

@@ -45,6 +45,8 @@ type HealthState struct {
 	// ReplicationLagNs is the current replication lag in nanoseconds,
 	// measured via heartbeat timestamps. Zero on the primary or when unknown.
 	ReplicationLagNs int64
+	BackendReady     bool
+	BackendIdentity  *clustermetadatapb.ExternalBackendIdentity
 }
 
 // HealthProvider provides health information for the pooler.

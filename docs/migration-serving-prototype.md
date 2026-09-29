@@ -24,3 +24,13 @@ Secret-bearing reads and administrative writes require a cluster key proof over 
 The operator companion uses `Shard.spec.unmanagedPoolers` with cells and resources. Source credentials remain in the target catalog. MANAGED mode retains source poolers; completion is required for decommissioning.
 
 This is a draft stack. Subsequent steps implement the declared transition RPCs; until then they return UNIMPLEMENTED. Production migrations and replication controllers are outside this prototype.
+
+## Startup and fencing
+
+Standalone unmanaged configuration continues using M1 endpoint flags. Migration-enabled sources instead use `--source-connection=<catalog-name>` and `--migration-key-file`. They register a unique disabled topology identity before retrieving credentials from the managed authority. Use the existing `multipooler-grpc-*` client TLS flags for protected control connections. A source starts closed until an authoritative mode read succeeds. Readiness reports the physical PostgreSQL system identifier and database separately from admission.
+
+Fence and Unfence have empty requests. The source discovers the managed authority and reads its current mode on each call. Unfence requires UNMANAGED and the matching connection name. Fence requires FENCED or MANAGED. A local mutex covers remote reads and gate application, including initial authorization. An earlier delayed Unfence therefore cannot apply after a later Fence has acknowledged. Health probes never write the admission flag.
+
+Fence immediately blocks new requests and waits for handler admission permits plus regular and reserved backend connections. Existing reservations can finish on their original backend. COPY holds a permit for its full handler lifetime. Timeout/cancellation returns an error and leaves the gate closed; it does not force rollback and claim completion. Serving control and replication internals use their existing narrow admin paths.
+
+A running source retains its accepted state through target outages. Restarting sources need target access to retrieve their catalog configuration and authorization. Cold gateways are addressed by the gateway PR. Managed poolers with the key start their application gates closed and read durable mode before opening.
