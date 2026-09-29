@@ -44,6 +44,7 @@ import (
 	"github.com/multigres/multigres/go/services/multipooler/internal/poolerserver"
 	"github.com/multigres/multigres/go/services/multipooler/internal/pubsub"
 	"github.com/multigres/multigres/go/services/multipooler/internal/replicationstats"
+	"github.com/multigres/multigres/go/services/multipooler/internal/servingcontrol"
 	"github.com/multigres/multigres/go/tools/ctxutil"
 	"github.com/multigres/multigres/go/tools/grpccommon"
 	"github.com/multigres/multigres/go/tools/retry"
@@ -241,6 +242,8 @@ type MultipoolerManager struct {
 	// healthStreamer streams health state to subscribers.
 	// Owns all health-related state and provides typed update methods.
 	healthStreamer *healthStreamer
+	servingMu      sync.Mutex
+	servingCatalog *servingcontrol.Catalog
 }
 
 // promotionState tracks which parts of the promotion are complete

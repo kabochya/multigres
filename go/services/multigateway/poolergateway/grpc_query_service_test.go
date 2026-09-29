@@ -1257,3 +1257,19 @@ func TestStreamReplication_UnexpectedFirstMessage(t *testing.T) {
 	require.Contains(t, err.Error(), "expected Ready")
 	require.True(t, mockStream.closeSendCalled.Load(), "CloseSend should be called on error")
 }
+
+func (m *mockMultipoolerServiceClient) ServingControl(context.Context, *multipoolerservice.ServingControlRequest, ...grpc.CallOption) (*multipoolerservice.ServingControlResponse, error) {
+	return nil, errors.New("unexpected ServingControl call")
+}
+
+func (m *mockMultipoolerServiceClient) GetSourceConnection(context.Context, *multipoolerservice.GetSourceConnectionRequest, ...grpc.CallOption) (*multipoolerservice.GetSourceConnectionResponse, error) {
+	return nil, errors.New("unexpected GetSourceConnection call")
+}
+
+func (m *mockMultipoolerServiceClient) GetMigrationMode(context.Context, *multipoolerservice.GetMigrationModeRequest, ...grpc.CallOption) (*multipoolerservice.GetMigrationModeResponse, error) {
+	return nil, errors.New("unexpected GetMigrationMode call")
+}
+
+func (m *mockMultipoolerServiceClient) RefreshRouting(context.Context, *multipoolerservice.RefreshRoutingRequest, ...grpc.CallOption) (*multipoolerservice.RefreshRoutingResponse, error) {
+	return nil, errors.New("unexpected RefreshRouting call")
+}

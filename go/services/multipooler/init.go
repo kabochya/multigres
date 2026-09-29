@@ -82,6 +82,8 @@ type Multipooler struct {
 	backendHost         viperutil.Value[string]
 	backendDatabase     viperutil.Value[string]
 	managementMode      viperutil.Value[string]
+	migrationKeyFile    viperutil.Value[string]
+	sourceConnection    viperutil.Value[string]
 	pgctldAddr          viperutil.Value[string]
 	cell                viperutil.Value[string]
 	database            viperutil.Value[string]
@@ -150,10 +152,12 @@ func (mp *Multipooler) CobraPreRunE(cmd *cobra.Command) error {
 func NewMultipooler(telemetry *telemetry.Telemetry) *Multipooler {
 	reg := viperutil.NewRegistry()
 	mp := &Multipooler{
-		backendHost:     viperutil.Configure(reg, "backend-host", viperutil.Options[string]{FlagName: "backend-host", Dynamic: false}),
-		backendDatabase: viperutil.Configure(reg, "backend-database", viperutil.Options[string]{FlagName: "backend-database", Dynamic: false}),
-		managementMode:  viperutil.Configure(reg, "management-mode", viperutil.Options[string]{Default: "managed", FlagName: "management-mode", Dynamic: false}),
-		reg:             reg,
+		migrationKeyFile: viperutil.Configure(reg, "migration-key-file", viperutil.Options[string]{FlagName: "migration-key-file"}),
+		sourceConnection: viperutil.Configure(reg, "source-connection", viperutil.Options[string]{FlagName: "source-connection"}),
+		backendHost:      viperutil.Configure(reg, "backend-host", viperutil.Options[string]{FlagName: "backend-host", Dynamic: false}),
+		backendDatabase:  viperutil.Configure(reg, "backend-database", viperutil.Options[string]{FlagName: "backend-database", Dynamic: false}),
+		managementMode:   viperutil.Configure(reg, "management-mode", viperutil.Options[string]{Default: "managed", FlagName: "management-mode", Dynamic: false}),
+		reg:              reg,
 		pgctldAddr: viperutil.Configure(reg, "pgctld-addr", viperutil.Options[string]{
 			Default:  "localhost:15200",
 			FlagName: "pgctld-addr",
@@ -286,6 +290,8 @@ func NewMultipooler(telemetry *telemetry.Telemetry) *Multipooler {
 
 // RegisterFlags registers all multipooler flags with the given FlagSet
 func (mp *Multipooler) RegisterFlags(flags *pflag.FlagSet) {
+	flags.String("migration-key-file", "", "File containing the 32-byte cluster migration encryption key")
+	flags.String("source-connection", "", "Catalog source connection for a migration-enabled unmanaged pooler")
 	flags.String("backend-host", "", "External PostgreSQL hostname for unmanaged mode; --pg-port selects its port")
 	flags.String("backend-database", "", "External database name for unmanaged mode; defaults to --database")
 	flags.String("management-mode", mp.managementMode.Default(), "Backend ownership: managed or unmanaged")
@@ -313,6 +319,8 @@ func (mp *Multipooler) RegisterFlags(flags *pflag.FlagSet) {
 
 	viperutil.BindFlags(
 		flags,
+		mp.migrationKeyFile,
+		mp.sourceConnection,
 		mp.backendHost,
 		mp.backendDatabase,
 		mp.managementMode,
@@ -519,8 +527,20 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 		return err
 	}
 
+	var migrationKey []byte
+	if mp.migrationKeyFile.Get() != "" {
+		migrationKey, err = os.ReadFile(mp.migrationKeyFile.Get())
+		if err != nil {
+			return fmt.Errorf("read migration key: %w", err)
+		}
+		if len(migrationKey) != 32 {
+			return errors.New("migration key must contain exactly 32 bytes")
+		}
+	}
 	logger.InfoContext(startCtx, "initializing MultipoolerManager")
 	poolerManager, err := manager.NewMultipoolerManager(logger, multipooler, &manager.Config{
+		MigrationKey:                   migrationKey,
+		SourceConnection:               mp.sourceConnection.Get(),
 		SocketFilePath:                 socketFilePath,
 		ExternalHost:                   mp.backendHost.Get(),
 		ExternalDatabase:               mp.backendDatabase.Get(),

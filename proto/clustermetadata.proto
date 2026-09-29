@@ -234,6 +234,12 @@ message Multipooler {
 
   // Ownership of the backend. Unspecified preserves legacy managed behavior.
   PoolerManagementMode management_mode = 14;
+
+  // Catalog connection name for migration-enabled unmanaged poolers. No secrets.
+  string source_connection = 15;
+
+  // Managed leader observation for operators; the PostgreSQL catalog is authoritative.
+  MigrationRouting migration_routing = 16;
 }
 
 // PoolerManagementMode is independent of query-serving role and readiness.
@@ -936,4 +942,29 @@ enum CohortEligibilitySignal {
 // freshness of the surrounding health snapshot.
 message CohortEligibilityStatus {
   CohortEligibilitySignal signal = 1;
+}
+
+// MigrationMode selects the application destination independently of pooler ownership.
+enum MigrationMode {
+  MIGRATION_MODE_UNSET = 0;
+  MIGRATION_MODE_UNMANAGED = 1;
+  MIGRATION_MODE_FENCED = 2;
+  MIGRATION_MODE_MANAGED = 3;
+}
+
+// MigrationRouting is a complete leader-owned snapshot. Absence means unknown.
+message MigrationRouting {
+  MigrationMode mode = 1;
+  string source_connection = 2;
+  ExternalBackendIdentity source_identity = 3;
+  bool migration_completed = 4;
+  bool resume_source_allowed = 5;
+  // Administrative operation identity, not a migration-mode version.
+  string active_request_id = 6;
+}
+
+// ExternalBackendIdentity identifies the physical source behind an unmanaged endpoint.
+message ExternalBackendIdentity {
+  string system_identifier = 1;
+  string database = 2;
 }
