@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -175,4 +176,30 @@ func TestManagedObservationDoesNotWaitUnderLifecycleLock(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("monitor observation blocked on enforcement")
 	}
+}
+
+type failFirstAdmissionGate struct {
+	*fakeApplicationGate
+	fail atomic.Bool
+}
+
+func (g *failFirstAdmissionGate) AdmissionGeneration() uint64 { return 0 }
+func (g *failFirstAdmissionGate) ApplyAdmissionGeneration(_ uint64, allow bool) bool {
+	if g.fail.Swap(false) {
+		return false
+	}
+	g.open.Store(allow)
+	return true
+}
+
+func TestRecoveryRetriesAdmissionAfterConfirmedPublication(t *testing.T) {
+	pm, _, base := newTransitionManager(t)
+	gate := &failFirstAdmissionGate{fakeApplicationGate: base}
+	gate.fail.Store(true)
+	gate.open.Store(false)
+	pm.qsc = gate
+	require.Error(t, pm.recoverServingControl(t.Context()))
+	require.False(t, gate.open.Load())
+	require.NoError(t, pm.recoverServingControl(t.Context()))
+	require.True(t, gate.open.Load(), "publication cache must not hide unfinished local enforcement")
 }

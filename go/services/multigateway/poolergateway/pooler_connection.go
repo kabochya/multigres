@@ -55,7 +55,10 @@ type poolerHealth struct {
 	// RoutingState is the pooler's self-reported routing/HA role plus the rule
 	// that qualifies it. role == PRIMARY marks the writable routing primary; the
 	// rule number is used as the failover-overlap tiebreaker among primaries.
-	RoutingState *clustermetadatapb.RoutingState
+	RoutingState     *clustermetadatapb.RoutingState
+	MigrationRouting *clustermetadatapb.MigrationRouting
+	BackendReady     bool
+	BackendIdentity  *clustermetadatapb.ExternalBackendIdentity
 
 	// ReplicationLagNs is the replication lag in nanoseconds reported by the pooler.
 	// Zero on the primary or when not yet measured.
@@ -89,6 +92,7 @@ func (h *poolerHealth) simpleCopy() *poolerHealth {
 		PoolerID:         h.PoolerID,
 		ServingStatus:    h.ServingStatus,
 		RoutingState:     h.RoutingState,
+		MigrationRouting: h.MigrationRouting, BackendReady: h.BackendReady, BackendIdentity: h.BackendIdentity,
 		ReplicationLagNs: h.ReplicationLagNs,
 		LastError:        h.LastError,
 		LastResponse:     h.LastResponse,
@@ -397,6 +401,10 @@ func (pc *poolerConnection) streamHealth(
 		}
 		stalenessTimer.Reset(stalenessTimeout)
 
+		// A canceled stream must not publish a late response after replacement.
+		if streamCtx.Err() != nil {
+			return streamCtx.Err()
+		}
 		// Process the health response.
 		pc.processHealthResponse(response)
 	}
@@ -412,6 +420,7 @@ func (pc *poolerConnection) processHealthResponse(response *multipoolerservice.S
 		PoolerID:         response.PoolerId,
 		ServingStatus:    response.ServingStatus,
 		RoutingState:     response.RoutingState,
+		MigrationRouting: response.MigrationRouting, BackendReady: response.BackendReady, BackendIdentity: response.BackendIdentity,
 		ReplicationLagNs: response.ReplicationLagNs,
 		LastError:        nil,
 		LastResponse:     time.Now(),

@@ -186,6 +186,9 @@ func (pm *MultipoolerManager) recoverServingControl(ctx context.Context) error {
 		pm.servingMu.Unlock()
 		if err == nil {
 			_, err = pm.enforceRouting(ctx, state)
+			if err != nil {
+				pm.invalidateServingPublication()
+			}
 		}
 		pm.servingMu.Lock()
 		if err == nil {
