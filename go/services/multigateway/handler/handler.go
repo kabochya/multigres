@@ -296,7 +296,7 @@ func standardConformingStringsFor(st *MultigatewayConnectionState) bool {
 // Routes the query to an appropriate multipooler instance and streams results back.
 func (h *MultigatewayHandler) HandleQuery(ctx context.Context, conn *server.Conn, queryStr string, callback func(ctx context.Context, result *sqltypes.Result) error) error {
 	queryStart := time.Now()
-	h.logger.DebugContext(ctx, "handling query", "query", queryStr, "user", conn.User(), "database", conn.Database())
+	h.logger.DebugContext(ctx, "handling query", "query", parser.RedactServingSQL(queryStr), "user", conn.User(), "database", conn.Database())
 	st := h.getConnectionState(conn)
 	ctx = h.callerContext(ctx, conn, st)
 
@@ -489,12 +489,15 @@ func (h *MultigatewayHandler) getConnectionState(conn *server.Conn) *Multigatewa
 // HandleParse processes a Parse message ('P') for the extended query protocol.
 // Creates and stores a prepared statement.
 func (h *MultigatewayHandler) HandleParse(ctx context.Context, conn *server.Conn, name, queryStr string, paramTypes []uint32) error {
-	h.logger.DebugContext(ctx, "parse", "name", name, "query", queryStr, "param_count", len(paramTypes))
+	h.logger.DebugContext(ctx, "parse", "name", name, "query", parser.RedactServingSQL(queryStr), "param_count", len(paramTypes))
 
 	// Fold gateway-provided functions (e.g. multigres.version()) into constants
 	// before storing or eagerly parsing the prepared statement, so the folded
 	// text is what Describe and Execute later forward to the backend. A no-op for
 	// queries that don't use one.
+	if parser.RedactServingSQL(queryStr) != queryStr && conn.TxnStatus() != protocol.TxnStatusIdle {
+		return errors.New("serving control requires an idle session")
+	}
 	queryStr = foldGatewayFunctions(queryStr)
 
 	// PostgreSQL sends Parse/PREPARE to the backend immediately inside an explicit

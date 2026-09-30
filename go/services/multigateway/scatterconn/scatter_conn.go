@@ -32,6 +32,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/multigres/multigres/go/common/constants"
 	"github.com/multigres/multigres/go/common/mterrors"
 	pgClient "github.com/multigres/multigres/go/common/pgprotocol/client"
 	"github.com/multigres/multigres/go/common/pgprotocol/protocol"
@@ -1553,3 +1554,17 @@ func (sc *ScatterConn) endAction(ctx context.Context, span trace.Span, start tim
 // Ensure ScatterConn implements engine.IExecute interface.
 // This will be checked at compile time.
 var _ engine.IExecute = (*ScatterConn)(nil)
+
+// ServingControl is intentionally outside IExecute's application operations.
+func (sc *ScatterConn) ServingControl(ctx context.Context, conn *server.Conn, request *multipoolerpb.ServingControlRequest) (*multipoolerpb.ServingControlResponse, error) {
+	control, ok := sc.gateway.(interface {
+		ServingControl(context.Context, *querypb.Target, *multipoolerpb.ServingControlRequest) (*multipoolerpb.ServingControlResponse, error)
+	})
+	if !ok {
+		return nil, errors.New("serving control unavailable")
+	}
+	request.Database = conn.Database()
+	request.Username = conn.User()
+	request.UserAuth = userAuthFrom(conn)
+	return control.ServingControl(ctx, &querypb.Target{ShardKey: &clustermetadatapb.ShardKey{Database: conn.Database(), TableGroup: "default", Shard: constants.DefaultShard}, Mode: querypb.Mode_MODE_WRITABLE}, request)
+}

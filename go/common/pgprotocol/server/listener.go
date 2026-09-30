@@ -33,6 +33,7 @@ import (
 
 // Listener listens for incoming PostgreSQL client connections.
 type Listener struct {
+	connectionIDs *ConnectionIDPool
 	// listener is the network listener.
 	listener net.Listener
 
@@ -161,6 +162,8 @@ type CredentialProvider interface {
 
 // ListenerConfig holds configuration for the listener.
 type ListenerConfig struct {
+	// ConnectionIDs optionally shares the PID namespace across listeners.
+	ConnectionIDs *ConnectionIDPool
 	// Address to listen on (e.g., "localhost:5432").
 	Address string
 
@@ -266,6 +269,7 @@ func NewListener(config ListenerConfig) (*Listener, error) {
 		authMetrics:           authMetrics,
 		logger:                logger,
 		gatewayID:             config.GatewayID,
+		connectionIDs:         config.ConnectionIDs,
 		conns:                 make(map[uint32]*Conn),
 		ctx:                   ctx,
 		cancel:                cancel,
@@ -360,6 +364,9 @@ func (l *Listener) handleConnection(conn *Conn) {
 		if err := conn.Close(); err != nil {
 			conn.logger.Error("error closing connection", "error", err)
 		}
+		if l.connectionIDs != nil {
+			l.connectionIDs.release(conn.ConnectionID())
+		}
 	}()
 
 	conn.logger.Debug("connection accepted", "remote_addr", conn.RemoteAddr())
@@ -406,6 +413,10 @@ func (l *Listener) Close() error {
 // It encodes the gateway prefix into the upper bits and skips PIDs that
 // are already in use or have a zero local ID (PID 0 is reserved in PostgreSQL).
 func (l *Listener) assignConnectionID() (uint32, bool) {
+	if l.connectionIDs != nil {
+		local, ok := l.connectionIDs.allocate()
+		return pid.EncodePID(l.gatewayID, local), ok
+	}
 	l.connsMu.Lock()
 	defer l.connsMu.Unlock()
 

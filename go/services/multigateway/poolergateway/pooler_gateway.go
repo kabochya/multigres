@@ -120,11 +120,14 @@ type PoolerGateway struct {
 	cache *poolerwatch.PoolerCache[*poolerConnection]
 
 	// logger for debugging
-	logger *slog.Logger
+	logger       *slog.Logger
+	servingToken string
 }
 
 // PoolerGatewayOpts groups the construction parameters for a PoolerGateway.
 type PoolerGatewayOpts struct {
+	// ServingToken is a cluster control bearer proof, never the encryption key.
+	ServingToken string
 	// Ctx is the service-lifetime context; cancelled on shutdown. Required.
 	Ctx context.Context
 	// Source is the topology source for the pooler cache. Required.
@@ -224,6 +227,7 @@ func NewPoolerGateway(opts PoolerGatewayOpts) *PoolerGateway {
 		buffer:       opts.Buffer,
 		cache:        cache,
 		logger:       opts.Logger,
+		servingToken: opts.ServingToken,
 	}
 }
 
@@ -645,6 +649,19 @@ func (pg *PoolerGateway) GetAuthCredentials(ctx context.Context, req *multipoole
 			Shard:      constants.DefaultShard,
 		},
 		Mode: query.Mode_MODE_WRITABLE,
+	}
+
+	if req.ServingAdmin {
+		conn, err := pg.loadBalancer.managedControlConnection(target)
+		if err != nil {
+			return nil, err
+		}
+		protected, err := pg.servingContext(ctx)
+		if err != nil {
+			return nil, err
+		}
+		result, err := conn.ServiceClient().GetAuthCredentials(protected, req)
+		return result, mterrors.FromGRPC(err)
 	}
 
 	var resp *multipoolerpb.GetAuthCredentialsResponse

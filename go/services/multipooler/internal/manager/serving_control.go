@@ -21,6 +21,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"net"
+	"time"
+
+	"github.com/multigres/multigres/go/common/pgprotocol/scram"
+	"github.com/multigres/multigres/go/pb/query"
 
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
@@ -147,16 +151,49 @@ func (pm *MultipoolerManager) GetSourceConnection(ctx context.Context, r *rpc.Ge
 	return &rpc.GetSourceConnectionResponse{Connection: v, Routing: state}, err
 }
 
-func (pm *MultipoolerManager) authorizeServingAdmin(ctx context.Context, username string) error {
-	r, err := pm.qsc.InternalQueryService().QueryAdminArgs(ctx, `SELECT rolsuper AND rolcanlogin FROM pg_roles WHERE rolname=$1`, username)
+// AuthorizeServingAdminLookup permits credential lookup while the application
+// gate is closed, only over protected control transport for a target superuser.
+func (pm *MultipoolerManager) AuthorizeServingAdminLookup(ctx context.Context, database, username string) error {
+	if err := pm.authorizeControl(ctx); err != nil {
+		return err
+	}
+	if err := pm.servingAuthority(database); err != nil {
+		return err
+	}
+	_, err := pm.targetAdminVerifier(ctx, username)
+	return err
+}
+
+func (pm *MultipoolerManager) targetAdminVerifier(ctx context.Context, username string) (string, error) {
+	result, err := pm.qsc.InternalQueryService().QueryAdminArgs(ctx, `SELECT rolpassword FROM pg_authid WHERE rolname=$1 AND rolsuper AND rolcanlogin AND (rolvaliduntil IS NULL OR rolvaliduntil > now())`, username)
+	if err != nil {
+		return "", errors.New("target administrator lookup unavailable")
+	}
+	var verifier string
+	if executor.ScanSingleRow(result, &verifier) != nil || verifier == "" {
+		return "", mterrors.New(code.Code_PERMISSION_DENIED, "target administrator required")
+	}
+	return verifier, nil
+}
+
+func (pm *MultipoolerManager) authorizeServingAdmin(ctx context.Context, username string, auth *query.UserAuth) error {
+	verifier, err := pm.targetAdminVerifier(ctx, username)
 	if err != nil {
 		return err
 	}
-	var allowed bool
-	if err = executor.ScanSingleRow(r, &allowed); err != nil || !allowed {
-		return mterrors.New(code.Code_PERMISSION_DENIED, "target administrator required")
+	hash, err := scram.ParseScramSHA256Hash(verifier)
+	if err != nil || !matchesTargetVerifier(hash, auth) {
+		return mterrors.New(code.Code_PERMISSION_DENIED, "target administrator credentials required")
 	}
 	return nil
+}
+
+func matchesTargetVerifier(hash *scram.ScramHash, auth *query.UserAuth) bool {
+	if hash == nil || len(auth.GetClientKey()) != sha256.Size || len(auth.GetServerKey()) != sha256.Size {
+		return false
+	}
+	stored := sha256.Sum256(auth.GetClientKey())
+	return subtle.ConstantTimeCompare(stored[:], hash.StoredKey) == 1 && subtle.ConstantTimeCompare(auth.GetServerKey(), hash.ServerKey) == 1
 }
 
 func (pm *MultipoolerManager) ServingControl(ctx context.Context, r *rpc.ServingControlRequest) (*rpc.ServingControlResponse, error) {
@@ -166,9 +203,27 @@ func (pm *MultipoolerManager) ServingControl(ctx context.Context, r *rpc.Serving
 	if err := pm.servingAuthority(r.Database); err != nil {
 		return nil, err
 	}
-	if err := pm.authorizeServingAdmin(ctx, r.Username); err != nil {
+	if err := pm.authorizeServingAdmin(ctx, r.Username, r.UserAuth); err != nil {
 		return nil, err
 	}
+	if r.Operation == "status" || r.Operation == "wait" {
+		var status *servingcontrol.OperationStatus
+		var err error
+		if r.Operation == "wait" {
+			status, err = pm.WaitServingOperation(ctx, r.RequestId)
+		} else {
+			status, err = pm.GetServingOperation(ctx, r.RequestId)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return &rpc.ServingControlResponse{OperationStatus: &rpc.ServingOperationStatus{RequestId: status.RequestID, Operation: status.Operation, Completed: status.Completed, Active: status.Active}}, nil
+	}
+	// Only operation/request identifiers enter the audit record.
+	started := time.Now()
+	defer func() {
+		pm.logger.InfoContext(ctx, "serving control request", "operation", r.Operation, "request_id", r.RequestId, "duration", time.Since(started))
+	}()
 	if r.Operation != "show" {
 		if !pm.transitionMu.TryLock() {
 			return nil, mterrors.New(code.Code_FAILED_PRECONDITION, "serving transition already running; recover by request ID")

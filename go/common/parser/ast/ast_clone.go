@@ -506,6 +506,8 @@ func CloneNode(in Node) Node {
 		return CloneRefOfSecLabelStmt(in)
 	case *SelectStmt:
 		return CloneRefOfSelectStmt(in)
+	case *ServingControlStmt:
+		return CloneRefOfServingControlStmt(in)
 	case *SetOperationStmt:
 		return CloneRefOfSetOperationStmt(in)
 	case *SetToDefault:
@@ -3865,6 +3867,18 @@ func CloneRefOfSelectStmt(n *SelectStmt) *SelectStmt {
 	return &out
 }
 
+// CloneRefOfServingControlStmt creates a deep clone of the input.
+func CloneRefOfServingControlStmt(n *ServingControlStmt) *ServingControlStmt {
+	if n == nil {
+		return nil
+	}
+	out := *n
+	out.BaseNode = CloneBaseNode(n.BaseNode)
+	out.OptionNames = CloneSliceOfString(n.OptionNames)
+	out.OptionValues = CloneSliceOfString(n.OptionValues)
+	return &out
+}
+
 // CloneRefOfSetOperationStmt creates a deep clone of the input.
 func CloneRefOfSetOperationStmt(n *SetOperationStmt) *SetOperationStmt {
 	if n == nil {
@@ -4217,6 +4231,8 @@ func CloneStmt(in Stmt) Stmt {
 		return CloneRefOfSecLabelStmt(in)
 	case *SelectStmt:
 		return CloneRefOfSelectStmt(in)
+	case *ServingControlStmt:
+		return CloneRefOfServingControlStmt(in)
 	case *SinglePartitionSpec:
 		return CloneRefOfSinglePartitionSpec(in)
 	case *SortBy:
