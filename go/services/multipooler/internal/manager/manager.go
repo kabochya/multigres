@@ -243,10 +243,15 @@ type MultipoolerManager struct {
 	// Owns all health-related state and provides typed update methods.
 	healthStreamer   *healthStreamer
 	servingMu        sync.Mutex
+	transitionMu     sync.Mutex
+	servingPeers     servingPeerOperations
 	sourceAdmission  atomic.Bool
 	sourceModeLoaded atomic.Bool
 	sourceModeReader func(context.Context) (*clustermetadatapb.MigrationRouting, error)
 	servingCatalog   *servingcontrol.Catalog
+	servingEvents    servingEvents
+	operationMu      sync.Mutex
+	operationChanged chan struct{}
 }
 
 // promotionState tracks which parts of the promotion are complete
@@ -424,8 +429,8 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 	}
 
 	if len(config.MigrationKey) > 0 {
-		if gate, ok := pm.qsc.(interface{ SetApplicationAdmission(bool) }); ok {
-			gate.SetApplicationAdmission(false)
+		if gate, ok := pm.qsc.(interface{ EnableMigrationAdmission(bool) }); ok {
+			gate.EnableMigrationAdmission(!pm.IsUnmanaged())
 		}
 	}
 
@@ -465,6 +470,9 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 		status = pm.consensusMgr.CachedConsensusStatus
 	}
 	pm.stateManager = NewStateManager(logger, pm.record, status, pm.qsc, pm.healthStreamer)
+	if len(config.MigrationKey) > 0 {
+		pm.stateManager.Register(migrationLifecycle{pm})
+	}
 	if stateAwareConnPoolMgr, ok := connPoolMgr.(StateAware); ok {
 		if err := registerAndSyncStateAware(ctx, pm.stateManager, stateAwareConnPoolMgr); err != nil {
 			cancel()
@@ -582,6 +590,9 @@ func (pm *MultipoolerManager) openLocked(ctx context.Context, targetServingStatu
 	}
 
 	pm.ctx, pm.cancel = context.WithCancel(context.TODO())
+	if len(pm.config.MigrationKey) > 0 {
+		pm.resetServingAuthority()
+	}
 
 	pm.openConnectionsLocked()
 	pm.logger.InfoContext(pm.ctx, "MultipoolerManager opened database connection") //nolint:sloglint // message intentionally starts with an operation name or proper noun

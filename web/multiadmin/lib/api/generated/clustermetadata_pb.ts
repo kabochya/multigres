@@ -2675,6 +2675,28 @@ export class MigrationRouting extends Message<MigrationRouting> {
    */
   sourceConnection = "";
 
+  /**
+   * @generated from field: clustermetadata.ExternalBackendIdentity source_identity = 3;
+   */
+  sourceIdentity?: ExternalBackendIdentity;
+
+  /**
+   * @generated from field: bool migration_completed = 4;
+   */
+  migrationCompleted = false;
+
+  /**
+   * @generated from field: bool resume_source_allowed = 5;
+   */
+  resumeSourceAllowed = false;
+
+  /**
+   * Administrative operation identity, not a migration-mode version.
+   *
+   * @generated from field: string active_request_id = 6;
+   */
+  activeRequestId = "";
+
   constructor(data?: PartialMessage<MigrationRouting>) {
     super();
     proto3.util.initPartial(data, this);
@@ -2685,6 +2707,10 @@ export class MigrationRouting extends Message<MigrationRouting> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "mode", kind: "enum", T: proto3.getEnumType(MigrationMode) },
     { no: 2, name: "source_connection", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "source_identity", kind: "message", T: ExternalBackendIdentity },
+    { no: 4, name: "migration_completed", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 5, name: "resume_source_allowed", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 6, name: "active_request_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): MigrationRouting {

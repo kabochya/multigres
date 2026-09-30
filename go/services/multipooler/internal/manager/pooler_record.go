@@ -53,7 +53,8 @@ type MutablePoolerRecordState struct {
 	// ONLY when this pooler is the writable PRIMARY; replicas — and a consensus
 	// leader not yet writable — leave it nil. Published into etcd so multigateway
 	// can bootstrap write routing on discovery.
-	RoutingState *clustermetadatapb.RoutingState
+	RoutingState     *clustermetadatapb.RoutingState
+	MigrationRouting *clustermetadatapb.MigrationRouting
 }
 
 // poolerTopoStore is the subset of topoclient.Store used by poolerRecord.
@@ -210,15 +211,17 @@ func (r *poolerRecord) Mutate(ctx context.Context, fn func(*MutablePoolerRecordS
 func (r *poolerRecord) applyMutation(fn func(*MutablePoolerRecordState)) {
 	current := r.desired.Load()
 	state := MutablePoolerRecordState{
-		ServingStatus:   current.ServingStatus,
-		LifecycleStatus: current.LifecycleStatus,
-		RoutingState:    current.RoutingState,
+		ServingStatus:    current.ServingStatus,
+		LifecycleStatus:  current.LifecycleStatus,
+		RoutingState:     current.RoutingState,
+		MigrationRouting: current.MigrationRouting,
 	}
 	fn(&state)
 	next := proto.Clone(current).(*clustermetadatapb.Multipooler)
 	next.ServingStatus = state.ServingStatus
 	next.LifecycleStatus = state.LifecycleStatus
 	next.RoutingState = state.RoutingState
+	next.MigrationRouting = state.MigrationRouting
 	r.desired.Store(next)
 }
 
@@ -265,6 +268,9 @@ func poolerTypeFromRoutingRole(role clustermetadatapb.RoutingRole) clustermetada
 func routingStateForPublish(m *clustermetadatapb.Multipooler) *clustermetadatapb.Multipooler {
 	out := proto.Clone(m).(*clustermetadatapb.Multipooler)
 	poolerType := typeForState(out.LifecycleStatus, out.RoutingState)
+	if out.ManagementMode == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED || out.GetRoutingState().GetRole() != clustermetadatapb.RoutingRole_ROUTING_ROLE_PRIMARY {
+		out.MigrationRouting = nil
+	}
 	//nolint:staticcheck // SA1019: PoolerType is a publish-only projection for the external operator; removal pending its migration to routing_state.
 	out.Type = poolerType
 	switch poolerType {
@@ -275,6 +281,7 @@ func routingStateForPublish(m *clustermetadatapb.Multipooler) *clustermetadatapb
 		out.RoutingState = &clustermetadatapb.RoutingState{Role: clustermetadatapb.RoutingRole_ROUTING_ROLE_REPLICA}
 	default:
 		out.RoutingState = nil
+		out.MigrationRouting = nil
 	}
 	return out
 }

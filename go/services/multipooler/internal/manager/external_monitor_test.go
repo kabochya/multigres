@@ -64,3 +64,35 @@ func TestExternalReadinessFailsClosedAndRecovers(t *testing.T) {
 	}
 	require.Equal(t, 6, qs.AdminQueryCount())
 }
+
+func TestHealthyReadinessCannotRunLifecycleDrainUnderFence(t *testing.T) {
+	initial := newTestMultipooler(pb.PoolerType_REPLICA, pb.PoolerServingStatus_DISABLED)
+	initial.ShardKey = &pb.ShardKey{Database: "db", TableGroup: "default", Shard: "0-inf"}
+	initial.ManagementMode = pb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
+	pm, err := NewMultipoolerManager(newTestLogger(), initial, &Config{SourceConnection: "source", ExternalDatabase: "db"})
+	require.NoError(t, err)
+	defer pm.cancel()
+	defer pm.shutdownCancel()
+	qs := mock.NewQueryService()
+	pm.qsc = &mockPoolerController{queryService: qs}
+	probe := func() {
+		qs.AddQueryPatternOnce("^"+regexp.QuoteMeta(externalReadinessQuery)+"$", mock.MakeQueryResult([]string{"writable"}, [][]any{{true}}))
+		qs.AddQueryPatternOnce("^"+regexp.QuoteMeta("SELECT system_identifier::text, current_database() FROM pg_control_system()")+"$", mock.MakeQueryResult([]string{"system_identifier", "database"}, [][]any{{"123", "db"}}))
+		pm.checkExternalReadiness(t.Context())
+	}
+	probe()
+	require.Equal(t, pb.PoolerServingStatus_DISABLED, pm.record.ServingStatus(), "cold startup stays closed")
+	pm.sourceAdmission.Store(true)
+	probe()
+	require.Equal(t, pb.PoolerServingStatus_SERVING, pm.record.ServingStatus())
+	pm.sourceAdmission.Store(false) // Fence closed the application gate; drain is pending.
+	probe()
+	require.Equal(t, pb.PoolerServingStatus_SERVING, pm.record.ServingStatus(), "monitor must not trigger lifecycle force-close before fence drains")
+	lockCtx, err := pm.actionLock.Acquire(t.Context(), "completed fence")
+	require.NoError(t, err)
+	require.NoError(t, pm.stateManager.Mutate(lockCtx, func(s *servingStateMutation) { s.ServingStatus = pb.PoolerServingStatus_DISABLED }))
+	pm.actionLock.Release(lockCtx)
+	probe()
+	require.Equal(t, pb.PoolerServingStatus_DISABLED, pm.record.ServingStatus(), "completed fence remains disabled")
+	require.NoError(t, qs.ExpectationsWereMet())
+}

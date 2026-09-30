@@ -70,7 +70,7 @@ type recordingTx struct {
 func (tx *recordingTx) Query(_ context.Context, q string) (*sqltypes.Result, error) {
 	tx.calls = append(tx.calls, q)
 	if strings.Contains(q, "FOR UPDATE") {
-		return qmock.MakeQueryResult([]string{"mode", "source_connection"}, [][]any{{int32(0), ""}}), nil
+		return qmock.MakeQueryResult([]string{"mode", "source_connection", "sysid", "database", "completed", "resume", "request"}, [][]any{{int32(0), "", "", "", false, false, ""}}), nil
 	}
 	return &sqltypes.Result{}, nil
 }
@@ -116,7 +116,7 @@ func TestRoutingJournalTransaction(t *testing.T) {
 				return nil
 			})
 			require.Contains(t, tx.calls, "SET LOCAL synchronous_commit = 'remote_apply'")
-			require.Contains(t, tx.calls, "SELECT mode, source_connection FROM multigres.migration_routing WHERE singleton FOR UPDATE")
+			require.Contains(t, tx.calls, "SELECT mode, source_connection, source_system_identifier, source_database, migration_completed, resume_source_allowed, active_request_id FROM multigres.migration_routing WHERE singleton FOR UPDATE")
 			require.Equal(t, "ROLLBACK", tx.calls[len(tx.calls)-1])
 			if failure {
 				require.Error(t, err)
@@ -125,7 +125,7 @@ func TestRoutingJournalTransaction(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 				require.Contains(t, tx.calls, "COMMIT")
-				require.Equal(t, []any{int32(2), "source"}, tx.args)
+				require.Equal(t, []any{int32(2), "source", "", "", false, false, ""}, tx.args)
 			}
 		})
 	}

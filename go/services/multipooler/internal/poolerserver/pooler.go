@@ -54,10 +54,12 @@ type QueryPoolerServer struct {
 	tableGroup string
 	shard      string
 
-	mu                 sync.Mutex
-	applicationBlocked bool
-	activeRequests     int
-	requestsChanged    chan struct{}
+	mu                    sync.Mutex
+	applicationBlocked    bool
+	closeGateOnRoleChange bool
+	admissionGeneration   uint64
+	activeRequests        int
+	requestsChanged       chan struct{}
 	// routingRole is the write-safety role from OnStateChange: PRIMARY iff this
 	// pooler is the writable leader (out of recovery AND the active — committed,
 	// non-revoked, highest-known — consensus leader). Both leader-bound query
@@ -189,6 +191,13 @@ func (s *QueryPoolerServer) ReplicationMetrics() *replication.Metrics {
 // follows. On timeout, errors are acceptable — that is what the grace period
 // bounds.
 func (s *QueryPoolerServer) OnStateChange(ctx context.Context, state servingstate.State) error {
+	s.mu.Lock()
+	if s.closeGateOnRoleChange && s.routingRole != state.Routing.Role {
+		s.applicationBlocked = true
+		s.admissionGeneration++
+	}
+	s.mu.Unlock()
+
 	routingRole := state.Routing.Role
 	servingStatus := state.ServingStatus
 	if s.executor != nil {

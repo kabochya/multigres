@@ -288,13 +288,27 @@ func (s *poolerService) GetAuthCredentials(ctx context.Context, req *multipooler
 		return nil, status.Error(codes.Unavailable, "pooler not initialized")
 	}
 
-	// Admin credential fetch (not a query). Treat like a new reservation so it is
-	// buffered during any drain — the same behavior as before the two-stage drain.
-	release, admissionErr := s.pooler.BeginRequest(nil, poolerserver.RequestNewReservation)
-	if admissionErr != nil {
-		return nil, mterrors.ToGRPC(admissionErr)
+	if req.ServingAdmin {
+		provider, err := s.pooler.ServingControlProvider()
+		if err != nil {
+			return nil, mterrors.ToGRPC(err)
+		}
+		authorizer, ok := provider.(interface {
+			AuthorizeServingAdminLookup(context.Context, string, string) error
+		})
+		if !ok {
+			return nil, status.Error(codes.Unimplemented, "serving administrator lookup unavailable")
+		}
+		if err := authorizer.AuthorizeServingAdminLookup(ctx, req.Database, req.Username); err != nil {
+			return nil, mterrors.ToGRPC(err)
+		}
+	} else {
+		release, admissionErr := s.pooler.BeginRequest(nil, poolerserver.RequestNewReservation)
+		if admissionErr != nil {
+			return nil, mterrors.ToGRPC(admissionErr)
+		}
+		defer release()
 	}
-	defer release()
 
 	poolManager := s.pooler.PoolManager()
 	if poolManager == nil {
@@ -1066,6 +1080,7 @@ func healthStateToProto(state *poolerserver.HealthState) *multipoolerpb.StreamPo
 		ServingStatus: state.ServingStatus,
 		RoutingState:  state.RoutingState,
 		BackendReady:  state.BackendReady, BackendIdentity: state.BackendIdentity,
+		MigrationRouting: state.MigrationRouting,
 	}
 
 	if state.RecommendedStalenessTimeout > 0 {

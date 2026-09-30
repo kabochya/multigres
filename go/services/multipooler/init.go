@@ -451,6 +451,7 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 		}
 	}
 
+	var sourceConfiguration *rpc.SourceConnection
 	controlTransport, err := mp.controlConnConfig.TransportCredentials(logger)
 	if err != nil {
 		return err
@@ -475,6 +476,7 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 				return readErr
 			}
 			v := reply.GetConnection()
+			sourceConfiguration = v
 			if v == nil {
 				return errors.New("source connection unavailable")
 			}
@@ -594,6 +596,7 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 		MigrationKey:                   migrationKey,
 		ControlTransport:               controlTransport,
 		SourceConnection:               mp.sourceConnection.Get(),
+		SourceConfiguration:            sourceConfiguration,
 		SocketFilePath:                 socketFilePath,
 		ExternalHost:                   mp.backendHost.Get(),
 		ExternalDatabase:               mp.backendDatabase.Get(),
