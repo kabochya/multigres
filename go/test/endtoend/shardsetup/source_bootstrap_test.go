@@ -17,6 +17,7 @@ package shardsetup
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/multigres/multigres/go/common/migrationcontrol"
 	"github.com/multigres/multigres/go/common/pgprotocol/scram"
@@ -126,6 +128,49 @@ func TestCatalogSourceBootstrap(t *testing.T) {
 		require.NoError(t, err)
 	}
 	sourcePolicy := &pb.GatewayRoutingPolicy{Destination: pb.RoutingDestination_ROUTING_DESTINATION_SOURCE, SourceConnection: "source", SourceConfigurationBinding: created.ConfigurationBinding, SourceIdentity: &pb.ExternalBackendIdentity{SystemIdentifier: sysid, Database: "postgres"}}
+	// Test-fixture writer only: the production migration controller supplies
+	// journal/ownership/predecessor checks before composing this projection write.
+	// This primitive test has one pinned authority and does not claim cutover.
+	sourceIntent := &pb.AdmissionIntent{Owner: "primitive-test", IntentId: "enable-closed", Subject: pb.AdmissionSubject_ADMISSION_SUBJECT_SOURCE, Permission: pb.AdmissionPermission_ADMISSION_PERMISSION_CLOSED, SourceConnection: "source", SourceConfigurationBinding: created.ConfigurationBinding, SourceIdentity: sourcePolicy.SourceIdentity}
+	targetIntent := &pb.AdmissionIntent{Owner: "primitive-test", IntentId: "enable-closed", Subject: pb.AdmissionSubject_ADMISSION_SUBJECT_TARGET, Permission: pb.AdmissionPermission_ADMISSION_PERMISSION_CLOSED}
+	writeIntent := func(intent *pb.AdmissionIntent) {
+		data, err := proto.Marshal(intent)
+		require.NoError(t, err)
+		tx, err := target.Begin(ctx)
+		require.NoError(t, err)
+		_, err = tx.Exec(ctx, "SET LOCAL synchronous_commit='remote_apply'")
+		require.NoError(t, err)
+		_, err = tx.Exec(ctx, "UPDATE multigres.admission_scopes SET controlled=TRUE,owner=$2 WHERE database=$1", "postgres", intent.Owner)
+		require.NoError(t, err)
+		_, err = tx.Exec(ctx, "INSERT INTO multigres.admission_intents(database,subject,intent) VALUES($1,$2,$3) ON CONFLICT(database,subject) DO UPDATE SET intent=EXCLUDED.intent", "postgres", int32(intent.Subject), hex.EncodeToString(data))
+		require.NoError(t, err)
+		require.NoError(t, tx.Commit(ctx))
+	}
+	refreshIntent := func(intent *pb.AdmissionIntent) {
+		list, err := migrationcontrol.Poolers(ctx, s.TopoServer, "postgres")
+		require.NoError(t, err)
+		for _, pooler := range list {
+			unmanaged := pooler.ManagementMode == pb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
+			if unmanaged != (intent.Subject == pb.AdmissionSubject_ADMISSION_SUBJECT_SOURCE) {
+				continue
+			}
+			c, err := migrationcontrol.Dial(pooler, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			require.NoError(t, err)
+			reply, err := rpc.NewMultipoolerServiceClient(c).RefreshAdmission(protected, &rpc.RefreshAdmissionRequest{Database: "postgres", Expected: intent})
+			_ = c.Close()
+			require.NoError(t, err)
+			require.True(t, proto.Equal(reply.Observed, intent))
+			require.True(t, proto.Equal(reply.ProcessId, pooler.Id))
+		}
+	}
+	writeIntent(sourceIntent)
+	writeIntent(targetIntent)
+	refreshIntent(sourceIntent)
+	refreshIntent(targetIntent)
+	sourceIntent.IntentId = "source-open"
+	sourceIntent.Permission = pb.AdmissionPermission_ADMISSION_PERMISSION_OPEN
+	writeIntent(sourceIntent)
+	refreshIntent(sourceIntent)
 	setPolicy(sourcePolicy)
 	var app *pgx.Conn
 	require.Eventually(t, func() bool {
@@ -144,10 +189,26 @@ func TestCatalogSourceBootstrap(t *testing.T) {
 	setPolicy(&pb.GatewayRoutingPolicy{Destination: pb.RoutingDestination_ROUTING_DESTINATION_BLOCKED})
 	require.Eventually(t, func() bool { _, err := app.Exec(ctx, "SELECT value FROM routing_marker"); return err != nil }, 10*time.Second, 100*time.Millisecond)
 	// Routing BLOCKED is not completed fencing: source application admission is
-	// still open in M1. The independent admission milestone supplies that barrier.
+	// still open until its separate admission intent is enforced.
 	require.NoError(t, source.Ping(ctx))
+	sourceIntent.IntentId = "source-close"
+	sourceIntent.Permission = pb.AdmissionPermission_ADMISSION_PERMISSION_CLOSED
+	writeIntent(sourceIntent)
+	refreshIntent(sourceIntent)
+	targetIntent.IntentId = "target-open"
+	targetIntent.Permission = pb.AdmissionPermission_ADMISSION_PERMISSION_OPEN
+	writeIntent(targetIntent)
+	refreshIntent(targetIntent)
 	setPolicy(&pb.GatewayRoutingPolicy{Destination: pb.RoutingDestination_ROUTING_DESTINATION_MANAGED})
 	marker("managed")
+	targetIntent.IntentId = "target-close"
+	targetIntent.Permission = pb.AdmissionPermission_ADMISSION_PERMISSION_CLOSED
+	writeIntent(targetIntent)
+	refreshIntent(targetIntent)
+	sourceIntent.IntentId = "source-reopen"
+	sourceIntent.Permission = pb.AdmissionPermission_ADMISSION_PERMISSION_OPEN
+	writeIntent(sourceIntent)
+	refreshIntent(sourceIntent)
 	setPolicy(sourcePolicy)
 	marker("source")
 

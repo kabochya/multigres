@@ -49,6 +49,12 @@ const (
 // reflection-formatted method names, remove the leading slash and convert the remaining slash to a
 // period.
 const (
+	// MultipoolerServiceRefreshAdmissionProcedure is the fully-qualified name of the
+	// MultipoolerService's RefreshAdmission RPC.
+	MultipoolerServiceRefreshAdmissionProcedure = "/multipoolerservice.MultipoolerService/RefreshAdmission"
+	// MultipoolerServiceReadAdmissionIntentProcedure is the fully-qualified name of the
+	// MultipoolerService's ReadAdmissionIntent RPC.
+	MultipoolerServiceReadAdmissionIntentProcedure = "/multipoolerservice.MultipoolerService/ReadAdmissionIntent"
 	// MultipoolerServiceSetRoutingPolicyProcedure is the fully-qualified name of the
 	// MultipoolerService's SetRoutingPolicy RPC.
 	MultipoolerServiceSetRoutingPolicyProcedure = "/multipoolerservice.MultipoolerService/SetRoutingPolicy"
@@ -104,6 +110,9 @@ const (
 
 // MultipoolerServiceClient is a client for the multipoolerservice.MultipoolerService service.
 type MultipoolerServiceClient interface {
+	// Controller expectations correlate with metadata; they cannot override it.
+	RefreshAdmission(context.Context, *connect.Request[multipoolerservice.RefreshAdmissionRequest]) (*connect.Response[multipoolerservice.RefreshAdmissionResponse], error)
+	ReadAdmissionIntent(context.Context, *connect.Request[multipoolerservice.ReadAdmissionIntentRequest]) (*connect.Response[multipoolerservice.ReadAdmissionIntentResponse], error)
 	// Write routing metadata only; this never fences, drains or advances migration.
 	SetRoutingPolicy(context.Context, *connect.Request[multipoolerservice.SetRoutingPolicyRequest]) (*connect.Response[multipoolerservice.SetRoutingPolicyResponse], error)
 	GetRoutingPolicy(context.Context, *connect.Request[multipoolerservice.GetRoutingPolicyRequest]) (*connect.Response[multipoolerservice.GetRoutingPolicyResponse], error)
@@ -190,6 +199,18 @@ func NewMultipoolerServiceClient(httpClient connect.HTTPClient, baseURL string, 
 	baseURL = strings.TrimRight(baseURL, "/")
 	multipoolerServiceMethods := multipoolerservice.File_multipoolerservice_proto.Services().ByName("MultipoolerService").Methods()
 	return &multipoolerServiceClient{
+		refreshAdmission: connect.NewClient[multipoolerservice.RefreshAdmissionRequest, multipoolerservice.RefreshAdmissionResponse](
+			httpClient,
+			baseURL+MultipoolerServiceRefreshAdmissionProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("RefreshAdmission")),
+			connect.WithClientOptions(opts...),
+		),
+		readAdmissionIntent: connect.NewClient[multipoolerservice.ReadAdmissionIntentRequest, multipoolerservice.ReadAdmissionIntentResponse](
+			httpClient,
+			baseURL+MultipoolerServiceReadAdmissionIntentProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("ReadAdmissionIntent")),
+			connect.WithClientOptions(opts...),
+		),
 		setRoutingPolicy: connect.NewClient[multipoolerservice.SetRoutingPolicyRequest, multipoolerservice.SetRoutingPolicyResponse](
 			httpClient,
 			baseURL+MultipoolerServiceSetRoutingPolicyProcedure,
@@ -297,6 +318,8 @@ func NewMultipoolerServiceClient(httpClient connect.HTTPClient, baseURL string, 
 
 // multipoolerServiceClient implements MultipoolerServiceClient.
 type multipoolerServiceClient struct {
+	refreshAdmission          *connect.Client[multipoolerservice.RefreshAdmissionRequest, multipoolerservice.RefreshAdmissionResponse]
+	readAdmissionIntent       *connect.Client[multipoolerservice.ReadAdmissionIntentRequest, multipoolerservice.ReadAdmissionIntentResponse]
 	setRoutingPolicy          *connect.Client[multipoolerservice.SetRoutingPolicyRequest, multipoolerservice.SetRoutingPolicyResponse]
 	getRoutingPolicy          *connect.Client[multipoolerservice.GetRoutingPolicyRequest, multipoolerservice.GetRoutingPolicyResponse]
 	createSourceConnection    *connect.Client[multipoolerservice.CreateSourceConnectionRequest, multipoolerservice.CreateSourceConnectionResponse]
@@ -314,6 +337,16 @@ type multipoolerServiceClient struct {
 	releaseReservedConnection *connect.Client[multipoolerservice.ReleaseReservedConnectionRequest, multipoolerservice.ReleaseReservedConnectionResponse]
 	streamPoolerHealth        *connect.Client[multipoolerservice.StreamPoolerHealthRequest, multipoolerservice.StreamPoolerHealthResponse]
 	notificationStream        *connect.Client[multipoolerservice.NotificationStreamRequest, multipoolerservice.NotificationStreamResponse]
+}
+
+// RefreshAdmission calls multipoolerservice.MultipoolerService.RefreshAdmission.
+func (c *multipoolerServiceClient) RefreshAdmission(ctx context.Context, req *connect.Request[multipoolerservice.RefreshAdmissionRequest]) (*connect.Response[multipoolerservice.RefreshAdmissionResponse], error) {
+	return c.refreshAdmission.CallUnary(ctx, req)
+}
+
+// ReadAdmissionIntent calls multipoolerservice.MultipoolerService.ReadAdmissionIntent.
+func (c *multipoolerServiceClient) ReadAdmissionIntent(ctx context.Context, req *connect.Request[multipoolerservice.ReadAdmissionIntentRequest]) (*connect.Response[multipoolerservice.ReadAdmissionIntentResponse], error) {
+	return c.readAdmissionIntent.CallUnary(ctx, req)
 }
 
 // SetRoutingPolicy calls multipoolerservice.MultipoolerService.SetRoutingPolicy.
@@ -404,6 +437,9 @@ func (c *multipoolerServiceClient) NotificationStream(ctx context.Context) *conn
 // MultipoolerServiceHandler is an implementation of the multipoolerservice.MultipoolerService
 // service.
 type MultipoolerServiceHandler interface {
+	// Controller expectations correlate with metadata; they cannot override it.
+	RefreshAdmission(context.Context, *connect.Request[multipoolerservice.RefreshAdmissionRequest]) (*connect.Response[multipoolerservice.RefreshAdmissionResponse], error)
+	ReadAdmissionIntent(context.Context, *connect.Request[multipoolerservice.ReadAdmissionIntentRequest]) (*connect.Response[multipoolerservice.ReadAdmissionIntentResponse], error)
 	// Write routing metadata only; this never fences, drains or advances migration.
 	SetRoutingPolicy(context.Context, *connect.Request[multipoolerservice.SetRoutingPolicyRequest]) (*connect.Response[multipoolerservice.SetRoutingPolicyResponse], error)
 	GetRoutingPolicy(context.Context, *connect.Request[multipoolerservice.GetRoutingPolicyRequest]) (*connect.Response[multipoolerservice.GetRoutingPolicyResponse], error)
@@ -486,6 +522,18 @@ type MultipoolerServiceHandler interface {
 // and JSON codecs. They also support gzip compression.
 func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
 	multipoolerServiceMethods := multipoolerservice.File_multipoolerservice_proto.Services().ByName("MultipoolerService").Methods()
+	multipoolerServiceRefreshAdmissionHandler := connect.NewUnaryHandler(
+		MultipoolerServiceRefreshAdmissionProcedure,
+		svc.RefreshAdmission,
+		connect.WithSchema(multipoolerServiceMethods.ByName("RefreshAdmission")),
+		connect.WithHandlerOptions(opts...),
+	)
+	multipoolerServiceReadAdmissionIntentHandler := connect.NewUnaryHandler(
+		MultipoolerServiceReadAdmissionIntentProcedure,
+		svc.ReadAdmissionIntent,
+		connect.WithSchema(multipoolerServiceMethods.ByName("ReadAdmissionIntent")),
+		connect.WithHandlerOptions(opts...),
+	)
 	multipoolerServiceSetRoutingPolicyHandler := connect.NewUnaryHandler(
 		MultipoolerServiceSetRoutingPolicyProcedure,
 		svc.SetRoutingPolicy,
@@ -590,6 +638,10 @@ func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect
 	)
 	return "/multipoolerservice.MultipoolerService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case MultipoolerServiceRefreshAdmissionProcedure:
+			multipoolerServiceRefreshAdmissionHandler.ServeHTTP(w, r)
+		case MultipoolerServiceReadAdmissionIntentProcedure:
+			multipoolerServiceReadAdmissionIntentHandler.ServeHTTP(w, r)
 		case MultipoolerServiceSetRoutingPolicyProcedure:
 			multipoolerServiceSetRoutingPolicyHandler.ServeHTTP(w, r)
 		case MultipoolerServiceGetRoutingPolicyProcedure:
@@ -632,6 +684,14 @@ func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect
 
 // UnimplementedMultipoolerServiceHandler returns CodeUnimplemented from all methods.
 type UnimplementedMultipoolerServiceHandler struct{}
+
+func (UnimplementedMultipoolerServiceHandler) RefreshAdmission(context.Context, *connect.Request[multipoolerservice.RefreshAdmissionRequest]) (*connect.Response[multipoolerservice.RefreshAdmissionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.RefreshAdmission is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) ReadAdmissionIntent(context.Context, *connect.Request[multipoolerservice.ReadAdmissionIntentRequest]) (*connect.Response[multipoolerservice.ReadAdmissionIntentResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.ReadAdmissionIntent is not implemented"))
+}
 
 func (UnimplementedMultipoolerServiceHandler) SetRoutingPolicy(context.Context, *connect.Request[multipoolerservice.SetRoutingPolicyRequest]) (*connect.Response[multipoolerservice.SetRoutingPolicyResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.SetRoutingPolicy is not implemented"))

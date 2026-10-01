@@ -425,6 +425,60 @@ proto3.util.setEnumType(RoutingDestination, "clustermetadata.RoutingDestination"
 ]);
 
 /**
+ * Normalized controller-owned admission, independent of gateway destination.
+ *
+ * @generated from enum clustermetadata.AdmissionSubject
+ */
+export enum AdmissionSubject {
+  /**
+   * @generated from enum value: ADMISSION_SUBJECT_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: ADMISSION_SUBJECT_TARGET = 1;
+   */
+  TARGET = 1,
+
+  /**
+   * @generated from enum value: ADMISSION_SUBJECT_SOURCE = 2;
+   */
+  SOURCE = 2,
+}
+// Retrieve enum metadata with: proto3.getEnumType(AdmissionSubject)
+proto3.util.setEnumType(AdmissionSubject, "clustermetadata.AdmissionSubject", [
+  { no: 0, name: "ADMISSION_SUBJECT_UNSPECIFIED" },
+  { no: 1, name: "ADMISSION_SUBJECT_TARGET" },
+  { no: 2, name: "ADMISSION_SUBJECT_SOURCE" },
+]);
+
+/**
+ * @generated from enum clustermetadata.AdmissionPermission
+ */
+export enum AdmissionPermission {
+  /**
+   * @generated from enum value: ADMISSION_PERMISSION_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: ADMISSION_PERMISSION_CLOSED = 1;
+   */
+  CLOSED = 1,
+
+  /**
+   * @generated from enum value: ADMISSION_PERMISSION_OPEN = 2;
+   */
+  OPEN = 2,
+}
+// Retrieve enum metadata with: proto3.getEnumType(AdmissionPermission)
+proto3.util.setEnumType(AdmissionPermission, "clustermetadata.AdmissionPermission", [
+  { no: 0, name: "ADMISSION_PERMISSION_UNSPECIFIED" },
+  { no: 1, name: "ADMISSION_PERMISSION_CLOSED" },
+  { no: 2, name: "ADMISSION_PERMISSION_OPEN" },
+]);
+
+/**
  * TopoConfig defines the connection parameters for a topology service.
  * It specifies the type of topology backend, where it's hosted, and the
  * logical root path within that backend.
@@ -2760,6 +2814,136 @@ export class GatewayRoutingPolicy extends Message<GatewayRoutingPolicy> {
 
   static equals(a: GatewayRoutingPolicy | PlainMessage<GatewayRoutingPolicy> | undefined, b: GatewayRoutingPolicy | PlainMessage<GatewayRoutingPolicy> | undefined): boolean {
     return proto3.util.equals(GatewayRoutingPolicy, a, b);
+  }
+}
+
+/**
+ * @generated from message clustermetadata.AdmissionIntent
+ */
+export class AdmissionIntent extends Message<AdmissionIntent> {
+  /**
+   * @generated from field: string owner = 1;
+   */
+  owner = "";
+
+  /**
+   * @generated from field: string intent_id = 2;
+   */
+  intentId = "";
+
+  /**
+   * @generated from field: clustermetadata.AdmissionSubject subject = 3;
+   */
+  subject = AdmissionSubject.UNSPECIFIED;
+
+  /**
+   * @generated from field: clustermetadata.AdmissionPermission permission = 4;
+   */
+  permission = AdmissionPermission.UNSPECIFIED;
+
+  /**
+   * @generated from field: string source_connection = 5;
+   */
+  sourceConnection = "";
+
+  /**
+   * @generated from field: string source_configuration_binding = 6;
+   */
+  sourceConfigurationBinding = "";
+
+  /**
+   * @generated from field: clustermetadata.ExternalBackendIdentity source_identity = 7;
+   */
+  sourceIdentity?: ExternalBackendIdentity;
+
+  constructor(data?: PartialMessage<AdmissionIntent>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "clustermetadata.AdmissionIntent";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "owner", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "intent_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "subject", kind: "enum", T: proto3.getEnumType(AdmissionSubject) },
+    { no: 4, name: "permission", kind: "enum", T: proto3.getEnumType(AdmissionPermission) },
+    { no: 5, name: "source_connection", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 6, name: "source_configuration_binding", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 7, name: "source_identity", kind: "message", T: ExternalBackendIdentity },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AdmissionIntent {
+    return new AdmissionIntent().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AdmissionIntent {
+    return new AdmissionIntent().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AdmissionIntent {
+    return new AdmissionIntent().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AdmissionIntent | PlainMessage<AdmissionIntent> | undefined, b: AdmissionIntent | PlainMessage<AdmissionIntent> | undefined): boolean {
+    return proto3.util.equals(AdmissionIntent, a, b);
+  }
+}
+
+/**
+ * controlled is sticky across owner/intent cleanup. Missing intent never means OPEN.
+ *
+ * @generated from message clustermetadata.AdmissionSnapshot
+ */
+export class AdmissionSnapshot extends Message<AdmissionSnapshot> {
+  /**
+   * @generated from field: clustermetadata.ShardKey authority_shard_key = 1;
+   */
+  authorityShardKey?: ShardKey;
+
+  /**
+   * @generated from field: bool controlled = 2;
+   */
+  controlled = false;
+
+  /**
+   * @generated from field: string owner = 3;
+   */
+  owner = "";
+
+  /**
+   * @generated from field: clustermetadata.AdmissionIntent intent = 4;
+   */
+  intent?: AdmissionIntent;
+
+  constructor(data?: PartialMessage<AdmissionSnapshot>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "clustermetadata.AdmissionSnapshot";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "authority_shard_key", kind: "message", T: ShardKey },
+    { no: 2, name: "controlled", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 3, name: "owner", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "intent", kind: "message", T: AdmissionIntent },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AdmissionSnapshot {
+    return new AdmissionSnapshot().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AdmissionSnapshot {
+    return new AdmissionSnapshot().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AdmissionSnapshot {
+    return new AdmissionSnapshot().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AdmissionSnapshot | PlainMessage<AdmissionSnapshot> | undefined, b: AdmissionSnapshot | PlainMessage<AdmissionSnapshot> | undefined): boolean {
+    return proto3.util.equals(AdmissionSnapshot, a, b);
   }
 }
 

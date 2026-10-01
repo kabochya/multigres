@@ -36,6 +36,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	MultipoolerService_RefreshAdmission_FullMethodName          = "/multipoolerservice.MultipoolerService/RefreshAdmission"
+	MultipoolerService_ReadAdmissionIntent_FullMethodName       = "/multipoolerservice.MultipoolerService/ReadAdmissionIntent"
 	MultipoolerService_SetRoutingPolicy_FullMethodName          = "/multipoolerservice.MultipoolerService/SetRoutingPolicy"
 	MultipoolerService_GetRoutingPolicy_FullMethodName          = "/multipoolerservice.MultipoolerService/GetRoutingPolicy"
 	MultipoolerService_CreateSourceConnection_FullMethodName    = "/multipoolerservice.MultipoolerService/CreateSourceConnection"
@@ -61,6 +63,9 @@ const (
 //
 // MultipoolerService provides connection pooling and query execution
 type MultipoolerServiceClient interface {
+	// Controller expectations correlate with metadata; they cannot override it.
+	RefreshAdmission(ctx context.Context, in *RefreshAdmissionRequest, opts ...grpc.CallOption) (*RefreshAdmissionResponse, error)
+	ReadAdmissionIntent(ctx context.Context, in *ReadAdmissionIntentRequest, opts ...grpc.CallOption) (*ReadAdmissionIntentResponse, error)
 	// Write routing metadata only; this never fences, drains or advances migration.
 	SetRoutingPolicy(ctx context.Context, in *SetRoutingPolicyRequest, opts ...grpc.CallOption) (*SetRoutingPolicyResponse, error)
 	GetRoutingPolicy(ctx context.Context, in *GetRoutingPolicyRequest, opts ...grpc.CallOption) (*GetRoutingPolicyResponse, error)
@@ -142,6 +147,26 @@ type multipoolerServiceClient struct {
 
 func NewMultipoolerServiceClient(cc grpc.ClientConnInterface) MultipoolerServiceClient {
 	return &multipoolerServiceClient{cc}
+}
+
+func (c *multipoolerServiceClient) RefreshAdmission(ctx context.Context, in *RefreshAdmissionRequest, opts ...grpc.CallOption) (*RefreshAdmissionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RefreshAdmissionResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_RefreshAdmission_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *multipoolerServiceClient) ReadAdmissionIntent(ctx context.Context, in *ReadAdmissionIntentRequest, opts ...grpc.CallOption) (*ReadAdmissionIntentResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadAdmissionIntentResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_ReadAdmissionIntent_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *multipoolerServiceClient) SetRoutingPolicy(ctx context.Context, in *SetRoutingPolicyRequest, opts ...grpc.CallOption) (*SetRoutingPolicyResponse, error) {
@@ -359,6 +384,9 @@ type MultipoolerService_NotificationStreamClient = grpc.BidiStreamingClient[Noti
 //
 // MultipoolerService provides connection pooling and query execution
 type MultipoolerServiceServer interface {
+	// Controller expectations correlate with metadata; they cannot override it.
+	RefreshAdmission(context.Context, *RefreshAdmissionRequest) (*RefreshAdmissionResponse, error)
+	ReadAdmissionIntent(context.Context, *ReadAdmissionIntentRequest) (*ReadAdmissionIntentResponse, error)
 	// Write routing metadata only; this never fences, drains or advances migration.
 	SetRoutingPolicy(context.Context, *SetRoutingPolicyRequest) (*SetRoutingPolicyResponse, error)
 	GetRoutingPolicy(context.Context, *GetRoutingPolicyRequest) (*GetRoutingPolicyResponse, error)
@@ -442,6 +470,12 @@ type MultipoolerServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedMultipoolerServiceServer struct{}
 
+func (UnimplementedMultipoolerServiceServer) RefreshAdmission(context.Context, *RefreshAdmissionRequest) (*RefreshAdmissionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RefreshAdmission not implemented")
+}
+func (UnimplementedMultipoolerServiceServer) ReadAdmissionIntent(context.Context, *ReadAdmissionIntentRequest) (*ReadAdmissionIntentResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReadAdmissionIntent not implemented")
+}
 func (UnimplementedMultipoolerServiceServer) SetRoutingPolicy(context.Context, *SetRoutingPolicyRequest) (*SetRoutingPolicyResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SetRoutingPolicy not implemented")
 }
@@ -512,6 +546,42 @@ func RegisterMultipoolerServiceServer(s grpc.ServiceRegistrar, srv MultipoolerSe
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&MultipoolerService_ServiceDesc, srv)
+}
+
+func _MultipoolerService_RefreshAdmission_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RefreshAdmissionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MultipoolerServiceServer).RefreshAdmission(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MultipoolerService_RefreshAdmission_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MultipoolerServiceServer).RefreshAdmission(ctx, req.(*RefreshAdmissionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MultipoolerService_ReadAdmissionIntent_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadAdmissionIntentRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MultipoolerServiceServer).ReadAdmissionIntent(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MultipoolerService_ReadAdmissionIntent_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MultipoolerServiceServer).ReadAdmissionIntent(ctx, req.(*ReadAdmissionIntentRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _MultipoolerService_SetRoutingPolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -762,6 +832,14 @@ var MultipoolerService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "multipoolerservice.MultipoolerService",
 	HandlerType: (*MultipoolerServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "RefreshAdmission",
+			Handler:    _MultipoolerService_RefreshAdmission_Handler,
+		},
+		{
+			MethodName: "ReadAdmissionIntent",
+			Handler:    _MultipoolerService_ReadAdmissionIntent_Handler,
+		},
 		{
 			MethodName: "SetRoutingPolicy",
 			Handler:    _MultipoolerService_SetRoutingPolicy_Handler,

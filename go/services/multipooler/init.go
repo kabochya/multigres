@@ -585,9 +585,21 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 		return err
 	}
 
+	if len(migrationKey) == 32 && mode != clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED {
+		if err := manager.RegisterPreparingSource(startCtx, logger, mp.ts, multipooler); err != nil {
+			return fmt.Errorf("cannot register preparing admission process: %w", err)
+		}
+	}
+
+	controlCredentials, err := mp.controlConnConfig.TransportCredentials(logger)
+	if err != nil {
+		return fmt.Errorf("control transport: %w", err)
+	}
+
 	logger.InfoContext(startCtx, "initializing MultipoolerManager")
 	poolerManager, err := manager.NewMultipoolerManager(logger, multipooler, &manager.Config{
 		MigrationKey:                   migrationKey,
+		ControlTransport:               controlCredentials,
 		SourceConfiguration:            sourceConfiguration,
 		SourceConfigurationBinding:     sourceBinding,
 		SocketFilePath:                 socketFilePath,

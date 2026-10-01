@@ -956,3 +956,31 @@ message GatewayRoutingPolicy {
  ExternalBackendIdentity source_identity = 3;
  string source_configuration_binding = 4;
 }
+
+// Normalized controller-owned admission, independent of gateway destination.
+enum AdmissionSubject {
+ ADMISSION_SUBJECT_UNSPECIFIED = 0;
+ ADMISSION_SUBJECT_TARGET = 1;
+ ADMISSION_SUBJECT_SOURCE = 2;
+}
+enum AdmissionPermission {
+ ADMISSION_PERMISSION_UNSPECIFIED = 0;
+ ADMISSION_PERMISSION_CLOSED = 1;
+ ADMISSION_PERMISSION_OPEN = 2;
+}
+message AdmissionIntent {
+ string owner = 1;
+ string intent_id = 2;
+ AdmissionSubject subject = 3;
+ AdmissionPermission permission = 4;
+ string source_connection = 5;
+ string source_configuration_binding = 6;
+ ExternalBackendIdentity source_identity = 7;
+}
+// controlled is sticky across owner/intent cleanup. Missing intent never means OPEN.
+message AdmissionSnapshot {
+ ShardKey authority_shard_key = 1;
+ bool controlled = 2;
+ string owner = 3;
+ AdmissionIntent intent = 4;
+}
