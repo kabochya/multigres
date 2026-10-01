@@ -18,6 +18,8 @@ package manager
 import (
 	"time"
 
+	rpc "github.com/multigres/multigres/go/pb/multipoolerservice"
+
 	"github.com/multigres/multigres/go/common/backup"
 	"github.com/multigres/multigres/go/common/topoclient"
 	"github.com/multigres/multigres/go/services/multipooler/internal/connpoolmanager"
@@ -25,6 +27,10 @@ import (
 
 // Config holds configuration for the MultipoolerManager
 type Config struct {
+	MigrationKey               []byte
+	SourceConfiguration        *rpc.SourceConnection
+	SourceConfigurationBinding string
+
 	// ExternalHost and ExternalDatabase are unmanaged backend coordinates, not pooler identity.
 	ExternalHost        string
 	ExternalDatabase    string

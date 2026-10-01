@@ -34,6 +34,7 @@ import (
 	"github.com/multigres/multigres/go/common/sqltypes"
 	"github.com/multigres/multigres/go/common/timeouts"
 	"github.com/multigres/multigres/go/common/topoclient"
+	"github.com/multigres/multigres/go/services/multipooler/internal/connectioncatalog"
 	"github.com/multigres/multigres/go/services/multipooler/internal/connpoolmanager"
 	"github.com/multigres/multigres/go/services/multipooler/internal/executor"
 	"github.com/multigres/multigres/go/services/multipooler/internal/heartbeat"
@@ -73,6 +74,8 @@ const (
 
 // MultipoolerManager manages the pooler lifecycle and PostgreSQL operations
 type MultipoolerManager struct {
+	connectionCatalog *connectioncatalog.Catalog
+
 	logger     *slog.Logger
 	metrics    *managerMetrics
 	config     *Config
@@ -576,6 +579,8 @@ func (pm *MultipoolerManager) openLocked(ctx context.Context, targetServingStatu
 
 	if !pm.IsUnmanaged() {
 		pm.startPostgresMonitorPollerLocked()
+	} else {
+		pm.startExternalMonitorLocked()
 	}
 
 	pm.isOpen = true

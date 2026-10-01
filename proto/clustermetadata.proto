@@ -234,6 +234,10 @@ message Multipooler {
 
   // Ownership of the backend. Unspecified preserves legacy managed behavior.
   PoolerManagementMode management_mode = 14;
+  // Immutable catalog reference and prepared non-secret configuration identity.
+  string source_connection = 15;
+  string source_configuration_binding = 16;
+
 }
 
 // PoolerManagementMode is independent of query-serving role and readiness.

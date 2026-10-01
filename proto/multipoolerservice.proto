@@ -30,6 +30,10 @@ option go_package = "github.com/multigres/multigres/go/pb/multipoolerservice";
 
 // MultipoolerService provides connection pooling and query execution
 service MultipoolerService {
+  // Provision immutable source configuration on the managed authority.
+  rpc CreateSourceConnection(CreateSourceConnectionRequest) returns (CreateSourceConnectionResponse);
+  // Protected bootstrap: never call through application routing.
+  rpc GetSourceConnection(GetSourceConnectionRequest) returns (GetSourceConnectionResponse);
   // ExecuteQuery executes a SQL query and returns the result
   // This should be used sparingly only when we know the result set is small,
   // otherwise StreamExecute should be used.
@@ -683,4 +687,15 @@ message SourceConnection {
   string ssl_mode = 7;
   string ssl_root_cert = 8;
   string ssl_negotiation = 9;
+  string expected_system_identifier = 10;
 }
+
+message CreateSourceConnectionRequest {
+ string database = 1;
+ SourceConnection connection = 2;
+ string username = 3;
+ query.UserAuth user_auth = 4;
+}
+message CreateSourceConnectionResponse { string configuration_binding = 1; }
+message GetSourceConnectionRequest { string database = 1; string connection_name = 2; }
+message GetSourceConnectionResponse { SourceConnection connection = 1; string configuration_binding = 2; clustermetadata.ShardKey authority_shard_key = 3; }

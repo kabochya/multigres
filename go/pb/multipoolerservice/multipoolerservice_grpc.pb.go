@@ -36,6 +36,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	MultipoolerService_CreateSourceConnection_FullMethodName    = "/multipoolerservice.MultipoolerService/CreateSourceConnection"
+	MultipoolerService_GetSourceConnection_FullMethodName       = "/multipoolerservice.MultipoolerService/GetSourceConnection"
 	MultipoolerService_ExecuteQuery_FullMethodName              = "/multipoolerservice.MultipoolerService/ExecuteQuery"
 	MultipoolerService_StreamExecute_FullMethodName             = "/multipoolerservice.MultipoolerService/StreamExecute"
 	MultipoolerService_ExecuteStream_FullMethodName             = "/multipoolerservice.MultipoolerService/ExecuteStream"
@@ -57,6 +59,10 @@ const (
 //
 // MultipoolerService provides connection pooling and query execution
 type MultipoolerServiceClient interface {
+	// Provision immutable source configuration on the managed authority.
+	CreateSourceConnection(ctx context.Context, in *CreateSourceConnectionRequest, opts ...grpc.CallOption) (*CreateSourceConnectionResponse, error)
+	// Protected bootstrap: never call through application routing.
+	GetSourceConnection(ctx context.Context, in *GetSourceConnectionRequest, opts ...grpc.CallOption) (*GetSourceConnectionResponse, error)
 	// ExecuteQuery executes a SQL query and returns the result
 	// This should be used sparingly only when we know the result set is small,
 	// otherwise StreamExecute should be used.
@@ -131,6 +137,26 @@ type multipoolerServiceClient struct {
 
 func NewMultipoolerServiceClient(cc grpc.ClientConnInterface) MultipoolerServiceClient {
 	return &multipoolerServiceClient{cc}
+}
+
+func (c *multipoolerServiceClient) CreateSourceConnection(ctx context.Context, in *CreateSourceConnectionRequest, opts ...grpc.CallOption) (*CreateSourceConnectionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateSourceConnectionResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_CreateSourceConnection_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *multipoolerServiceClient) GetSourceConnection(ctx context.Context, in *GetSourceConnectionRequest, opts ...grpc.CallOption) (*GetSourceConnectionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSourceConnectionResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_GetSourceConnection_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *multipoolerServiceClient) ExecuteQuery(ctx context.Context, in *ExecuteQueryRequest, opts ...grpc.CallOption) (*ExecuteQueryResponse, error) {
@@ -308,6 +334,10 @@ type MultipoolerService_NotificationStreamClient = grpc.BidiStreamingClient[Noti
 //
 // MultipoolerService provides connection pooling and query execution
 type MultipoolerServiceServer interface {
+	// Provision immutable source configuration on the managed authority.
+	CreateSourceConnection(context.Context, *CreateSourceConnectionRequest) (*CreateSourceConnectionResponse, error)
+	// Protected bootstrap: never call through application routing.
+	GetSourceConnection(context.Context, *GetSourceConnectionRequest) (*GetSourceConnectionResponse, error)
 	// ExecuteQuery executes a SQL query and returns the result
 	// This should be used sparingly only when we know the result set is small,
 	// otherwise StreamExecute should be used.
@@ -384,6 +414,12 @@ type MultipoolerServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedMultipoolerServiceServer struct{}
 
+func (UnimplementedMultipoolerServiceServer) CreateSourceConnection(context.Context, *CreateSourceConnectionRequest) (*CreateSourceConnectionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateSourceConnection not implemented")
+}
+func (UnimplementedMultipoolerServiceServer) GetSourceConnection(context.Context, *GetSourceConnectionRequest) (*GetSourceConnectionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetSourceConnection not implemented")
+}
 func (UnimplementedMultipoolerServiceServer) ExecuteQuery(context.Context, *ExecuteQueryRequest) (*ExecuteQueryResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ExecuteQuery not implemented")
 }
@@ -442,6 +478,42 @@ func RegisterMultipoolerServiceServer(s grpc.ServiceRegistrar, srv MultipoolerSe
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&MultipoolerService_ServiceDesc, srv)
+}
+
+func _MultipoolerService_CreateSourceConnection_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateSourceConnectionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MultipoolerServiceServer).CreateSourceConnection(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MultipoolerService_CreateSourceConnection_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MultipoolerServiceServer).CreateSourceConnection(ctx, req.(*CreateSourceConnectionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MultipoolerService_GetSourceConnection_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSourceConnectionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MultipoolerServiceServer).GetSourceConnection(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MultipoolerService_GetSourceConnection_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MultipoolerServiceServer).GetSourceConnection(ctx, req.(*GetSourceConnectionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _MultipoolerService_ExecuteQuery_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -620,6 +692,14 @@ var MultipoolerService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "multipoolerservice.MultipoolerService",
 	HandlerType: (*MultipoolerServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "CreateSourceConnection",
+			Handler:    _MultipoolerService_CreateSourceConnection_Handler,
+		},
+		{
+			MethodName: "GetSourceConnection",
+			Handler:    _MultipoolerService_GetSourceConnection_Handler,
+		},
 		{
 			MethodName: "ExecuteQuery",
 			Handler:    _MultipoolerService_ExecuteQuery_Handler,

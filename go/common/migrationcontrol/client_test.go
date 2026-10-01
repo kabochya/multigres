@@ -1,0 +1,58 @@
+// Copyright 2026 Supabase, Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package migrationcontrol
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	pb "github.com/multigres/multigres/go/pb/clustermetadata"
+)
+
+func TestAuthorityUsesManagedConsensusIndependentOfServing(t *testing.T) {
+	managed := &pb.Multipooler{Id: &pb.ID{Name: "target"}, ShardKey: &pb.ShardKey{Database: "db", TableGroup: "default", Shard: "0-inf"}, ServingStatus: pb.PoolerServingStatus_DISABLED, RoutingState: &pb.RoutingState{Role: pb.RoutingRole_ROUTING_ROLE_PRIMARY, Rule: &pb.RuleNumber{CoordinatorTerm: 2}}}
+	source := &pb.Multipooler{ManagementMode: pb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED, RoutingState: &pb.RoutingState{Role: pb.RoutingRole_ROUTING_ROLE_PRIMARY, Rule: &pb.RuleNumber{CoordinatorTerm: 99}}}
+	leader, err := Authority([]*pb.Multipooler{source, managed})
+	require.NoError(t, err)
+	require.Same(t, managed, leader)
+	newer := &pb.Multipooler{Id: &pb.ID{Name: "new"}, ShardKey: &pb.ShardKey{Database: "db", TableGroup: "default", Shard: "0-inf"}, RoutingState: &pb.RoutingState{Role: pb.RoutingRole_ROUTING_ROLE_PRIMARY, Rule: &pb.RuleNumber{CoordinatorTerm: 3}}}
+	leader, err = Authority([]*pb.Multipooler{managed, newer})
+	require.NoError(t, err)
+	require.Same(t, newer, leader)
+	_, err = Authority([]*pb.Multipooler{source})
+	require.Error(t, err)
+	_, err = Authority([]*pb.Multipooler{managed, managed})
+	require.Error(t, err)
+	// A stale lower-term overlap does not make a later, unique leader ambiguous.
+	for _, list := range [][]*pb.Multipooler{{managed, managed, newer}, {newer, managed, managed}} {
+		leader, err = Authority(list)
+		require.NoError(t, err)
+		require.Same(t, newer, leader)
+	}
+}
+
+func TestAuthorityRejectsUnrelatedManagedCohorts(t *testing.T) {
+	managed := &pb.Multipooler{ShardKey: &pb.ShardKey{Database: "db", TableGroup: "default", Shard: "0-inf"}, RoutingState: &pb.RoutingState{Role: pb.RoutingRole_ROUTING_ROLE_PRIMARY}}
+	unrelated := &pb.Multipooler{ShardKey: &pb.ShardKey{Database: "db", TableGroup: "other", Shard: "0-inf"}}
+	_, err := Authority([]*pb.Multipooler{managed, unrelated})
+	require.ErrorContains(t, err, "one managed authority cohort")
+	_, err = Authority([]*pb.Multipooler{managed, {}})
+	require.ErrorContains(t, err, "scope incomplete")
+	source := &pb.Multipooler{ManagementMode: pb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED}
+	leader, err := Authority([]*pb.Multipooler{managed, source})
+	require.NoError(t, err)
+	require.Same(t, managed, leader)
+}
