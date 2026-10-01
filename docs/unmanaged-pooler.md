@@ -37,7 +37,30 @@ a cluster-wide database limit; it permits multiple managed replicas and source
 poolers across cells. Migrations spanning unrelated cohorts must be rejected
 before control enablement or source activation.
 
-The first foundation PR intentionally keeps unmanaged runtime startup disabled
-until catalog bootstrap, register-before-read, physical identity and readiness
-validation are connected. Plaintext standalone endpoint flags do not provide a
-supported bypass.
+## Protected bootstrap
+
+Deploy the routing-aware gateway implementation before introducing source
+poolers. Older gateways that cannot distinguish backend ownership are not
+supported in a coexistence deployment.
+
+Sources require `--management-mode=unmanaged`, `--source-connection` and
+`--migration-key-file`. Endpoint, password and TLS settings are loaded from the
+managed catalog, not a standalone DSN. Register the fresh disabled process in
+topology before the first authority read. Bootstrap uses bounded retries and the
+existing protected RPC transport/key proof. Authority selection rejects unrelated
+managed cohorts; the returned authority shard key must match the source scope.
+
+Provisioning additionally proves target-superuser SCRAM credentials. Matching
+retries return the same immutable binding; attempts to replace configuration are
+rejected. Bootstrap confirms the protected snapshot synchronously while pinned
+to managed leadership. Failure or an uncertain commit returns no configuration.
+
+The external observation monitor validates writable state, expected PostgreSQL
+system identifier and database before advertising readiness. It never repairs,
+configures or stops external PostgreSQL. The initial routing milestone allows
+prepared sources to serve; this is not exclusive migration admission. The
+admission milestone adds independent controller-owned permission.
+
+`/ready` remains control-plane reachability. Backend availability travels through
+the existing health stream. Pooler shutdown withdraws service and leaves external
+PostgreSQL running. Rotation and configuration hot reload remain unsupported.

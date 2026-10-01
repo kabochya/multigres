@@ -49,6 +49,12 @@ const (
 // reflection-formatted method names, remove the leading slash and convert the remaining slash to a
 // period.
 const (
+	// MultipoolerServiceCreateSourceConnectionProcedure is the fully-qualified name of the
+	// MultipoolerService's CreateSourceConnection RPC.
+	MultipoolerServiceCreateSourceConnectionProcedure = "/multipoolerservice.MultipoolerService/CreateSourceConnection"
+	// MultipoolerServiceGetSourceConnectionProcedure is the fully-qualified name of the
+	// MultipoolerService's GetSourceConnection RPC.
+	MultipoolerServiceGetSourceConnectionProcedure = "/multipoolerservice.MultipoolerService/GetSourceConnection"
 	// MultipoolerServiceExecuteQueryProcedure is the fully-qualified name of the MultipoolerService's
 	// ExecuteQuery RPC.
 	MultipoolerServiceExecuteQueryProcedure = "/multipoolerservice.MultipoolerService/ExecuteQuery"
@@ -92,6 +98,10 @@ const (
 
 // MultipoolerServiceClient is a client for the multipoolerservice.MultipoolerService service.
 type MultipoolerServiceClient interface {
+	// Provision immutable source configuration on the managed authority.
+	CreateSourceConnection(context.Context, *connect.Request[multipoolerservice.CreateSourceConnectionRequest]) (*connect.Response[multipoolerservice.CreateSourceConnectionResponse], error)
+	// Protected bootstrap: never call through application routing.
+	GetSourceConnection(context.Context, *connect.Request[multipoolerservice.GetSourceConnectionRequest]) (*connect.Response[multipoolerservice.GetSourceConnectionResponse], error)
 	// ExecuteQuery executes a SQL query and returns the result
 	// This should be used sparingly only when we know the result set is small,
 	// otherwise StreamExecute should be used.
@@ -171,6 +181,18 @@ func NewMultipoolerServiceClient(httpClient connect.HTTPClient, baseURL string, 
 	baseURL = strings.TrimRight(baseURL, "/")
 	multipoolerServiceMethods := multipoolerservice.File_multipoolerservice_proto.Services().ByName("MultipoolerService").Methods()
 	return &multipoolerServiceClient{
+		createSourceConnection: connect.NewClient[multipoolerservice.CreateSourceConnectionRequest, multipoolerservice.CreateSourceConnectionResponse](
+			httpClient,
+			baseURL+MultipoolerServiceCreateSourceConnectionProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("CreateSourceConnection")),
+			connect.WithClientOptions(opts...),
+		),
+		getSourceConnection: connect.NewClient[multipoolerservice.GetSourceConnectionRequest, multipoolerservice.GetSourceConnectionResponse](
+			httpClient,
+			baseURL+MultipoolerServiceGetSourceConnectionProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("GetSourceConnection")),
+			connect.WithClientOptions(opts...),
+		),
 		executeQuery: connect.NewClient[multipoolerservice.ExecuteQueryRequest, multipoolerservice.ExecuteQueryResponse](
 			httpClient,
 			baseURL+MultipoolerServiceExecuteQueryProcedure,
@@ -254,6 +276,8 @@ func NewMultipoolerServiceClient(httpClient connect.HTTPClient, baseURL string, 
 
 // multipoolerServiceClient implements MultipoolerServiceClient.
 type multipoolerServiceClient struct {
+	createSourceConnection    *connect.Client[multipoolerservice.CreateSourceConnectionRequest, multipoolerservice.CreateSourceConnectionResponse]
+	getSourceConnection       *connect.Client[multipoolerservice.GetSourceConnectionRequest, multipoolerservice.GetSourceConnectionResponse]
 	executeQuery              *connect.Client[multipoolerservice.ExecuteQueryRequest, multipoolerservice.ExecuteQueryResponse]
 	streamExecute             *connect.Client[multipoolerservice.StreamExecuteRequest, multipoolerservice.StreamExecuteResponse]
 	executeStream             *connect.Client[multipoolerservice.ExecuteStreamRequest, multipoolerservice.ExecuteStreamResponse]
@@ -267,6 +291,16 @@ type multipoolerServiceClient struct {
 	releaseReservedConnection *connect.Client[multipoolerservice.ReleaseReservedConnectionRequest, multipoolerservice.ReleaseReservedConnectionResponse]
 	streamPoolerHealth        *connect.Client[multipoolerservice.StreamPoolerHealthRequest, multipoolerservice.StreamPoolerHealthResponse]
 	notificationStream        *connect.Client[multipoolerservice.NotificationStreamRequest, multipoolerservice.NotificationStreamResponse]
+}
+
+// CreateSourceConnection calls multipoolerservice.MultipoolerService.CreateSourceConnection.
+func (c *multipoolerServiceClient) CreateSourceConnection(ctx context.Context, req *connect.Request[multipoolerservice.CreateSourceConnectionRequest]) (*connect.Response[multipoolerservice.CreateSourceConnectionResponse], error) {
+	return c.createSourceConnection.CallUnary(ctx, req)
+}
+
+// GetSourceConnection calls multipoolerservice.MultipoolerService.GetSourceConnection.
+func (c *multipoolerServiceClient) GetSourceConnection(ctx context.Context, req *connect.Request[multipoolerservice.GetSourceConnectionRequest]) (*connect.Response[multipoolerservice.GetSourceConnectionResponse], error) {
+	return c.getSourceConnection.CallUnary(ctx, req)
 }
 
 // ExecuteQuery calls multipoolerservice.MultipoolerService.ExecuteQuery.
@@ -337,6 +371,10 @@ func (c *multipoolerServiceClient) NotificationStream(ctx context.Context) *conn
 // MultipoolerServiceHandler is an implementation of the multipoolerservice.MultipoolerService
 // service.
 type MultipoolerServiceHandler interface {
+	// Provision immutable source configuration on the managed authority.
+	CreateSourceConnection(context.Context, *connect.Request[multipoolerservice.CreateSourceConnectionRequest]) (*connect.Response[multipoolerservice.CreateSourceConnectionResponse], error)
+	// Protected bootstrap: never call through application routing.
+	GetSourceConnection(context.Context, *connect.Request[multipoolerservice.GetSourceConnectionRequest]) (*connect.Response[multipoolerservice.GetSourceConnectionResponse], error)
 	// ExecuteQuery executes a SQL query and returns the result
 	// This should be used sparingly only when we know the result set is small,
 	// otherwise StreamExecute should be used.
@@ -412,6 +450,18 @@ type MultipoolerServiceHandler interface {
 // and JSON codecs. They also support gzip compression.
 func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
 	multipoolerServiceMethods := multipoolerservice.File_multipoolerservice_proto.Services().ByName("MultipoolerService").Methods()
+	multipoolerServiceCreateSourceConnectionHandler := connect.NewUnaryHandler(
+		MultipoolerServiceCreateSourceConnectionProcedure,
+		svc.CreateSourceConnection,
+		connect.WithSchema(multipoolerServiceMethods.ByName("CreateSourceConnection")),
+		connect.WithHandlerOptions(opts...),
+	)
+	multipoolerServiceGetSourceConnectionHandler := connect.NewUnaryHandler(
+		MultipoolerServiceGetSourceConnectionProcedure,
+		svc.GetSourceConnection,
+		connect.WithSchema(multipoolerServiceMethods.ByName("GetSourceConnection")),
+		connect.WithHandlerOptions(opts...),
+	)
 	multipoolerServiceExecuteQueryHandler := connect.NewUnaryHandler(
 		MultipoolerServiceExecuteQueryProcedure,
 		svc.ExecuteQuery,
@@ -492,6 +542,10 @@ func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect
 	)
 	return "/multipoolerservice.MultipoolerService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case MultipoolerServiceCreateSourceConnectionProcedure:
+			multipoolerServiceCreateSourceConnectionHandler.ServeHTTP(w, r)
+		case MultipoolerServiceGetSourceConnectionProcedure:
+			multipoolerServiceGetSourceConnectionHandler.ServeHTTP(w, r)
 		case MultipoolerServiceExecuteQueryProcedure:
 			multipoolerServiceExecuteQueryHandler.ServeHTTP(w, r)
 		case MultipoolerServiceStreamExecuteProcedure:
@@ -526,6 +580,14 @@ func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect
 
 // UnimplementedMultipoolerServiceHandler returns CodeUnimplemented from all methods.
 type UnimplementedMultipoolerServiceHandler struct{}
+
+func (UnimplementedMultipoolerServiceHandler) CreateSourceConnection(context.Context, *connect.Request[multipoolerservice.CreateSourceConnectionRequest]) (*connect.Response[multipoolerservice.CreateSourceConnectionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.CreateSourceConnection is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) GetSourceConnection(context.Context, *connect.Request[multipoolerservice.GetSourceConnectionRequest]) (*connect.Response[multipoolerservice.GetSourceConnectionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.GetSourceConnection is not implemented"))
+}
 
 func (UnimplementedMultipoolerServiceHandler) ExecuteQuery(context.Context, *connect.Request[multipoolerservice.ExecuteQueryRequest]) (*connect.Response[multipoolerservice.ExecuteQueryResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.ExecuteQuery is not implemented"))

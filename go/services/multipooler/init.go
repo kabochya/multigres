@@ -30,8 +30,10 @@ import (
 
 	"github.com/multigres/multigres/go/common/backup"
 	"github.com/multigres/multigres/go/common/constants"
+	"github.com/multigres/multigres/go/common/rpcclient"
 	"github.com/multigres/multigres/go/common/servenv"
 	"github.com/multigres/multigres/go/common/topoclient"
+	rpc "github.com/multigres/multigres/go/pb/multipoolerservice"
 	"github.com/multigres/multigres/go/services/multipooler/grpcmanagerservice"
 	"github.com/multigres/multigres/go/services/multipooler/grpcpoolerservice"
 	"github.com/multigres/multigres/go/services/multipooler/internal/connpoolmanager"
@@ -79,6 +81,10 @@ func validateUnrecoverableMinAttempts(n int) error {
 
 // Multipooler represents the main multipooler instance with all configuration and state
 type Multipooler struct {
+	migrationKeyFile  viperutil.Value[string]
+	sourceConnection  viperutil.Value[string]
+	controlConnConfig *rpcclient.ConnConfig
+
 	backendHost         viperutil.Value[string]
 	backendDatabase     viperutil.Value[string]
 	managementMode      viperutil.Value[string]
@@ -150,10 +156,13 @@ func (mp *Multipooler) CobraPreRunE(cmd *cobra.Command) error {
 func NewMultipooler(telemetry *telemetry.Telemetry) *Multipooler {
 	reg := viperutil.NewRegistry()
 	mp := &Multipooler{
-		backendHost:     viperutil.Configure(reg, "backend-host", viperutil.Options[string]{FlagName: "backend-host", Dynamic: false}),
-		backendDatabase: viperutil.Configure(reg, "backend-database", viperutil.Options[string]{FlagName: "backend-database", Dynamic: false}),
-		managementMode:  viperutil.Configure(reg, "management-mode", viperutil.Options[string]{Default: "managed", FlagName: "management-mode", Dynamic: false}),
-		reg:             reg,
+		migrationKeyFile:  viperutil.Configure(reg, "migration-key-file", viperutil.Options[string]{FlagName: "migration-key-file"}),
+		sourceConnection:  viperutil.Configure(reg, "source-connection", viperutil.Options[string]{FlagName: "source-connection"}),
+		controlConnConfig: rpcclient.NewConnConfig(reg),
+		backendHost:       viperutil.Configure(reg, "backend-host", viperutil.Options[string]{FlagName: "backend-host", Dynamic: false}),
+		backendDatabase:   viperutil.Configure(reg, "backend-database", viperutil.Options[string]{FlagName: "backend-database", Dynamic: false}),
+		managementMode:    viperutil.Configure(reg, "management-mode", viperutil.Options[string]{Default: "managed", FlagName: "management-mode", Dynamic: false}),
+		reg:               reg,
 		pgctldAddr: viperutil.Configure(reg, "pgctld-addr", viperutil.Options[string]{
 			Default:  "localhost:15200",
 			FlagName: "pgctld-addr",
@@ -286,6 +295,9 @@ func NewMultipooler(telemetry *telemetry.Telemetry) *Multipooler {
 
 // RegisterFlags registers all multipooler flags with the given FlagSet
 func (mp *Multipooler) RegisterFlags(flags *pflag.FlagSet) {
+	flags.String("source-connection", "", "Immutable catalog source connection name (unmanaged mode)")
+	flags.String("migration-key-file", "", "32-byte catalog encryption/control key file")
+	mp.controlConnConfig.RegisterFlags(flags)
 	flags.String("backend-host", "", "External PostgreSQL hostname for unmanaged mode; --pg-port selects its port")
 	flags.String("backend-database", "", "External database name for unmanaged mode; defaults to --database")
 	flags.String("management-mode", mp.managementMode.Default(), "Backend ownership: managed or unmanaged")
@@ -313,6 +325,8 @@ func (mp *Multipooler) RegisterFlags(flags *pflag.FlagSet) {
 
 	viperutil.BindFlags(
 		flags,
+		mp.migrationKeyFile,
+		mp.sourceConnection,
 		mp.backendHost,
 		mp.backendDatabase,
 		mp.managementMode,
@@ -389,12 +403,15 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if _, err := resolveExternalBackend(mode, mp.backendHost.Get(), mp.backendDatabase.Get(), mp.database.Get(), mp.pgPort.Get(), mp.socketFilePath.Get(), mp.poolerDir.Get()); err != nil {
-		return err
-	}
-	// Keep the mode fail-closed until the serving-only lifecycle is implemented.
 	if mode == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED {
-		return errors.New("unmanaged serving is not implemented yet")
+		if mp.sourceConnection.Get() == "" || mp.migrationKeyFile.Get() == "" {
+			return errors.New("unmanaged mode requires catalog source-connection and migration-key-file")
+		}
+		if mp.backendHost.Get() != "" || mp.backendDatabase.Get() != "" || mp.socketFilePath.Get() != "" || mp.poolerDir.Get() != "" {
+			return errors.New("unmanaged backend configuration must come from the catalog")
+		}
+	} else if mp.sourceConnection.Get() != "" || mp.backendHost.Get() != "" || mp.backendDatabase.Get() != "" {
+		return errors.New("source connection and external backend require unmanaged mode")
 	}
 
 	startCtx, span := telemetry.Tracer().Start(startCtx, "Init")
@@ -429,6 +446,46 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 		return fmt.Errorf("topo open: %w", err)
 	}
 
+	var migrationKey []byte
+	if mp.migrationKeyFile.Get() != "" {
+		migrationKey, err = os.ReadFile(mp.migrationKeyFile.Get())
+		if err != nil {
+			return errors.New("cannot read migration key file")
+		}
+		if len(migrationKey) != 32 {
+			return errors.New("migration key must contain exactly 32 bytes")
+		}
+	}
+	var sourceConfiguration *rpc.SourceConnection
+	var sourceBinding string
+	if mode == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED {
+		if mp.database.Get() == "" || mp.tableGroup.Get() == "" || mp.shard.Get() == "" {
+			return errors.New("database, table group and shard are required")
+		}
+		transport, transportErr := mp.controlConnConfig.TransportCredentials(logger)
+		if transportErr != nil {
+			return transportErr
+		}
+		initial := topoclient.NewMultipooler(serviceID, cell, mp.senv.GetHostname())
+		initial.ManagementMode = mode
+		initial.SourceConnection = mp.sourceConnection.Get()
+		initial.ShardKey = &clustermetadatapb.ShardKey{Database: mp.database.Get(), TableGroup: mp.tableGroup.Get(), Shard: mp.shard.Get()}
+		initial.PortMap["grpc"] = int32(mp.grpcServer.Port())
+		initial.ServingStatus = clustermetadatapb.PoolerServingStatus_DISABLED
+		reply, bootstrapErr := bootstrapSource(startCtx, mp.ts, initial, logger, migrationKey, transport)
+		if bootstrapErr != nil {
+			return bootstrapErr
+		}
+		sourceConfiguration = reply.Connection
+		sourceBinding = reply.ConfigurationBinding
+		mp.backendHost.Set(sourceConfiguration.Host)
+		mp.backendDatabase.Set(sourceConfiguration.Database)
+		mp.pgPort.Set(int(sourceConfiguration.Port))
+		if err = mp.connPoolConfig.SetSourceCredentials(sourceConfiguration.Username, sourceConfiguration.Password, sourceConfiguration.SslMode, sourceConfiguration.SslRootCert, sourceConfiguration.SslNegotiation); err != nil {
+			return err
+		}
+	}
+
 	logger.InfoContext(
 		startCtx, "multipooler starting up",
 		"pgctld_addr", mp.pgctldAddr.Get(),
@@ -444,8 +501,10 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 		return errors.New("database is required")
 	}
 
-	if err := mp.connPoolConfig.ResolvePgPassword(); err != nil {
-		return fmt.Errorf("resolve admin password: %w", err)
+	if mode != clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED {
+		if err := mp.connPoolConfig.ResolvePgPassword(); err != nil {
+			return fmt.Errorf("resolve admin password: %w", err)
+		}
 	}
 
 	var cipherKeys backup.CipherKeys
@@ -506,6 +565,8 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 	// Create multipooler record with all fields now that servenv.Init() has set them up
 	multipooler := topoclient.NewMultipooler(serviceID, cell, mp.senv.GetHostname())
 	multipooler.ManagementMode = mode
+	multipooler.SourceConnection = mp.sourceConnection.Get()
+	multipooler.SourceConfigurationBinding = sourceBinding
 	multipooler.PortMap["grpc"] = int32(mp.grpcServer.Port())
 	multipooler.PortMap["http"] = int32(mp.senv.GetHTTPPort())
 	multipooler.PortMap["postgres"] = int32(adopted.pgPort)
@@ -526,6 +587,9 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 
 	logger.InfoContext(startCtx, "initializing MultipoolerManager")
 	poolerManager, err := manager.NewMultipoolerManager(logger, multipooler, &manager.Config{
+		MigrationKey:                   migrationKey,
+		SourceConfiguration:            sourceConfiguration,
+		SourceConfigurationBinding:     sourceBinding,
 		SocketFilePath:                 socketFilePath,
 		ExternalHost:                   mp.backendHost.Get(),
 		ExternalDatabase:               mp.backendDatabase.Get(),

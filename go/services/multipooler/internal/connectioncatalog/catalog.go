@@ -52,6 +52,8 @@ type Catalog struct {
 }
 
 // Record must only be returned over the protected bootstrap channel.
+var ErrNotFound = errors.New("connection does not exist")
+
 type Record struct {
 	Configuration *rpc.SourceConnection
 	Binding       string
@@ -174,6 +176,9 @@ func (c *Catalog) ReadTx(ctx context.Context, tx executor.InternalTx, name strin
 	r, err := tx.QueryArgs(ctx, `SELECT configuration,binding FROM multigres.connections WHERE name=$1 FOR UPDATE`, name)
 	if err != nil {
 		return nil, errors.New("cannot read source connection")
+	}
+	if len(r.Rows) == 0 {
+		return nil, ErrNotFound
 	}
 	var encoded, binding string
 	if err = executor.ScanSingleRow(r, &encoded, &binding); err != nil {

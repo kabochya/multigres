@@ -1258,8 +1258,11 @@ type Multipooler struct {
 	RoutingState *RoutingState `protobuf:"bytes,13,opt,name=routing_state,json=routingState,proto3" json:"routing_state,omitempty"`
 	// Ownership of the backend. Unspecified preserves legacy managed behavior.
 	ManagementMode PoolerManagementMode `protobuf:"varint,14,opt,name=management_mode,json=managementMode,proto3,enum=clustermetadata.PoolerManagementMode" json:"management_mode,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Immutable catalog reference and prepared non-secret configuration identity.
+	SourceConnection           string `protobuf:"bytes,15,opt,name=source_connection,json=sourceConnection,proto3" json:"source_connection,omitempty"`
+	SourceConfigurationBinding string `protobuf:"bytes,16,opt,name=source_configuration_binding,json=sourceConfigurationBinding,proto3" json:"source_configuration_binding,omitempty"`
+	unknownFields              protoimpl.UnknownFields
+	sizeCache                  protoimpl.SizeCache
 }
 
 func (x *Multipooler) Reset() {
@@ -1375,6 +1378,20 @@ func (x *Multipooler) GetManagementMode() PoolerManagementMode {
 		return x.ManagementMode
 	}
 	return PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNSPECIFIED
+}
+
+func (x *Multipooler) GetSourceConnection() string {
+	if x != nil {
+		return x.SourceConnection
+	}
+	return ""
+}
+
+func (x *Multipooler) GetSourceConfigurationBinding() string {
+	if x != nil {
+		return x.SourceConfigurationBinding
+	}
+	return ""
 }
 
 // Multigateway represents metadata about a running multigateway component instance in the cluster.
@@ -3105,7 +3122,7 @@ const file_clustermetadata_proto_rawDesc = "" +
 	"\rPoolerAddress\x12#\n" +
 	"\x02id\x18\x01 \x01(\v2\x13.clustermetadata.IDR\x02id\x12\x12\n" +
 	"\x04host\x18\x02 \x01(\tR\x04host\x12#\n" +
-	"\rpostgres_port\x18\x03 \x01(\x05R\fpostgresPort\"\xe2\x05\n" +
+	"\rpostgres_port\x18\x03 \x01(\x05R\fpostgresPort\"\xd1\x06\n" +
 	"\vMultipooler\x12#\n" +
 	"\x02id\x18\x01 \x01(\v2\x13.clustermetadata.IDR\x02id\x126\n" +
 	"\tshard_key\x18\x02 \x01(\v2\x19.clustermetadata.ShardKeyR\bshardKey\x126\n" +
@@ -3120,7 +3137,9 @@ const file_clustermetadata_proto_rawDesc = "" +
 	"\vpg_data_dir\x18\v \x01(\tR\tpgDataDir\x12K\n" +
 	"\x10lifecycle_status\x18\f \x01(\v2 .clustermetadata.PoolerLifecycleR\x0flifecycleStatus\x12B\n" +
 	"\rrouting_state\x18\r \x01(\v2\x1d.clustermetadata.RoutingStateR\froutingState\x12N\n" +
-	"\x0fmanagement_mode\x18\x0e \x01(\x0e2%.clustermetadata.PoolerManagementModeR\x0emanagementMode\x1a:\n" +
+	"\x0fmanagement_mode\x18\x0e \x01(\x0e2%.clustermetadata.PoolerManagementModeR\x0emanagementMode\x12+\n" +
+	"\x11source_connection\x18\x0f \x01(\tR\x10sourceConnection\x12@\n" +
+	"\x1csource_configuration_binding\x18\x10 \x01(\tR\x1asourceConfigurationBinding\x1a:\n" +
 	"\fPortMapEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x05R\x05value:\x028\x01\"\xf1\x01\n" +

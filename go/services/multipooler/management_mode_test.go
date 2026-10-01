@@ -50,5 +50,5 @@ func TestUnmanagedStartupIsGated(t *testing.T) {
 	mp.RegisterFlags(flags)
 	require.Equal(t, "managed", mp.managementMode.Get())
 	require.NoError(t, flags.Parse([]string{"--management-mode=unmanaged", "--backend-host=db.example.com"}))
-	require.ErrorContains(t, mp.Init(context.Background()), "unmanaged serving is not implemented yet")
+	require.ErrorContains(t, mp.Init(context.Background()), "unmanaged mode requires catalog source-connection and migration-key-file")
 }

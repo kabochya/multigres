@@ -142,6 +142,8 @@ var _ grpc.BidiStreamingClient[multipoolerservice.StreamReplicationRequest, mult
 
 // mockMultipoolerServiceClient is a mock implementation of MultipoolerServiceClient.
 type mockMultipoolerServiceClient struct {
+	multipoolerservice.MultipoolerServiceClient // Unused control RPCs are outside the query mock.
+
 	// CopyBidiExecute behavior
 	bidiStream    *mockBidiStream
 	bidiStreamErr error
