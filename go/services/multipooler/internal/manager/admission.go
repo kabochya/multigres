@@ -326,6 +326,10 @@ func (pm *MultipoolerManager) enforceAdmission(ctx context.Context, expected *pb
 	}
 	if allow {
 		h := pm.healthStreamer.getState()
+		if h.ServingStatus != pb.PoolerServingStatus_SERVING || !pm.qsc.IsServing() {
+			pm.actionLock.Release(lockCtx)
+			return nil, errors.New("backend unavailable for admission")
+		}
 		if pm.IsUnmanaged() {
 			if !h.BackendReady || !proto.Equal(h.BackendIdentity, s.Intent.SourceIdentity) || s.Intent.SourceConnection != pm.config.SourceConfiguration.GetName() || s.Intent.SourceConfigurationBinding != pm.config.SourceConfigurationBinding {
 				pm.actionLock.Release(lockCtx)

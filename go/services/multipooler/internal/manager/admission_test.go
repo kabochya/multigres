@@ -38,6 +38,7 @@ func admissionTestManager(t *testing.T) (*MultipoolerManager, *poolerserver.Quer
 	g := poolerserver.NewQueryPoolerServer(logger, nil, nil, "default", "0", pm, 0, false)
 	pm.qsc = g
 	g.EnableAdmissionControl(true)
+	pm.healthStreamer.servingStatus = pb.PoolerServingStatus_SERVING
 	pm.stateManager = NewStateManager(logger, record, func() *pb.ConsensusStatus { return nil })
 	require.NoError(t, g.OnStateChange(t.Context(), servingstate.State{Routing: servingstate.RoutingState{Role: servingstate.RoutingRoleReplica}, ServingStatus: pb.PoolerServingStatus_SERVING}))
 	s := &pb.AdmissionSnapshot{AuthorityShardKey: record.ShardKey(), Controlled: true, Owner: "owner", Intent: &pb.AdmissionIntent{Owner: "owner", IntentId: "open-a", Subject: pb.AdmissionSubject_ADMISSION_SUBJECT_TARGET, Permission: pb.AdmissionPermission_ADMISSION_PERMISSION_OPEN}}
@@ -173,4 +174,14 @@ func TestRefreshAdmissionRequiresAuthentication(t *testing.T) {
 	pm, _, s := admissionTestManager(t)
 	_, err := pm.RefreshAdmission(t.Context(), &rpc.RefreshAdmissionRequest{Database: "postgres", Expected: s.Intent})
 	require.Error(t, err)
+}
+
+func TestAdmissionOpenCannotAcknowledgeUnavailableBackend(t *testing.T) {
+	pm, g, s := admissionTestManager(t)
+	pm.admissionRuntime.reader = func(context.Context, pb.AdmissionSubject) (*pb.AdmissionSnapshot, error) { return s, nil }
+	pm.healthStreamer.servingStatus = pb.PoolerServingStatus_DISABLED
+	require.NoError(t, g.OnStateChange(t.Context(), servingstate.State{Routing: servingstate.RoutingState{Role: servingstate.RoutingRoleReplica}, ServingStatus: pb.PoolerServingStatus_DISABLED}))
+	reply, err := pm.enforceAdmission(t.Context(), s.Intent)
+	require.Error(t, err)
+	require.Nil(t, reply, "OPEN cannot complete against an unavailable backend")
 }
