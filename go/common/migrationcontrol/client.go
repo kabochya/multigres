@@ -59,6 +59,7 @@ func Poolers(ctx context.Context, ts topoclient.Store, database string) ([]*pb.M
 // primaries fail closed rather than picking an arbitrary process.
 func Authority(poolers []*pb.Multipooler) (*pb.Multipooler, error) {
 	var leader *pb.Multipooler
+	ambiguous := false
 	for _, p := range poolers {
 		if p.ManagementMode == pb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED || p.GetRoutingState().GetRole() != pb.RoutingRole_ROUTING_ROLE_PRIMARY {
 			continue
@@ -70,14 +71,18 @@ func Authority(poolers []*pb.Multipooler) (*pb.Multipooler, error) {
 		r := p.GetRoutingState().GetRule()
 		old := leader.GetRoutingState().GetRule()
 		if r.GetCoordinatorTerm() == old.GetCoordinatorTerm() && r.GetLeaderSubterm() == old.GetLeaderSubterm() {
-			return nil, errors.New("ambiguous managed authority")
+			ambiguous = true
 		}
 		if r.GetCoordinatorTerm() > old.GetCoordinatorTerm() || r.GetCoordinatorTerm() == old.GetCoordinatorTerm() && r.GetLeaderSubterm() > old.GetLeaderSubterm() {
 			leader = p
+			ambiguous = false
 		}
 	}
 	if leader == nil {
 		return nil, errors.New("managed authority unavailable")
+	}
+	if ambiguous {
+		return nil, errors.New("ambiguous managed authority")
 	}
 	return leader, nil
 }

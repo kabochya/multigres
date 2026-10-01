@@ -219,6 +219,9 @@ func (pm *MultipoolerManager) ServingControl(ctx context.Context, r *rpc.Serving
 		}
 		return &rpc.ServingControlResponse{OperationStatus: &rpc.ServingOperationStatus{RequestId: status.RequestID, Operation: status.Operation, Completed: status.Completed, Active: status.Active}}, nil
 	}
+	if response, handled, err := pm.demoServingControl(ctx, r); handled {
+		return response, err
+	}
 	// Only operation/request identifiers enter the audit record.
 	started := time.Now()
 	defer func() {

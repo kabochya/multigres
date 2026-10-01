@@ -36,4 +36,10 @@ func TestAuthorityUsesManagedConsensusIndependentOfServing(t *testing.T) {
 	require.Error(t, err)
 	_, err = Authority([]*pb.Multipooler{managed, managed})
 	require.Error(t, err)
+	// A stale lower-term overlap does not make a later, unique leader ambiguous.
+	for _, list := range [][]*pb.Multipooler{{managed, managed, newer}, {newer, managed, managed}} {
+		leader, err = Authority(list)
+		require.NoError(t, err)
+		require.Same(t, newer, leader)
+	}
 }
