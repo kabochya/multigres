@@ -56,8 +56,10 @@ type healthStreamer struct {
 	shard      string
 
 	// Mutable fields (updated via typed methods)
-	servingStatus clustermetadatapb.PoolerServingStatus
-	routingState  *clustermetadatapb.RoutingState
+	servingStatus   clustermetadatapb.PoolerServingStatus
+	backendReady    bool
+	backendIdentity *clustermetadatapb.ExternalBackendIdentity
+	routingState    *clustermetadatapb.RoutingState
 
 	// Client management
 	clients map[chan *poolerserver.HealthState]struct{}
@@ -188,6 +190,7 @@ func (hs *healthStreamer) buildStateLocked() *poolerserver.HealthState {
 		RoutingState:                hs.routingState,
 		RecommendedStalenessTimeout: hs.recommendedStalenessTimeout,
 		ReplicationLagNs:            hs.replicationLagNs.Load(),
+		BackendReady:                hs.backendReady, BackendIdentity: hs.backendIdentity,
 	}
 }
 
@@ -354,4 +357,12 @@ func (pm *MultipoolerManager) runHealthHeartbeat(ctx context.Context, interval t
 			pm.broadcastHealth()
 		}
 	}
+}
+
+func (hs *healthStreamer) setBackendReadiness(ready bool, identity *clustermetadatapb.ExternalBackendIdentity) {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	hs.backendReady = ready
+	hs.backendIdentity = identity
+	hs.broadcastLocked()
 }

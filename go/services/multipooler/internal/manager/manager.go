@@ -241,9 +241,12 @@ type MultipoolerManager struct {
 
 	// healthStreamer streams health state to subscribers.
 	// Owns all health-related state and provides typed update methods.
-	healthStreamer *healthStreamer
-	servingMu      sync.Mutex
-	servingCatalog *servingcontrol.Catalog
+	healthStreamer   *healthStreamer
+	servingMu        sync.Mutex
+	sourceAdmission  atomic.Bool
+	sourceModeLoaded atomic.Bool
+	sourceModeReader func(context.Context) (*clustermetadatapb.MigrationRouting, error)
+	servingCatalog   *servingcontrol.Catalog
 }
 
 // promotionState tracks which parts of the promotion are complete
@@ -418,6 +421,12 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 		pm.qsc = ov.qsc
 	} else {
 		pm.qsc = poolerserver.NewQueryPoolerServer(logger, connPoolMgr, multipooler.Id, multipooler.GetShardKey().GetTableGroup(), multipooler.GetShardKey().GetShard(), pm, drainGracePeriod, config.BackendVpidTrackingEnabled)
+	}
+
+	if len(config.MigrationKey) > 0 {
+		if gate, ok := pm.qsc.(interface{ SetApplicationAdmission(bool) }); ok {
+			gate.SetApplicationAdmission(false)
+		}
 	}
 
 	// ConsensusManager owns its own wiring (durable promise store + rule store +
@@ -600,6 +609,9 @@ func (pm *MultipoolerManager) openLocked(ctx context.Context, targetServingStatu
 	// StartTopoRegistration) picks it up and writes to etcd. Only the serving
 	// status changes here; the role is left as the record already holds it.
 	go pm.runHealthHeartbeat(pm.ctx, timeouts.DefaultHealthHeartbeatInterval)
+	if len(pm.config.MigrationKey) > 0 {
+		go pm.runServingControl(pm.ctx)
+	}
 	if err := pm.stateManager.Mutate(ctx, func(s *servingStateMutation) {
 		s.ServingStatus = targetServingStatus
 	}); err != nil {

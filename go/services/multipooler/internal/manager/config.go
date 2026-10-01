@@ -18,6 +18,8 @@ package manager
 import (
 	"time"
 
+	"google.golang.org/grpc"
+
 	"github.com/multigres/multigres/go/common/backup"
 	"github.com/multigres/multigres/go/common/topoclient"
 	"github.com/multigres/multigres/go/services/multipooler/internal/connpoolmanager"
@@ -28,6 +30,7 @@ type Config struct {
 	// MigrationKey encrypts catalog credentials; nil disables migration control.
 	MigrationKey     []byte
 	SourceConnection string
+	ControlTransport grpc.DialOption
 
 	// ExternalHost and ExternalDatabase are unmanaged backend coordinates, not pooler identity.
 	ExternalHost        string

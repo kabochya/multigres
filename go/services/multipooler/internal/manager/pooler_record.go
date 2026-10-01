@@ -422,3 +422,14 @@ func (r *poolerRecord) publishIfNeeded(ctx context.Context) {
 		"routing_role", pub.GetRoutingState().GetRole().String(),
 		"serving_status", desired.ServingStatus.String())
 }
+
+// RegisterPreparingSource publishes a disabled process identity before catalog
+// bootstrap. It runs synchronously, before a manager or publisher exists. The
+// normal record lifecycle takes ownership once bootstrap has completed.
+func RegisterPreparingSource(ctx context.Context, logger *slog.Logger, ts poolerTopoStore, initial *clustermetadatapb.Multipooler) error {
+	record, err := newPoolerRecord(logger, ts, initial)
+	if err != nil {
+		return err
+	}
+	return record.topoClient.RegisterMultipooler(ctx, record.Snapshot(), false)
+}

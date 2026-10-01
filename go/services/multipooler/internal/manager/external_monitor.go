@@ -38,6 +38,23 @@ func (pm *MultipoolerManager) checkExternalReadiness(ctx context.Context) {
 	if err == nil {
 		err = executor.ScanSingleRow(result, &writable)
 	}
+
+	var identity *pb.ExternalBackendIdentity
+	if pm.config.SourceConnection != "" && err == nil && writable {
+		result, err = pm.adminQuery(probeCtx, "SELECT system_identifier::text, current_database() FROM pg_control_system()")
+		var sysid, database string
+		if err == nil {
+			err = executor.ScanSingleRow(result, &sysid, &database)
+		}
+		if err == nil && sysid != "" && database == pm.config.ExternalDatabase {
+			identity = &pb.ExternalBackendIdentity{SystemIdentifier: sysid, Database: database}
+		} else {
+			writable = false
+		}
+	}
+	if pm.healthStreamer != nil {
+		pm.healthStreamer.setBackendReadiness(err == nil && writable, identity)
+	}
 	cancel()
 	lockCtx, lockErr := pm.actionLock.Acquire(ctx, "ExternalReadiness")
 	if lockErr != nil {
@@ -47,7 +64,9 @@ func (pm *MultipoolerManager) checkExternalReadiness(ctx context.Context) {
 	status := pb.PoolerServingStatus_DISABLED
 	mode := pgmode.Unknown
 	if err == nil && writable {
-		status = pb.PoolerServingStatus_SERVING
+		if pm.config.SourceConnection == "" || pm.sourceAdmission.Load() {
+			status = pb.PoolerServingStatus_SERVING
+		}
 		mode = pgmode.Primary
 	}
 	if mutateErr := pm.stateManager.Mutate(lockCtx, func(s *servingStateMutation) { s.ServingStatus = status; s.PostgresMode = mode }); mutateErr != nil {

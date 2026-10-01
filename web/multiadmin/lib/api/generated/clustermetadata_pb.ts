@@ -1057,6 +1057,13 @@ export class Multipooler extends Message<Multipooler> {
    */
   managementMode = PoolerManagementMode.UNSPECIFIED;
 
+  /**
+   * Catalog connection name for migration-enabled unmanaged poolers. No secrets.
+   *
+   * @generated from field: string source_connection = 15;
+   */
+  sourceConnection = "";
+
   constructor(data?: PartialMessage<Multipooler>) {
     super();
     proto3.util.initPartial(data, this);
@@ -1077,6 +1084,7 @@ export class Multipooler extends Message<Multipooler> {
     { no: 12, name: "lifecycle_status", kind: "message", T: PoolerLifecycle },
     { no: 13, name: "routing_state", kind: "message", T: RoutingState },
     { no: 14, name: "management_mode", kind: "enum", T: proto3.getEnumType(PoolerManagementMode) },
+    { no: 15, name: "source_connection", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): Multipooler {
@@ -2693,6 +2701,51 @@ export class MigrationRouting extends Message<MigrationRouting> {
 
   static equals(a: MigrationRouting | PlainMessage<MigrationRouting> | undefined, b: MigrationRouting | PlainMessage<MigrationRouting> | undefined): boolean {
     return proto3.util.equals(MigrationRouting, a, b);
+  }
+}
+
+/**
+ * ExternalBackendIdentity identifies the physical source behind an unmanaged endpoint.
+ *
+ * @generated from message clustermetadata.ExternalBackendIdentity
+ */
+export class ExternalBackendIdentity extends Message<ExternalBackendIdentity> {
+  /**
+   * @generated from field: string system_identifier = 1;
+   */
+  systemIdentifier = "";
+
+  /**
+   * @generated from field: string database = 2;
+   */
+  database = "";
+
+  constructor(data?: PartialMessage<ExternalBackendIdentity>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "clustermetadata.ExternalBackendIdentity";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "system_identifier", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "database", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ExternalBackendIdentity {
+    return new ExternalBackendIdentity().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ExternalBackendIdentity {
+    return new ExternalBackendIdentity().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ExternalBackendIdentity {
+    return new ExternalBackendIdentity().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ExternalBackendIdentity | PlainMessage<ExternalBackendIdentity> | undefined, b: ExternalBackendIdentity | PlainMessage<ExternalBackendIdentity> | undefined): boolean {
+    return proto3.util.equals(ExternalBackendIdentity, a, b);
   }
 }
 

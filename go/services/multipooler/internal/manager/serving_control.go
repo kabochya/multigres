@@ -62,7 +62,13 @@ func (pm *MultipoolerManager) servingAuthority(database string) error {
 	if database != pm.record.ShardKey().GetDatabase() {
 		return mterrors.New(code.Code_INVALID_ARGUMENT, "database does not match pooler")
 	}
-	if pm.IsUnmanaged() || pm.healthStreamer == nil || pm.healthStreamer.getState().RoutingState.GetRole() != pb.RoutingRole_ROUTING_ROLE_PRIMARY {
+	role := pb.RoutingRole_ROUTING_ROLE_UNKNOWN
+	if pm.stateManager != nil {
+		role = pm.stateManager.RoutingRole()
+	} else if pm.healthStreamer != nil {
+		role = pm.healthStreamer.getState().RoutingState.GetRole()
+	}
+	if pm.IsUnmanaged() || role != pb.RoutingRole_ROUTING_ROLE_PRIMARY {
 		return mterrors.New(code.Code_FAILED_PRECONDITION, "not the managed writable authority")
 	}
 	return nil
