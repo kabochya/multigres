@@ -590,7 +590,7 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 		return err
 	}
 
-	if len(migrationKey) == 32 && mode != clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED {
+	if mode != clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED {
 		if err := manager.RegisterPreparingSource(startCtx, logger, mp.ts, multipooler); err != nil {
 			return fmt.Errorf("cannot register preparing admission process: %w", err)
 		}
@@ -634,6 +634,7 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 
 	// Start the MultipoolerManager
 	poolerManager.Start(mp.senv)
+	poolerManager.StartAdmission()
 	// Launch the background backup-health poller (service-level concern, kept
 	// out of manager.Start so RPC unit tests don't run background DB queries).
 	poolerManager.StartBackupHealth()

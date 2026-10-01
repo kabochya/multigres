@@ -158,3 +158,12 @@ Lifecycle and health reconnect events trigger bounded initialization retries.
 Read-only health publication of an initialized process triggers no recurring
 confirmation transaction. No migration-specific periodic state poller or peer
 subscription is introduced.
+
+Applicability validation is independent of the credential-encryption key.
+All managed service processes start with a closed gate and register before
+confirming ordinary or controlled applicability. A missing key cannot turn a
+controlled target into an ordinary process on restart. Ordinary deployments
+use non-secret authority reads; configured migrations retain protected callback
+and mutation authentication. Credential provisioning/mutation never bypasses
+key authorization. Admission initialization is a service lifecycle hook, keeping
+strict manager unit-test fixtures free from background SQL.

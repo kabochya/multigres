@@ -284,7 +284,7 @@ func (pm *MultipoolerManager) GetHealthState(ctx context.Context) (*poolerserver
 // falls too far behind (buffer full).
 // Implements poolerserver.HealthProvider.
 func (pm *MultipoolerManager) SubscribeHealth(ctx context.Context) (*poolerserver.HealthState, <-chan *poolerserver.HealthState, error) {
-	if pm.config != nil && len(pm.config.MigrationKey) == 32 {
+	if pm.config != nil {
 		pm.admissionRuntime.mu.Lock()
 		initialized := pm.admissionRuntime.initialized
 		pm.admissionRuntime.mu.Unlock()

@@ -32,6 +32,7 @@ import (
 	pb "github.com/multigres/multigres/go/pb/clustermetadata"
 	rpc "github.com/multigres/multigres/go/pb/multipoolerservice"
 	"github.com/multigres/multigres/go/services/multipooler/internal/admission"
+	"github.com/multigres/multigres/go/services/multipooler/internal/connectioncatalog"
 	"github.com/multigres/multigres/go/services/multipooler/internal/executor"
 	"github.com/multigres/multigres/go/services/multipooler/internal/servingstate"
 )
@@ -112,10 +113,9 @@ func (l admissionLifecycle) OnStateChange(_ context.Context, s servingstate.Stat
 	return nil
 }
 
-func (pm *MultipoolerManager) startAdmission() {
-	if len(pm.config.MigrationKey) != 32 {
-		return
-	}
+// StartAdmission opts the service into startup/applicability validation. Unit
+// managers do not run service background work against strict mock databases.
+func (pm *MultipoolerManager) StartAdmission() {
 	pm.signalAdmission()
 	_ = pm.stateManager.RegisterAndSync(pm.shutdownCtx, admissionLifecycle{pm})
 	go pm.runAdmission(pm.shutdownCtx)
@@ -157,11 +157,14 @@ func (pm *MultipoolerManager) runAdmission(ctx context.Context) {
 	}
 }
 
-// ReadAdmissionIntent is non-secret but requires protected control transport.
+// ReadAdmissionIntent is non-secret. Migration-key deployments require their
+// protected control transport; ordinary clusters retain existing internal reads.
 // It returns no snapshot on uncertain commit, including ordinary applicability.
 func (pm *MultipoolerManager) ReadAdmissionIntent(ctx context.Context, r *rpc.ReadAdmissionIntentRequest) (*rpc.ReadAdmissionIntentResponse, error) {
-	if err := pm.authorizeControl(ctx); err != nil {
-		return nil, err
+	if len(pm.config.MigrationKey) != 0 {
+		if err := pm.authorizeControl(ctx); err != nil {
+			return nil, err
+		}
 	}
 	s, err := pm.confirmAdmission(ctx, r.Database, r.Subject)
 	if err != nil {
@@ -182,12 +185,8 @@ func (pm *MultipoolerManager) confirmAdmission(ctx context.Context, database str
 	if err = pm.servingAuthority(database); err != nil {
 		return nil, err
 	}
-	c, err := pm.connectionCatalogLocked(lockCtx)
-	if err != nil {
-		return nil, err
-	}
 	var s *pb.AdmissionSnapshot
-	err = c.Transaction(lockCtx, func(ctx context.Context, tx executor.InternalTx) error {
+	err = connectioncatalog.Transaction(lockCtx, pm.qsc.InternalQueryService(), func(ctx context.Context, tx executor.InternalTx) error {
 		if err := admission.InitializeOrdinary(ctx, tx, pm.record.ShardKey()); err != nil {
 			return err
 		}

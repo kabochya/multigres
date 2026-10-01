@@ -131,3 +131,13 @@ func TestAdmissionEventsReuseInitializedStateWhileIdle(t *testing.T) {
 	<-done
 	require.EqualValues(t, 1, reads.Load())
 }
+
+func TestManagedRestartWithoutEncryptionKeyStartsClosed(t *testing.T) {
+	pooler := &pb.Multipooler{Id: &pb.ID{Component: pb.ID_MULTIPOOLER, Cell: "cell", Name: "restart"}, ShardKey: &pb.ShardKey{Database: "postgres", TableGroup: "default", Shard: "0-inf"}}
+	pm, err := NewMultipoolerManager(newTestLogger(), pooler, &Config{})
+	require.NoError(t, err)
+	g := pm.qsc.(*poolerserver.QueryPoolerServer)
+	require.NoError(t, g.OnStateChange(t.Context(), servingstate.State{Routing: servingstate.RoutingState{Role: servingstate.RoutingRoleReplica}, ServingStatus: pb.PoolerServingStatus_SERVING}))
+	_, err = g.BeginRequest(nil, poolerserver.RequestSingleQuery)
+	require.Error(t, err, "missing key is not ordinary applicability proof")
+}
