@@ -671,3 +671,16 @@ message NotificationStreamResponse {
   query.PgNotification notification = 1;
   bool ready = 2;
 }
+
+// Protected provisioning payload; never publish this message in health streams.
+message SourceConnection {
+  string name = 1;
+  string host = 2;
+  uint32 port = 3;
+  string database = 4;
+  string username = 5;
+  string password = 6;
+  string ssl_mode = 7;
+  string ssl_root_cert = 8;
+  string ssl_negotiation = 9;
+}

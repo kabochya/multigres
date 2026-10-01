@@ -21,6 +21,34 @@ import type { BinaryReadOptions, FieldList, JsonReadOptions, JsonValue, PartialM
 import { Message, proto3, protoInt64, Timestamp } from "@bufbuild/protobuf";
 
 /**
+ * PoolerManagementMode is independent of query-serving role and readiness.
+ *
+ * @generated from enum clustermetadata.PoolerManagementMode
+ */
+export enum PoolerManagementMode {
+  /**
+   * @generated from enum value: POOLER_MANAGEMENT_MODE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: POOLER_MANAGEMENT_MODE_MANAGED = 1;
+   */
+  MANAGED = 1,
+
+  /**
+   * @generated from enum value: POOLER_MANAGEMENT_MODE_UNMANAGED = 2;
+   */
+  UNMANAGED = 2,
+}
+// Retrieve enum metadata with: proto3.getEnumType(PoolerManagementMode)
+proto3.util.setEnumType(PoolerManagementMode, "clustermetadata.PoolerManagementMode", [
+  { no: 0, name: "POOLER_MANAGEMENT_MODE_UNSPECIFIED" },
+  { no: 1, name: "POOLER_MANAGEMENT_MODE_MANAGED" },
+  { no: 2, name: "POOLER_MANAGEMENT_MODE_UNMANAGED" },
+]);
+
+/**
  * PoolerType represents the type of a given Multipooler.
  *
  * @generated from enum clustermetadata.PoolerType
@@ -988,6 +1016,13 @@ export class Multipooler extends Message<Multipooler> {
    */
   routingState?: RoutingState;
 
+  /**
+   * Ownership of the backend. Unspecified preserves legacy managed behavior.
+   *
+   * @generated from field: clustermetadata.PoolerManagementMode management_mode = 14;
+   */
+  managementMode = PoolerManagementMode.UNSPECIFIED;
+
   constructor(data?: PartialMessage<Multipooler>) {
     super();
     proto3.util.initPartial(data, this);
@@ -1007,6 +1042,7 @@ export class Multipooler extends Message<Multipooler> {
     { no: 11, name: "pg_data_dir", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 12, name: "lifecycle_status", kind: "message", T: PoolerLifecycle },
     { no: 13, name: "routing_state", kind: "message", T: RoutingState },
+    { no: 14, name: "management_mode", kind: "enum", T: proto3.getEnumType(PoolerManagementMode) },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): Multipooler {

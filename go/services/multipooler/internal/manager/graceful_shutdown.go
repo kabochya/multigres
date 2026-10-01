@@ -116,6 +116,14 @@ func (pm *MultipoolerManager) GracefulShutdown(ctx context.Context) {
 			"error", err)
 	}
 
+	if pm.IsUnmanaged() {
+		pm.closeLocked(lockCtx, "unmanaged shutdown")
+		if pm.shutdownCancel != nil {
+			pm.shutdownCancel()
+		}
+		return
+	}
+
 	if err := pm.pgctldStopWithEscalation(lockCtx); err != nil {
 		pm.logger.ErrorContext(lockCtx, "pgctld.Stop failed during graceful shutdown", "error", err)
 	}
