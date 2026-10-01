@@ -49,6 +49,18 @@ const (
 // reflection-formatted method names, remove the leading slash and convert the remaining slash to a
 // period.
 const (
+	// MultipoolerServiceServingControlProcedure is the fully-qualified name of the MultipoolerService's
+	// ServingControl RPC.
+	MultipoolerServiceServingControlProcedure = "/multipoolerservice.MultipoolerService/ServingControl"
+	// MultipoolerServiceGetSourceConnectionProcedure is the fully-qualified name of the
+	// MultipoolerService's GetSourceConnection RPC.
+	MultipoolerServiceGetSourceConnectionProcedure = "/multipoolerservice.MultipoolerService/GetSourceConnection"
+	// MultipoolerServiceGetMigrationModeProcedure is the fully-qualified name of the
+	// MultipoolerService's GetMigrationMode RPC.
+	MultipoolerServiceGetMigrationModeProcedure = "/multipoolerservice.MultipoolerService/GetMigrationMode"
+	// MultipoolerServiceRefreshRoutingProcedure is the fully-qualified name of the MultipoolerService's
+	// RefreshRouting RPC.
+	MultipoolerServiceRefreshRoutingProcedure = "/multipoolerservice.MultipoolerService/RefreshRouting"
 	// MultipoolerServiceExecuteQueryProcedure is the fully-qualified name of the MultipoolerService's
 	// ExecuteQuery RPC.
 	MultipoolerServiceExecuteQueryProcedure = "/multipoolerservice.MultipoolerService/ExecuteQuery"
@@ -89,6 +101,14 @@ const (
 
 // MultipoolerServiceClient is a client for the multipoolerservice.MultipoolerService service.
 type MultipoolerServiceClient interface {
+	// ServingControl performs target-admin operations on the managed authority.
+	ServingControl(context.Context, *connect.Request[multipoolerservice.ServingControlRequest]) (*connect.Response[multipoolerservice.ServingControlResponse], error)
+	// GetSourceConnection returns protected source configuration to a pooler.
+	GetSourceConnection(context.Context, *connect.Request[multipoolerservice.GetSourceConnectionRequest]) (*connect.Response[multipoolerservice.GetSourceConnectionResponse], error)
+	// GetMigrationMode reads committed routing intent from the target authority.
+	GetMigrationMode(context.Context, *connect.Request[multipoolerservice.GetMigrationModeRequest]) (*connect.Response[multipoolerservice.GetMigrationModeResponse], error)
+	// Observe the expected durable operation and complete local routing enforcement.
+	RefreshRouting(context.Context, *connect.Request[multipoolerservice.RefreshRoutingRequest]) (*connect.Response[multipoolerservice.RefreshRoutingResponse], error)
 	// ExecuteQuery executes a SQL query and returns the result
 	// This should be used sparingly only when we know the result set is small,
 	// otherwise StreamExecute should be used.
@@ -162,6 +182,30 @@ func NewMultipoolerServiceClient(httpClient connect.HTTPClient, baseURL string, 
 	baseURL = strings.TrimRight(baseURL, "/")
 	multipoolerServiceMethods := multipoolerservice.File_multipoolerservice_proto.Services().ByName("MultipoolerService").Methods()
 	return &multipoolerServiceClient{
+		servingControl: connect.NewClient[multipoolerservice.ServingControlRequest, multipoolerservice.ServingControlResponse](
+			httpClient,
+			baseURL+MultipoolerServiceServingControlProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("ServingControl")),
+			connect.WithClientOptions(opts...),
+		),
+		getSourceConnection: connect.NewClient[multipoolerservice.GetSourceConnectionRequest, multipoolerservice.GetSourceConnectionResponse](
+			httpClient,
+			baseURL+MultipoolerServiceGetSourceConnectionProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("GetSourceConnection")),
+			connect.WithClientOptions(opts...),
+		),
+		getMigrationMode: connect.NewClient[multipoolerservice.GetMigrationModeRequest, multipoolerservice.GetMigrationModeResponse](
+			httpClient,
+			baseURL+MultipoolerServiceGetMigrationModeProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("GetMigrationMode")),
+			connect.WithClientOptions(opts...),
+		),
+		refreshRouting: connect.NewClient[multipoolerservice.RefreshRoutingRequest, multipoolerservice.RefreshRoutingResponse](
+			httpClient,
+			baseURL+MultipoolerServiceRefreshRoutingProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("RefreshRouting")),
+			connect.WithClientOptions(opts...),
+		),
 		executeQuery: connect.NewClient[multipoolerservice.ExecuteQueryRequest, multipoolerservice.ExecuteQueryResponse](
 			httpClient,
 			baseURL+MultipoolerServiceExecuteQueryProcedure,
@@ -239,6 +283,10 @@ func NewMultipoolerServiceClient(httpClient connect.HTTPClient, baseURL string, 
 
 // multipoolerServiceClient implements MultipoolerServiceClient.
 type multipoolerServiceClient struct {
+	servingControl            *connect.Client[multipoolerservice.ServingControlRequest, multipoolerservice.ServingControlResponse]
+	getSourceConnection       *connect.Client[multipoolerservice.GetSourceConnectionRequest, multipoolerservice.GetSourceConnectionResponse]
+	getMigrationMode          *connect.Client[multipoolerservice.GetMigrationModeRequest, multipoolerservice.GetMigrationModeResponse]
+	refreshRouting            *connect.Client[multipoolerservice.RefreshRoutingRequest, multipoolerservice.RefreshRoutingResponse]
 	executeQuery              *connect.Client[multipoolerservice.ExecuteQueryRequest, multipoolerservice.ExecuteQueryResponse]
 	streamExecute             *connect.Client[multipoolerservice.StreamExecuteRequest, multipoolerservice.StreamExecuteResponse]
 	portalStreamExecute       *connect.Client[multipoolerservice.PortalStreamExecuteRequest, multipoolerservice.PortalStreamExecuteResponse]
@@ -251,6 +299,26 @@ type multipoolerServiceClient struct {
 	releaseReservedConnection *connect.Client[multipoolerservice.ReleaseReservedConnectionRequest, multipoolerservice.ReleaseReservedConnectionResponse]
 	streamPoolerHealth        *connect.Client[multipoolerservice.StreamPoolerHealthRequest, multipoolerservice.StreamPoolerHealthResponse]
 	notificationStream        *connect.Client[multipoolerservice.NotificationStreamRequest, multipoolerservice.NotificationStreamResponse]
+}
+
+// ServingControl calls multipoolerservice.MultipoolerService.ServingControl.
+func (c *multipoolerServiceClient) ServingControl(ctx context.Context, req *connect.Request[multipoolerservice.ServingControlRequest]) (*connect.Response[multipoolerservice.ServingControlResponse], error) {
+	return c.servingControl.CallUnary(ctx, req)
+}
+
+// GetSourceConnection calls multipoolerservice.MultipoolerService.GetSourceConnection.
+func (c *multipoolerServiceClient) GetSourceConnection(ctx context.Context, req *connect.Request[multipoolerservice.GetSourceConnectionRequest]) (*connect.Response[multipoolerservice.GetSourceConnectionResponse], error) {
+	return c.getSourceConnection.CallUnary(ctx, req)
+}
+
+// GetMigrationMode calls multipoolerservice.MultipoolerService.GetMigrationMode.
+func (c *multipoolerServiceClient) GetMigrationMode(ctx context.Context, req *connect.Request[multipoolerservice.GetMigrationModeRequest]) (*connect.Response[multipoolerservice.GetMigrationModeResponse], error) {
+	return c.getMigrationMode.CallUnary(ctx, req)
+}
+
+// RefreshRouting calls multipoolerservice.MultipoolerService.RefreshRouting.
+func (c *multipoolerServiceClient) RefreshRouting(ctx context.Context, req *connect.Request[multipoolerservice.RefreshRoutingRequest]) (*connect.Response[multipoolerservice.RefreshRoutingResponse], error) {
+	return c.refreshRouting.CallUnary(ctx, req)
 }
 
 // ExecuteQuery calls multipoolerservice.MultipoolerService.ExecuteQuery.
@@ -316,6 +384,14 @@ func (c *multipoolerServiceClient) NotificationStream(ctx context.Context) *conn
 // MultipoolerServiceHandler is an implementation of the multipoolerservice.MultipoolerService
 // service.
 type MultipoolerServiceHandler interface {
+	// ServingControl performs target-admin operations on the managed authority.
+	ServingControl(context.Context, *connect.Request[multipoolerservice.ServingControlRequest]) (*connect.Response[multipoolerservice.ServingControlResponse], error)
+	// GetSourceConnection returns protected source configuration to a pooler.
+	GetSourceConnection(context.Context, *connect.Request[multipoolerservice.GetSourceConnectionRequest]) (*connect.Response[multipoolerservice.GetSourceConnectionResponse], error)
+	// GetMigrationMode reads committed routing intent from the target authority.
+	GetMigrationMode(context.Context, *connect.Request[multipoolerservice.GetMigrationModeRequest]) (*connect.Response[multipoolerservice.GetMigrationModeResponse], error)
+	// Observe the expected durable operation and complete local routing enforcement.
+	RefreshRouting(context.Context, *connect.Request[multipoolerservice.RefreshRoutingRequest]) (*connect.Response[multipoolerservice.RefreshRoutingResponse], error)
 	// ExecuteQuery executes a SQL query and returns the result
 	// This should be used sparingly only when we know the result set is small,
 	// otherwise StreamExecute should be used.
@@ -385,6 +461,30 @@ type MultipoolerServiceHandler interface {
 // and JSON codecs. They also support gzip compression.
 func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
 	multipoolerServiceMethods := multipoolerservice.File_multipoolerservice_proto.Services().ByName("MultipoolerService").Methods()
+	multipoolerServiceServingControlHandler := connect.NewUnaryHandler(
+		MultipoolerServiceServingControlProcedure,
+		svc.ServingControl,
+		connect.WithSchema(multipoolerServiceMethods.ByName("ServingControl")),
+		connect.WithHandlerOptions(opts...),
+	)
+	multipoolerServiceGetSourceConnectionHandler := connect.NewUnaryHandler(
+		MultipoolerServiceGetSourceConnectionProcedure,
+		svc.GetSourceConnection,
+		connect.WithSchema(multipoolerServiceMethods.ByName("GetSourceConnection")),
+		connect.WithHandlerOptions(opts...),
+	)
+	multipoolerServiceGetMigrationModeHandler := connect.NewUnaryHandler(
+		MultipoolerServiceGetMigrationModeProcedure,
+		svc.GetMigrationMode,
+		connect.WithSchema(multipoolerServiceMethods.ByName("GetMigrationMode")),
+		connect.WithHandlerOptions(opts...),
+	)
+	multipoolerServiceRefreshRoutingHandler := connect.NewUnaryHandler(
+		MultipoolerServiceRefreshRoutingProcedure,
+		svc.RefreshRouting,
+		connect.WithSchema(multipoolerServiceMethods.ByName("RefreshRouting")),
+		connect.WithHandlerOptions(opts...),
+	)
 	multipoolerServiceExecuteQueryHandler := connect.NewUnaryHandler(
 		MultipoolerServiceExecuteQueryProcedure,
 		svc.ExecuteQuery,
@@ -459,6 +559,14 @@ func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect
 	)
 	return "/multipoolerservice.MultipoolerService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case MultipoolerServiceServingControlProcedure:
+			multipoolerServiceServingControlHandler.ServeHTTP(w, r)
+		case MultipoolerServiceGetSourceConnectionProcedure:
+			multipoolerServiceGetSourceConnectionHandler.ServeHTTP(w, r)
+		case MultipoolerServiceGetMigrationModeProcedure:
+			multipoolerServiceGetMigrationModeHandler.ServeHTTP(w, r)
+		case MultipoolerServiceRefreshRoutingProcedure:
+			multipoolerServiceRefreshRoutingHandler.ServeHTTP(w, r)
 		case MultipoolerServiceExecuteQueryProcedure:
 			multipoolerServiceExecuteQueryHandler.ServeHTTP(w, r)
 		case MultipoolerServiceStreamExecuteProcedure:
@@ -491,6 +599,22 @@ func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect
 
 // UnimplementedMultipoolerServiceHandler returns CodeUnimplemented from all methods.
 type UnimplementedMultipoolerServiceHandler struct{}
+
+func (UnimplementedMultipoolerServiceHandler) ServingControl(context.Context, *connect.Request[multipoolerservice.ServingControlRequest]) (*connect.Response[multipoolerservice.ServingControlResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.ServingControl is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) GetSourceConnection(context.Context, *connect.Request[multipoolerservice.GetSourceConnectionRequest]) (*connect.Response[multipoolerservice.GetSourceConnectionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.GetSourceConnection is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) GetMigrationMode(context.Context, *connect.Request[multipoolerservice.GetMigrationModeRequest]) (*connect.Response[multipoolerservice.GetMigrationModeResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.GetMigrationMode is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) RefreshRouting(context.Context, *connect.Request[multipoolerservice.RefreshRoutingRequest]) (*connect.Response[multipoolerservice.RefreshRoutingResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.RefreshRouting is not implemented"))
+}
 
 func (UnimplementedMultipoolerServiceHandler) ExecuteQuery(context.Context, *connect.Request[multipoolerservice.ExecuteQueryRequest]) (*connect.Response[multipoolerservice.ExecuteQueryResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.ExecuteQuery is not implemented"))

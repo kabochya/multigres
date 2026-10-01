@@ -391,6 +391,40 @@ proto3.util.setEnumType(CohortEligibilitySignal, "clustermetadata.CohortEligibil
 ]);
 
 /**
+ * MigrationMode selects the application destination independently of pooler ownership.
+ *
+ * @generated from enum clustermetadata.MigrationMode
+ */
+export enum MigrationMode {
+  /**
+   * @generated from enum value: MIGRATION_MODE_UNSET = 0;
+   */
+  UNSET = 0,
+
+  /**
+   * @generated from enum value: MIGRATION_MODE_UNMANAGED = 1;
+   */
+  UNMANAGED = 1,
+
+  /**
+   * @generated from enum value: MIGRATION_MODE_FENCED = 2;
+   */
+  FENCED = 2,
+
+  /**
+   * @generated from enum value: MIGRATION_MODE_MANAGED = 3;
+   */
+  MANAGED = 3,
+}
+// Retrieve enum metadata with: proto3.getEnumType(MigrationMode)
+proto3.util.setEnumType(MigrationMode, "clustermetadata.MigrationMode", [
+  { no: 0, name: "MIGRATION_MODE_UNSET" },
+  { no: 1, name: "MIGRATION_MODE_UNMANAGED" },
+  { no: 2, name: "MIGRATION_MODE_FENCED" },
+  { no: 3, name: "MIGRATION_MODE_MANAGED" },
+]);
+
+/**
  * TopoConfig defines the connection parameters for a topology service.
  * It specifies the type of topology backend, where it's hosted, and the
  * logical root path within that backend.
@@ -2614,6 +2648,51 @@ export class CohortEligibilityStatus extends Message<CohortEligibilityStatus> {
 
   static equals(a: CohortEligibilityStatus | PlainMessage<CohortEligibilityStatus> | undefined, b: CohortEligibilityStatus | PlainMessage<CohortEligibilityStatus> | undefined): boolean {
     return proto3.util.equals(CohortEligibilityStatus, a, b);
+  }
+}
+
+/**
+ * MigrationRouting is a complete leader-owned snapshot. Absence means unknown.
+ *
+ * @generated from message clustermetadata.MigrationRouting
+ */
+export class MigrationRouting extends Message<MigrationRouting> {
+  /**
+   * @generated from field: clustermetadata.MigrationMode mode = 1;
+   */
+  mode = MigrationMode.UNSET;
+
+  /**
+   * @generated from field: string source_connection = 2;
+   */
+  sourceConnection = "";
+
+  constructor(data?: PartialMessage<MigrationRouting>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "clustermetadata.MigrationRouting";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "mode", kind: "enum", T: proto3.getEnumType(MigrationMode) },
+    { no: 2, name: "source_connection", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): MigrationRouting {
+    return new MigrationRouting().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): MigrationRouting {
+    return new MigrationRouting().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): MigrationRouting {
+    return new MigrationRouting().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: MigrationRouting | PlainMessage<MigrationRouting> | undefined, b: MigrationRouting | PlainMessage<MigrationRouting> | undefined): boolean {
+    return proto3.util.equals(MigrationRouting, a, b);
   }
 }
 

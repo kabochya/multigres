@@ -29,6 +29,14 @@ option go_package = "github.com/multigres/multigres/go/pb/multipoolerservice";
 
 // MultipoolerService provides connection pooling and query execution
 service MultipoolerService {
+  // ServingControl performs target-admin operations on the managed authority.
+  rpc ServingControl(ServingControlRequest) returns (ServingControlResponse);
+  // GetSourceConnection returns protected source configuration to a pooler.
+  rpc GetSourceConnection(GetSourceConnectionRequest) returns (GetSourceConnectionResponse);
+  // GetMigrationMode reads committed routing intent from the target authority.
+  rpc GetMigrationMode(GetMigrationModeRequest) returns (GetMigrationModeResponse);
+  // Observe the expected durable operation and complete local routing enforcement.
+  rpc RefreshRouting(RefreshRoutingRequest) returns (RefreshRoutingResponse);
   // ExecuteQuery executes a SQL query and returns the result
   // This should be used sparingly only when we know the result set is small,
   // otherwise StreamExecute should be used.
@@ -242,6 +250,9 @@ message GetAuthCredentialsRequest {
 
   // username is the PostgreSQL username to authenticate.
   string username = 2;
+
+  // serving_admin requires protected control authorization and target superuser.
+  bool serving_admin = 3;
 }
 
 // GetAuthCredentialsResponse represents the response containing authentication credentials.
@@ -621,6 +632,13 @@ message StreamPoolerHealthResponse {
   // replication_lag_ns is the current replication lag in nanoseconds,
   // measured via heartbeat timestamps. Zero on a leader or when unknown.
   int64 replication_lag_ns = 6;
+
+  // Backend readiness is independent of application admission.
+  bool backend_ready = 7;
+  clustermetadata.ExternalBackendIdentity backend_identity = 8;
+
+  // Only the current managed primary publishes this authoritative snapshot.
+  clustermetadata.MigrationRouting migration_routing = 9;
 }
 
 // NotificationStreamRequest updates the subscribed channels for one gateway
@@ -645,4 +663,66 @@ message NotificationStreamRequest {
 message NotificationStreamResponse {
   query.PgNotification notification = 1;
   bool ready = 2;
+}
+
+// SourceConnection credentials are never included in health or topology.
+message SourceConnection {
+  string name = 1;
+  string host = 2;
+  uint32 port = 3;
+  string database = 4;
+  string username = 5;
+  string password = 6;
+  string ssl_mode = 7;
+  string ssl_root_cert = 8;
+  string ssl_negotiation = 9;
+}
+message ServingControlRequest {
+  string database = 1;
+  string operation = 2;
+  string connection_name = 3;
+  SourceConnection connection = 4;
+  string username = 5;
+  string request_id = 6;
+
+  // user_auth must prove this session matches the current target verifier.
+  query.UserAuth user_auth = 7;
+}
+message ServingControlResponse {
+  clustermetadata.MigrationRouting routing = 1;
+  ServingOperationStatus operation_status = 2;
+}
+
+// Durable enforcement progress, distinct from routing mode FENCED.
+message ServingOperationStatus {
+  string request_id = 1;
+  string operation = 2;
+  bool completed = 3;
+  bool active = 4;
+}
+message GetSourceConnectionRequest {
+  string database = 1;
+  string connection_name = 2;
+}
+message GetSourceConnectionResponse {
+  SourceConnection connection = 1;
+  clustermetadata.MigrationRouting routing = 2;
+}
+message GetMigrationModeRequest {
+  string database = 1;
+}
+message GetMigrationModeResponse {
+  clustermetadata.MigrationRouting routing = 1;
+}
+// Expectations never override the authoritative catalog.
+message RefreshRoutingRequest {
+  string database = 1;
+  string operation_id = 2;
+  clustermetadata.MigrationMode expected_mode = 3;
+}
+message RefreshRoutingResponse {
+  string operation_id = 1;
+  clustermetadata.MigrationMode mode = 2;
+  clustermetadata.ID process_id = 3;
+  bool admission_open = 4;
 }

@@ -36,6 +36,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	MultipoolerService_ServingControl_FullMethodName            = "/multipoolerservice.MultipoolerService/ServingControl"
+	MultipoolerService_GetSourceConnection_FullMethodName       = "/multipoolerservice.MultipoolerService/GetSourceConnection"
+	MultipoolerService_GetMigrationMode_FullMethodName          = "/multipoolerservice.MultipoolerService/GetMigrationMode"
+	MultipoolerService_RefreshRouting_FullMethodName            = "/multipoolerservice.MultipoolerService/RefreshRouting"
 	MultipoolerService_ExecuteQuery_FullMethodName              = "/multipoolerservice.MultipoolerService/ExecuteQuery"
 	MultipoolerService_StreamExecute_FullMethodName             = "/multipoolerservice.MultipoolerService/StreamExecute"
 	MultipoolerService_PortalStreamExecute_FullMethodName       = "/multipoolerservice.MultipoolerService/PortalStreamExecute"
@@ -56,6 +60,14 @@ const (
 //
 // MultipoolerService provides connection pooling and query execution
 type MultipoolerServiceClient interface {
+	// ServingControl performs target-admin operations on the managed authority.
+	ServingControl(ctx context.Context, in *ServingControlRequest, opts ...grpc.CallOption) (*ServingControlResponse, error)
+	// GetSourceConnection returns protected source configuration to a pooler.
+	GetSourceConnection(ctx context.Context, in *GetSourceConnectionRequest, opts ...grpc.CallOption) (*GetSourceConnectionResponse, error)
+	// GetMigrationMode reads committed routing intent from the target authority.
+	GetMigrationMode(ctx context.Context, in *GetMigrationModeRequest, opts ...grpc.CallOption) (*GetMigrationModeResponse, error)
+	// Observe the expected durable operation and complete local routing enforcement.
+	RefreshRouting(ctx context.Context, in *RefreshRoutingRequest, opts ...grpc.CallOption) (*RefreshRoutingResponse, error)
 	// ExecuteQuery executes a SQL query and returns the result
 	// This should be used sparingly only when we know the result set is small,
 	// otherwise StreamExecute should be used.
@@ -124,6 +136,46 @@ type multipoolerServiceClient struct {
 
 func NewMultipoolerServiceClient(cc grpc.ClientConnInterface) MultipoolerServiceClient {
 	return &multipoolerServiceClient{cc}
+}
+
+func (c *multipoolerServiceClient) ServingControl(ctx context.Context, in *ServingControlRequest, opts ...grpc.CallOption) (*ServingControlResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ServingControlResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_ServingControl_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *multipoolerServiceClient) GetSourceConnection(ctx context.Context, in *GetSourceConnectionRequest, opts ...grpc.CallOption) (*GetSourceConnectionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSourceConnectionResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_GetSourceConnection_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *multipoolerServiceClient) GetMigrationMode(ctx context.Context, in *GetMigrationModeRequest, opts ...grpc.CallOption) (*GetMigrationModeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetMigrationModeResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_GetMigrationMode_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *multipoolerServiceClient) RefreshRouting(ctx context.Context, in *RefreshRoutingRequest, opts ...grpc.CallOption) (*RefreshRoutingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RefreshRoutingResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_RefreshRouting_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *multipoolerServiceClient) ExecuteQuery(ctx context.Context, in *ExecuteQueryRequest, opts ...grpc.CallOption) (*ExecuteQueryResponse, error) {
@@ -288,6 +340,14 @@ type MultipoolerService_NotificationStreamClient = grpc.BidiStreamingClient[Noti
 //
 // MultipoolerService provides connection pooling and query execution
 type MultipoolerServiceServer interface {
+	// ServingControl performs target-admin operations on the managed authority.
+	ServingControl(context.Context, *ServingControlRequest) (*ServingControlResponse, error)
+	// GetSourceConnection returns protected source configuration to a pooler.
+	GetSourceConnection(context.Context, *GetSourceConnectionRequest) (*GetSourceConnectionResponse, error)
+	// GetMigrationMode reads committed routing intent from the target authority.
+	GetMigrationMode(context.Context, *GetMigrationModeRequest) (*GetMigrationModeResponse, error)
+	// Observe the expected durable operation and complete local routing enforcement.
+	RefreshRouting(context.Context, *RefreshRoutingRequest) (*RefreshRoutingResponse, error)
 	// ExecuteQuery executes a SQL query and returns the result
 	// This should be used sparingly only when we know the result set is small,
 	// otherwise StreamExecute should be used.
@@ -358,6 +418,18 @@ type MultipoolerServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedMultipoolerServiceServer struct{}
 
+func (UnimplementedMultipoolerServiceServer) ServingControl(context.Context, *ServingControlRequest) (*ServingControlResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ServingControl not implemented")
+}
+func (UnimplementedMultipoolerServiceServer) GetSourceConnection(context.Context, *GetSourceConnectionRequest) (*GetSourceConnectionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetSourceConnection not implemented")
+}
+func (UnimplementedMultipoolerServiceServer) GetMigrationMode(context.Context, *GetMigrationModeRequest) (*GetMigrationModeResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetMigrationMode not implemented")
+}
+func (UnimplementedMultipoolerServiceServer) RefreshRouting(context.Context, *RefreshRoutingRequest) (*RefreshRoutingResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RefreshRouting not implemented")
+}
 func (UnimplementedMultipoolerServiceServer) ExecuteQuery(context.Context, *ExecuteQueryRequest) (*ExecuteQueryResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ExecuteQuery not implemented")
 }
@@ -413,6 +485,78 @@ func RegisterMultipoolerServiceServer(s grpc.ServiceRegistrar, srv MultipoolerSe
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&MultipoolerService_ServiceDesc, srv)
+}
+
+func _MultipoolerService_ServingControl_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ServingControlRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MultipoolerServiceServer).ServingControl(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MultipoolerService_ServingControl_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MultipoolerServiceServer).ServingControl(ctx, req.(*ServingControlRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MultipoolerService_GetSourceConnection_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSourceConnectionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MultipoolerServiceServer).GetSourceConnection(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MultipoolerService_GetSourceConnection_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MultipoolerServiceServer).GetSourceConnection(ctx, req.(*GetSourceConnectionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MultipoolerService_GetMigrationMode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetMigrationModeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MultipoolerServiceServer).GetMigrationMode(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MultipoolerService_GetMigrationMode_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MultipoolerServiceServer).GetMigrationMode(ctx, req.(*GetMigrationModeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MultipoolerService_RefreshRouting_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RefreshRoutingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MultipoolerServiceServer).RefreshRouting(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MultipoolerService_RefreshRouting_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MultipoolerServiceServer).RefreshRouting(ctx, req.(*RefreshRoutingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _MultipoolerService_ExecuteQuery_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -584,6 +728,22 @@ var MultipoolerService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "multipoolerservice.MultipoolerService",
 	HandlerType: (*MultipoolerServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "ServingControl",
+			Handler:    _MultipoolerService_ServingControl_Handler,
+		},
+		{
+			MethodName: "GetSourceConnection",
+			Handler:    _MultipoolerService_GetSourceConnection_Handler,
+		},
+		{
+			MethodName: "GetMigrationMode",
+			Handler:    _MultipoolerService_GetMigrationMode_Handler,
+		},
+		{
+			MethodName: "RefreshRouting",
+			Handler:    _MultipoolerService_RefreshRouting_Handler,
+		},
 		{
 			MethodName: "ExecuteQuery",
 			Handler:    _MultipoolerService_ExecuteQuery_Handler,

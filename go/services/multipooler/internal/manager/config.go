@@ -25,6 +25,10 @@ import (
 
 // Config holds configuration for the MultipoolerManager
 type Config struct {
+	// MigrationKey encrypts catalog credentials; nil disables migration control.
+	MigrationKey     []byte
+	SourceConnection string
+
 	// ExternalHost and ExternalDatabase are unmanaged backend coordinates, not pooler identity.
 	ExternalHost        string
 	ExternalDatabase    string
