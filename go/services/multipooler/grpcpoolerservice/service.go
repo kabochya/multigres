@@ -1058,7 +1058,7 @@ func (s *poolerService) StreamPoolerHealth(req *multipoolerpb.StreamPoolerHealth
 func healthStateToProto(state *poolerserver.HealthState) *multipoolerpb.StreamPoolerHealthResponse {
 	resp := &multipoolerpb.StreamPoolerHealthResponse{
 		RoutingPolicy: state.RoutingPolicy, RoutingPolicyRequired: state.RoutingPolicyRequired,
-		BackendReady: state.BackendReady, BackendIdentity: state.BackendIdentity,
+		BackendReady: state.BackendReady, BackendIdentity: state.BackendIdentity, ProcessIncarnation: state.ProcessIncarnation,
 		PoolerId:      state.PoolerID,
 		ServingStatus: state.ServingStatus,
 		RoutingState:  state.RoutingState,

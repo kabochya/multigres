@@ -127,3 +127,34 @@ completion acknowledgment. Routing publication has separate initialization.
 
 The local integration fixture writes normalized intents to test the primitives;
 it is not a production migration controller and supplies no replication barrier.
+
+## Lifecycle and retirement contract
+
+Stable topology/consensus membership IDs are distinct from random process-start
+incarnations. Preparing registration and health advertise the incarnation;
+RefreshAdmission requires the expected incarnation and returns it with the
+acknowledgment. A replacement cannot inherit an old process acknowledgment.
+Gateways reject health from an obsolete incarnation when topology identifies the
+replacement. Coordinated deployment is required for controlled migrations.
+
+ReadSourceLifecycle provides a normalized controller-written authorization,
+independent of routing and readiness. Retirement refers to the exact retained
+source CLOSED intent, owner and configuration binding. Proof release is a
+separate exact-process authorization, granted only after the controller checks
+termination evidence and all recoverable journal references. The metadata
+helper validates binding/closure; it does not decide workflow completion or
+infer termination. Source Pods use never-restart semantics and unique Pod UID
+component identities; operator termination proof covers that exact Pod process.
+
+Uninterrupted initialized sources retain admission during target outages.
+Backend withdrawal/reconnect invalidates initialization and closes the gate;
+reopening requires current authority and physical/configuration identity.
+Invalid authoritative controlled metadata closes admission. First installation
+can establish an ordinary marker; a missing scope row in an already installed
+catalog is not recreated as ordinary during restart/recovery. Controlled marker
+and terminal intents must survive routine migration cleanup.
+
+Lifecycle and health reconnect events trigger bounded initialization retries.
+Read-only health publication of an initialized process triggers no recurring
+confirmation transaction. No migration-specific periodic state poller or peer
+subscription is introduced.

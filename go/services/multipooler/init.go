@@ -23,6 +23,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"google.golang.org/grpc"
@@ -419,6 +421,7 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 
 	// Resolve service ID early for telemetry resource attributes
 	serviceID := mp.serviceID.Get()
+	processIncarnation := uuid.NewString()
 	if serviceID == "" {
 		serviceID = servenv.GenerateRandomServiceID()
 	}
@@ -468,6 +471,7 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 		}
 		initial := topoclient.NewMultipooler(serviceID, cell, mp.senv.GetHostname())
 		initial.ManagementMode = mode
+		initial.ProcessIncarnation = processIncarnation
 		initial.SourceConnection = mp.sourceConnection.Get()
 		initial.ShardKey = &clustermetadatapb.ShardKey{Database: mp.database.Get(), TableGroup: mp.tableGroup.Get(), Shard: mp.shard.Get()}
 		initial.PortMap["grpc"] = int32(mp.grpcServer.Port())
@@ -565,6 +569,7 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 	// Create multipooler record with all fields now that servenv.Init() has set them up
 	multipooler := topoclient.NewMultipooler(serviceID, cell, mp.senv.GetHostname())
 	multipooler.ManagementMode = mode
+	multipooler.ProcessIncarnation = processIncarnation
 	multipooler.SourceConnection = mp.sourceConnection.Get()
 	multipooler.SourceConfigurationBinding = sourceBinding
 	multipooler.PortMap["grpc"] = int32(mp.grpcServer.Port())

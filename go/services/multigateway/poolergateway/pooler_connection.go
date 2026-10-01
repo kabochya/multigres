@@ -406,6 +406,9 @@ func (pc *poolerConnection) streamHealth(
 		if streamCtx.Err() != nil {
 			return streamCtx.Err()
 		}
+		if incarnation := pc.PoolerInfo().GetProcessIncarnation(); incarnation != "" && response.GetProcessIncarnation() != incarnation {
+			return errors.New("obsolete pooler health incarnation")
+		}
 
 		// Process the health response.
 		pc.processHealthResponse(response)

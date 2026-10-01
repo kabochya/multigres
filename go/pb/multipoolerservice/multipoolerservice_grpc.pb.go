@@ -36,6 +36,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	MultipoolerService_ReadSourceLifecycle_FullMethodName       = "/multipoolerservice.MultipoolerService/ReadSourceLifecycle"
 	MultipoolerService_RefreshAdmission_FullMethodName          = "/multipoolerservice.MultipoolerService/RefreshAdmission"
 	MultipoolerService_ReadAdmissionIntent_FullMethodName       = "/multipoolerservice.MultipoolerService/ReadAdmissionIntent"
 	MultipoolerService_SetRoutingPolicy_FullMethodName          = "/multipoolerservice.MultipoolerService/SetRoutingPolicy"
@@ -63,6 +64,7 @@ const (
 //
 // MultipoolerService provides connection pooling and query execution
 type MultipoolerServiceClient interface {
+	ReadSourceLifecycle(ctx context.Context, in *ReadSourceLifecycleRequest, opts ...grpc.CallOption) (*ReadSourceLifecycleResponse, error)
 	// Controller expectations correlate with metadata; they cannot override it.
 	RefreshAdmission(ctx context.Context, in *RefreshAdmissionRequest, opts ...grpc.CallOption) (*RefreshAdmissionResponse, error)
 	ReadAdmissionIntent(ctx context.Context, in *ReadAdmissionIntentRequest, opts ...grpc.CallOption) (*ReadAdmissionIntentResponse, error)
@@ -147,6 +149,16 @@ type multipoolerServiceClient struct {
 
 func NewMultipoolerServiceClient(cc grpc.ClientConnInterface) MultipoolerServiceClient {
 	return &multipoolerServiceClient{cc}
+}
+
+func (c *multipoolerServiceClient) ReadSourceLifecycle(ctx context.Context, in *ReadSourceLifecycleRequest, opts ...grpc.CallOption) (*ReadSourceLifecycleResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadSourceLifecycleResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_ReadSourceLifecycle_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *multipoolerServiceClient) RefreshAdmission(ctx context.Context, in *RefreshAdmissionRequest, opts ...grpc.CallOption) (*RefreshAdmissionResponse, error) {
@@ -384,6 +396,7 @@ type MultipoolerService_NotificationStreamClient = grpc.BidiStreamingClient[Noti
 //
 // MultipoolerService provides connection pooling and query execution
 type MultipoolerServiceServer interface {
+	ReadSourceLifecycle(context.Context, *ReadSourceLifecycleRequest) (*ReadSourceLifecycleResponse, error)
 	// Controller expectations correlate with metadata; they cannot override it.
 	RefreshAdmission(context.Context, *RefreshAdmissionRequest) (*RefreshAdmissionResponse, error)
 	ReadAdmissionIntent(context.Context, *ReadAdmissionIntentRequest) (*ReadAdmissionIntentResponse, error)
@@ -470,6 +483,9 @@ type MultipoolerServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedMultipoolerServiceServer struct{}
 
+func (UnimplementedMultipoolerServiceServer) ReadSourceLifecycle(context.Context, *ReadSourceLifecycleRequest) (*ReadSourceLifecycleResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReadSourceLifecycle not implemented")
+}
 func (UnimplementedMultipoolerServiceServer) RefreshAdmission(context.Context, *RefreshAdmissionRequest) (*RefreshAdmissionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RefreshAdmission not implemented")
 }
@@ -546,6 +562,24 @@ func RegisterMultipoolerServiceServer(s grpc.ServiceRegistrar, srv MultipoolerSe
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&MultipoolerService_ServiceDesc, srv)
+}
+
+func _MultipoolerService_ReadSourceLifecycle_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadSourceLifecycleRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MultipoolerServiceServer).ReadSourceLifecycle(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MultipoolerService_ReadSourceLifecycle_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MultipoolerServiceServer).ReadSourceLifecycle(ctx, req.(*ReadSourceLifecycleRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _MultipoolerService_RefreshAdmission_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -832,6 +866,10 @@ var MultipoolerService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "multipoolerservice.MultipoolerService",
 	HandlerType: (*MultipoolerServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "ReadSourceLifecycle",
+			Handler:    _MultipoolerService_ReadSourceLifecycle_Handler,
+		},
 		{
 			MethodName: "RefreshAdmission",
 			Handler:    _MultipoolerService_RefreshAdmission_Handler,

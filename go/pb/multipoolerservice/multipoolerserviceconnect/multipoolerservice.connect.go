@@ -49,6 +49,9 @@ const (
 // reflection-formatted method names, remove the leading slash and convert the remaining slash to a
 // period.
 const (
+	// MultipoolerServiceReadSourceLifecycleProcedure is the fully-qualified name of the
+	// MultipoolerService's ReadSourceLifecycle RPC.
+	MultipoolerServiceReadSourceLifecycleProcedure = "/multipoolerservice.MultipoolerService/ReadSourceLifecycle"
 	// MultipoolerServiceRefreshAdmissionProcedure is the fully-qualified name of the
 	// MultipoolerService's RefreshAdmission RPC.
 	MultipoolerServiceRefreshAdmissionProcedure = "/multipoolerservice.MultipoolerService/RefreshAdmission"
@@ -110,6 +113,7 @@ const (
 
 // MultipoolerServiceClient is a client for the multipoolerservice.MultipoolerService service.
 type MultipoolerServiceClient interface {
+	ReadSourceLifecycle(context.Context, *connect.Request[multipoolerservice.ReadSourceLifecycleRequest]) (*connect.Response[multipoolerservice.ReadSourceLifecycleResponse], error)
 	// Controller expectations correlate with metadata; they cannot override it.
 	RefreshAdmission(context.Context, *connect.Request[multipoolerservice.RefreshAdmissionRequest]) (*connect.Response[multipoolerservice.RefreshAdmissionResponse], error)
 	ReadAdmissionIntent(context.Context, *connect.Request[multipoolerservice.ReadAdmissionIntentRequest]) (*connect.Response[multipoolerservice.ReadAdmissionIntentResponse], error)
@@ -199,6 +203,12 @@ func NewMultipoolerServiceClient(httpClient connect.HTTPClient, baseURL string, 
 	baseURL = strings.TrimRight(baseURL, "/")
 	multipoolerServiceMethods := multipoolerservice.File_multipoolerservice_proto.Services().ByName("MultipoolerService").Methods()
 	return &multipoolerServiceClient{
+		readSourceLifecycle: connect.NewClient[multipoolerservice.ReadSourceLifecycleRequest, multipoolerservice.ReadSourceLifecycleResponse](
+			httpClient,
+			baseURL+MultipoolerServiceReadSourceLifecycleProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("ReadSourceLifecycle")),
+			connect.WithClientOptions(opts...),
+		),
 		refreshAdmission: connect.NewClient[multipoolerservice.RefreshAdmissionRequest, multipoolerservice.RefreshAdmissionResponse](
 			httpClient,
 			baseURL+MultipoolerServiceRefreshAdmissionProcedure,
@@ -318,6 +328,7 @@ func NewMultipoolerServiceClient(httpClient connect.HTTPClient, baseURL string, 
 
 // multipoolerServiceClient implements MultipoolerServiceClient.
 type multipoolerServiceClient struct {
+	readSourceLifecycle       *connect.Client[multipoolerservice.ReadSourceLifecycleRequest, multipoolerservice.ReadSourceLifecycleResponse]
 	refreshAdmission          *connect.Client[multipoolerservice.RefreshAdmissionRequest, multipoolerservice.RefreshAdmissionResponse]
 	readAdmissionIntent       *connect.Client[multipoolerservice.ReadAdmissionIntentRequest, multipoolerservice.ReadAdmissionIntentResponse]
 	setRoutingPolicy          *connect.Client[multipoolerservice.SetRoutingPolicyRequest, multipoolerservice.SetRoutingPolicyResponse]
@@ -337,6 +348,11 @@ type multipoolerServiceClient struct {
 	releaseReservedConnection *connect.Client[multipoolerservice.ReleaseReservedConnectionRequest, multipoolerservice.ReleaseReservedConnectionResponse]
 	streamPoolerHealth        *connect.Client[multipoolerservice.StreamPoolerHealthRequest, multipoolerservice.StreamPoolerHealthResponse]
 	notificationStream        *connect.Client[multipoolerservice.NotificationStreamRequest, multipoolerservice.NotificationStreamResponse]
+}
+
+// ReadSourceLifecycle calls multipoolerservice.MultipoolerService.ReadSourceLifecycle.
+func (c *multipoolerServiceClient) ReadSourceLifecycle(ctx context.Context, req *connect.Request[multipoolerservice.ReadSourceLifecycleRequest]) (*connect.Response[multipoolerservice.ReadSourceLifecycleResponse], error) {
+	return c.readSourceLifecycle.CallUnary(ctx, req)
 }
 
 // RefreshAdmission calls multipoolerservice.MultipoolerService.RefreshAdmission.
@@ -437,6 +453,7 @@ func (c *multipoolerServiceClient) NotificationStream(ctx context.Context) *conn
 // MultipoolerServiceHandler is an implementation of the multipoolerservice.MultipoolerService
 // service.
 type MultipoolerServiceHandler interface {
+	ReadSourceLifecycle(context.Context, *connect.Request[multipoolerservice.ReadSourceLifecycleRequest]) (*connect.Response[multipoolerservice.ReadSourceLifecycleResponse], error)
 	// Controller expectations correlate with metadata; they cannot override it.
 	RefreshAdmission(context.Context, *connect.Request[multipoolerservice.RefreshAdmissionRequest]) (*connect.Response[multipoolerservice.RefreshAdmissionResponse], error)
 	ReadAdmissionIntent(context.Context, *connect.Request[multipoolerservice.ReadAdmissionIntentRequest]) (*connect.Response[multipoolerservice.ReadAdmissionIntentResponse], error)
@@ -522,6 +539,12 @@ type MultipoolerServiceHandler interface {
 // and JSON codecs. They also support gzip compression.
 func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
 	multipoolerServiceMethods := multipoolerservice.File_multipoolerservice_proto.Services().ByName("MultipoolerService").Methods()
+	multipoolerServiceReadSourceLifecycleHandler := connect.NewUnaryHandler(
+		MultipoolerServiceReadSourceLifecycleProcedure,
+		svc.ReadSourceLifecycle,
+		connect.WithSchema(multipoolerServiceMethods.ByName("ReadSourceLifecycle")),
+		connect.WithHandlerOptions(opts...),
+	)
 	multipoolerServiceRefreshAdmissionHandler := connect.NewUnaryHandler(
 		MultipoolerServiceRefreshAdmissionProcedure,
 		svc.RefreshAdmission,
@@ -638,6 +661,8 @@ func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect
 	)
 	return "/multipoolerservice.MultipoolerService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case MultipoolerServiceReadSourceLifecycleProcedure:
+			multipoolerServiceReadSourceLifecycleHandler.ServeHTTP(w, r)
 		case MultipoolerServiceRefreshAdmissionProcedure:
 			multipoolerServiceRefreshAdmissionHandler.ServeHTTP(w, r)
 		case MultipoolerServiceReadAdmissionIntentProcedure:
@@ -684,6 +709,10 @@ func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect
 
 // UnimplementedMultipoolerServiceHandler returns CodeUnimplemented from all methods.
 type UnimplementedMultipoolerServiceHandler struct{}
+
+func (UnimplementedMultipoolerServiceHandler) ReadSourceLifecycle(context.Context, *connect.Request[multipoolerservice.ReadSourceLifecycleRequest]) (*connect.Response[multipoolerservice.ReadSourceLifecycleResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.ReadSourceLifecycle is not implemented"))
+}
 
 func (UnimplementedMultipoolerServiceHandler) RefreshAdmission(context.Context, *connect.Request[multipoolerservice.RefreshAdmissionRequest]) (*connect.Response[multipoolerservice.RefreshAdmissionResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.RefreshAdmission is not implemented"))

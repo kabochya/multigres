@@ -1123,6 +1123,13 @@ export class Multipooler extends Message<Multipooler> {
    */
   sourceConfigurationBinding = "";
 
+  /**
+   * Random process-lifetime identity, distinct from stable consensus membership.
+   *
+   * @generated from field: string process_incarnation = 17;
+   */
+  processIncarnation = "";
+
   constructor(data?: PartialMessage<Multipooler>) {
     super();
     proto3.util.initPartial(data, this);
@@ -1145,6 +1152,7 @@ export class Multipooler extends Message<Multipooler> {
     { no: 14, name: "management_mode", kind: "enum", T: proto3.getEnumType(PoolerManagementMode) },
     { no: 15, name: "source_connection", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 16, name: "source_configuration_binding", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 17, name: "process_incarnation", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): Multipooler {
@@ -2944,6 +2952,75 @@ export class AdmissionSnapshot extends Message<AdmissionSnapshot> {
 
   static equals(a: AdmissionSnapshot | PlainMessage<AdmissionSnapshot> | undefined, b: AdmissionSnapshot | PlainMessage<AdmissionSnapshot> | undefined): boolean {
     return proto3.util.equals(AdmissionSnapshot, a, b);
+  }
+}
+
+/**
+ * Controller authorization is independent of topology termination evidence.
+ *
+ * @generated from message clustermetadata.SourceLifecycleAuthorization
+ */
+export class SourceLifecycleAuthorization extends Message<SourceLifecycleAuthorization> {
+  /**
+   * @generated from field: string owner = 1;
+   */
+  owner = "";
+
+  /**
+   * @generated from field: string closed_intent_id = 2;
+   */
+  closedIntentId = "";
+
+  /**
+   * @generated from field: string source_connection = 3;
+   */
+  sourceConnection = "";
+
+  /**
+   * @generated from field: string source_configuration_binding = 4;
+   */
+  sourceConfigurationBinding = "";
+
+  /**
+   * @generated from field: bool retire_source = 5;
+   */
+  retireSource = false;
+
+  /**
+   * @generated from field: repeated clustermetadata.ID proof_release_processes = 6;
+   */
+  proofReleaseProcesses: ID[] = [];
+
+  constructor(data?: PartialMessage<SourceLifecycleAuthorization>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "clustermetadata.SourceLifecycleAuthorization";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "owner", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "closed_intent_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "source_connection", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "source_configuration_binding", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 5, name: "retire_source", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 6, name: "proof_release_processes", kind: "message", T: ID, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SourceLifecycleAuthorization {
+    return new SourceLifecycleAuthorization().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SourceLifecycleAuthorization {
+    return new SourceLifecycleAuthorization().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SourceLifecycleAuthorization {
+    return new SourceLifecycleAuthorization().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SourceLifecycleAuthorization | PlainMessage<SourceLifecycleAuthorization> | undefined, b: SourceLifecycleAuthorization | PlainMessage<SourceLifecycleAuthorization> | undefined): boolean {
+    return proto3.util.equals(SourceLifecycleAuthorization, a, b);
   }
 }
 

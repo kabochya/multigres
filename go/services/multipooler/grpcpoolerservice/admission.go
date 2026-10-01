@@ -38,3 +38,12 @@ func (s *poolerService) RefreshAdmission(ctx context.Context, r *rpc.RefreshAdmi
 	v, err := p.RefreshAdmission(ctx, r)
 	return v, mterrors.ToGRPC(err)
 }
+
+func (s *poolerService) ReadSourceLifecycle(ctx context.Context, r *rpc.ReadSourceLifecycleRequest) (*rpc.ReadSourceLifecycleResponse, error) {
+	p, err := s.pooler.AdmissionProvider()
+	if err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
+	v, err := p.ReadSourceLifecycle(ctx, r)
+	return v, mterrors.ToGRPC(err)
+}

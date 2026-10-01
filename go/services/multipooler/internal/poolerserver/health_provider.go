@@ -30,6 +30,7 @@ import (
 type HealthState struct {
 	RoutingPolicy         *clustermetadatapb.GatewayRoutingPolicy
 	RoutingPolicyRequired bool
+	ProcessIncarnation    string
 	BackendReady          bool
 	BackendIdentity       *clustermetadatapb.ExternalBackendIdentity
 	// PoolerID identifies this multipooler instance.

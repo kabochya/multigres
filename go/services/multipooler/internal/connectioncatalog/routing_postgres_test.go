@@ -92,22 +92,8 @@ func TestPostgresRoutingUncertainCommitAndReplay(t *testing.T) {
 	require.Nil(t, p, "uncertain local routing cannot be published after process restart")
 	_, err = observer.Exec(t.Context(), "SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE wait_event='SyncRep'")
 	require.NoError(t, err)
-	startReplica := func(name string) (string, *pgx.Conn) {
-		data := filepath.Join(dir, name)
-		out, err := executil.Command(t.Context(), "pg_basebackup", "-h", "127.0.0.1", "-p", strconv.Itoa(port), "-U", "postgres", "-D", data, "-X", "stream").CombinedOutput()
-		require.NoError(t, err, "%s", out)
-		require.NoError(t, os.WriteFile(filepath.Join(data, "standby.signal"), nil, 0o600))
-		info := fmt.Sprintf("host=127.0.0.1 port=%d user=postgres application_name=%s", port, name)
-		require.NoError(t, os.WriteFile(filepath.Join(data, "postgresql.auto.conf"), []byte("primary_conninfo='"+info+"'\n"), 0o600))
-		replicaPort := postgresPort(t)
-		runPostgres(t, data, replicaPort)
-		replicaDSN := fmt.Sprintf("host=127.0.0.1 port=%d user=postgres dbname=postgres sslmode=disable", replicaPort)
-		var conn *pgx.Conn
-		require.Eventually(t, func() bool { conn, err = pgx.Connect(t.Context(), replicaDSN); return err == nil }, 10*time.Second, 20*time.Millisecond)
-		t.Cleanup(func() { _ = conn.Close(context.Background()) })
-		return replicaDSN, conn
-	}
-	_, syncReplica := startReplica("routing_standby")
+
+	_, syncReplica := startCatalogReplica(t, dir, port, "routing_standby")
 	require.Eventually(t, func() bool {
 		var sync bool
 		err := observer.QueryRow(t.Context(), "SELECT EXISTS(SELECT FROM pg_stat_replication WHERE application_name='routing_standby' AND sync_state='sync')").Scan(&sync)
@@ -118,7 +104,7 @@ func TestPostgresRoutingUncertainCommitAndReplay(t *testing.T) {
 	p, err = confirm(confirmedCtx)
 	require.NoError(t, err)
 	require.Equal(t, pb.RoutingDestination_ROUTING_DESTINATION_BLOCKED, p.Destination)
-	_, lagging := startReplica("routing_lagging")
+	_, lagging := startCatalogReplica(t, dir, port, "routing_lagging")
 	_, err = lagging.Exec(t.Context(), "SELECT pg_wal_replay_pause()")
 	require.NoError(t, err)
 	require.NoError(t, restarted.Transaction(t.Context(), func(ctx context.Context, tx executor.InternalTx) error {
@@ -134,4 +120,22 @@ func TestPostgresRoutingUncertainCommitAndReplay(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond)
 	require.NoError(t, syncReplica.QueryRow(t.Context(), "SELECT destination FROM multigres.gateway_routing WHERE database='postgres'").Scan(&mode))
 	require.Equal(t, int32(pb.RoutingDestination_ROUTING_DESTINATION_MANAGED), mode)
+}
+
+func startCatalogReplica(t *testing.T, dir string, port int, name string) (string, *pgx.Conn) {
+	t.Helper()
+	var err error
+	data := filepath.Join(dir, name)
+	out, err := executil.Command(t.Context(), "pg_basebackup", "-h", "127.0.0.1", "-p", strconv.Itoa(port), "-U", "postgres", "-D", data, "-X", "stream").CombinedOutput()
+	require.NoError(t, err, "%s", out)
+	require.NoError(t, os.WriteFile(filepath.Join(data, "standby.signal"), nil, 0o600))
+	info := fmt.Sprintf("host=127.0.0.1 port=%d user=postgres application_name=%s", port, name)
+	require.NoError(t, os.WriteFile(filepath.Join(data, "postgresql.auto.conf"), []byte("primary_conninfo='"+info+"'\n"), 0o600))
+	replicaPort := postgresPort(t)
+	runPostgres(t, data, replicaPort)
+	replicaDSN := fmt.Sprintf("host=127.0.0.1 port=%d user=postgres dbname=postgres sslmode=disable", replicaPort)
+	var conn *pgx.Conn
+	require.Eventually(t, func() bool { conn, err = pgx.Connect(t.Context(), replicaDSN); return err == nil }, 10*time.Second, 20*time.Millisecond)
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
+	return replicaDSN, conn
 }

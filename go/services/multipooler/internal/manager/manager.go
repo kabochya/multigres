@@ -402,6 +402,7 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 	// keeping the built-in default). Set before serving so the very first
 	// broadcast already advertises the override.
 	pm.healthStreamer.SetRecommendedStalenessTimeout(config.HealthStreamStalenessTimeout)
+	pm.healthStreamer.processIncarnation = multipooler.GetProcessIncarnation()
 
 	// shutdownCtx is independent of ctx: ctx is recreated on every Open(),
 	// while shutdownCtx exists for the lifetime of the manager and is
