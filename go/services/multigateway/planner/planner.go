@@ -22,6 +22,7 @@ import (
 
 	"github.com/multigres/multigres/go/common/constants"
 	"github.com/multigres/multigres/go/common/mterrors"
+	"github.com/multigres/multigres/go/common/parser"
 	"github.com/multigres/multigres/go/common/parser/ast"
 	"github.com/multigres/multigres/go/common/pgprotocol/server"
 	"github.com/multigres/multigres/go/services/multigateway/engine"
@@ -176,11 +177,17 @@ func (p *Planner) Plan(
 	opts PlanOptions,
 ) (*engine.Plan, error) {
 	p.logger.Debug("planning query",
-		"query", sql,
+		"query", parser.RedactServingSQL(sql),
 		"user", conn.User(),
 		"database", conn.Database(),
 		"default_tablegroup", p.defaultTableGroup,
 		"statement_type", stmt.NodeTag())
+
+	if control, ok := stmt.(*ast.ServingControlStmt); ok {
+		plan := engine.NewPlan(control.SqlString(), &engine.ServingControl{Statement: control})
+		plan.Type = "ServingControl"
+		return plan, nil
+	}
 
 	// unsafeConnection is the per-connection opt-out. It suppresses the
 	// unsafe-statement rejections and pins+quarantines the backend. Because it

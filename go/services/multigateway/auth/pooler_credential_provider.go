@@ -148,3 +148,11 @@ func (p *PoolerCredentialProvider) GetCredentials(ctx context.Context, username,
 // the init.go ListenerConfig assignment fails at compile time if the
 // interface drifts.
 var _ server.CredentialProvider = (*PoolerCredentialProvider)(nil)
+
+// ServingAdminClient restricts an optional admin listener to target-superuser
+// credential lookup over the protected control channel.
+type ServingAdminClient struct{ Client PoolerSystemClient }
+
+func (c ServingAdminClient) GetAuthCredentials(ctx context.Context, req *multipoolerpb.GetAuthCredentialsRequest) (*multipoolerpb.GetAuthCredentialsResponse, error) {
+	return c.Client.GetAuthCredentials(ctx, &multipoolerpb.GetAuthCredentialsRequest{Database: req.Database, Username: req.Username, ServingAdmin: true})
+}

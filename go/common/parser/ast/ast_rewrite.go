@@ -506,6 +506,8 @@ func (a *application) rewriteNode(parent Node, node Node, replacer replacerFunc)
 		return a.rewriteRefOfSecLabelStmt(parent, node, replacer)
 	case *SelectStmt:
 		return a.rewriteRefOfSelectStmt(parent, node, replacer)
+	case *ServingControlStmt:
+		return a.rewriteRefOfServingControlStmt(parent, node, replacer)
 	case *SetOperationStmt:
 		return a.rewriteRefOfSetOperationStmt(parent, node, replacer)
 	case *SetToDefault:
@@ -10651,6 +10653,37 @@ func (a *application) rewriteRefOfSelectStmt(parent Node, node *SelectStmt, repl
 }
 
 // Function Generation Source: PtrToStructMethod
+func (a *application) rewriteRefOfServingControlStmt(parent Node, node *ServingControlStmt, replacer replacerFunc) bool {
+	if node == nil {
+		return true
+	}
+	if a.pre != nil {
+		a.cur.replacer = replacer
+		a.cur.parent = parent
+		a.cur.node = node
+		kontinue := !a.pre(&a.cur)
+		if a.cur.revisit {
+			a.cur.revisit = false
+			return a.rewriteNode(parent, a.cur.node, replacer)
+		}
+		if kontinue {
+			return true
+		}
+	}
+	if a.post != nil {
+		if a.pre == nil {
+			a.cur.replacer = replacer
+			a.cur.parent = parent
+			a.cur.node = node
+		}
+		if !a.post(&a.cur) {
+			return false
+		}
+	}
+	return true
+}
+
+// Function Generation Source: PtrToStructMethod
 func (a *application) rewriteRefOfSetOperationStmt(parent Node, node *SetOperationStmt, replacer replacerFunc) bool {
 	if node == nil {
 		return true
@@ -11174,6 +11207,8 @@ func (a *application) rewriteStmt(parent Node, node Stmt, replacer replacerFunc)
 		return a.rewriteRefOfSecLabelStmt(parent, node, replacer)
 	case *SelectStmt:
 		return a.rewriteRefOfSelectStmt(parent, node, replacer)
+	case *ServingControlStmt:
+		return a.rewriteRefOfServingControlStmt(parent, node, replacer)
 	case *SinglePartitionSpec:
 		return a.rewriteRefOfSinglePartitionSpec(parent, node, replacer)
 	case *SortBy:

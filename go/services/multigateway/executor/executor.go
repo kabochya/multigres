@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/multigres/multigres/go/common/constants"
+	"github.com/multigres/multigres/go/common/parser"
 	"github.com/multigres/multigres/go/common/parser/ast"
 	"github.com/multigres/multigres/go/common/pgprotocol/server"
 	"github.com/multigres/multigres/go/common/preparedstatement"
@@ -111,7 +112,7 @@ func (e *Executor) StreamExecute(
 	callback func(ctx context.Context, res *sqltypes.Result) error,
 ) (*handler.ExecuteResult, error) {
 	e.logger.DebugContext(ctx, "executing query",
-		"query", queryStr,
+		"query", parser.RedactServingSQL(queryStr),
 		"user", conn.User(),
 		"database", conn.Database(),
 		"connection_id", conn.ConnectionID())
@@ -121,7 +122,7 @@ func (e *Executor) StreamExecute(
 	planTime := time.Since(planStart)
 	if err != nil {
 		e.logger.ErrorContext(ctx, "query planning failed",
-			"query", queryStr,
+			"query", parser.RedactServingSQL(queryStr),
 			"error", err)
 		return &handler.ExecuteResult{
 			PlanTime:      planTime,
@@ -142,7 +143,7 @@ func (e *Executor) StreamExecute(
 	err = plan.StreamExecute(ctx, e.exec, conn, state, bindVars, callback)
 	if err != nil {
 		e.logger.ErrorContext(ctx, "query execution failed",
-			"query", queryStr,
+			"query", parser.RedactServingSQL(queryStr),
 			"plan", plan.String(),
 			"error", err)
 	}
@@ -260,7 +261,7 @@ func (e *Executor) PortalStreamExecute(
 	planTime := time.Since(planStart)
 	if err != nil {
 		e.logger.ErrorContext(ctx, "portal query planning failed",
-			"query", portalInfo.PreparedStatementInfo.Query, "error", err)
+			"query", parser.RedactServingSQL(portalInfo.PreparedStatementInfo.Query), "error", err)
 		return &handler.ExecuteResult{
 			PlanTime:      planTime,
 			NormalizedSQL: normalizedSQL,
@@ -279,7 +280,7 @@ func (e *Executor) PortalStreamExecute(
 	err = plan.PortalStreamExecute(ctx, e.exec, conn, state, portalInfo, maxRows, includeDescribe, callback)
 	if err != nil {
 		e.logger.ErrorContext(ctx, "portal query execution failed",
-			"query", portalInfo.PreparedStatementInfo.Query,
+			"query", parser.RedactServingSQL(portalInfo.PreparedStatementInfo.Query),
 			"plan", plan.String(), "error", err)
 	}
 	return &handler.ExecuteResult{
@@ -394,6 +395,10 @@ func (e *Executor) Describe(
 	// is already served locally via the planner (planVariableShowStmt).
 	if stmt := describeAST(portalInfo, preparedStatementInfo); stmt != nil && engine.IsMultigresServerVersionShow(stmt) {
 		return engine.MultigresServerVersionShowDescription(), nil
+	}
+
+	if _, ok := describeAST(portalInfo, preparedStatementInfo).(*ast.ServingControlStmt); ok {
+		return engine.ServingControlDescription(), nil
 	}
 
 	// TODO: We will need to plan the query to find whether it can

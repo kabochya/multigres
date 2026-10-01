@@ -22,6 +22,7 @@ import (
 	"github.com/multigres/multigres/go/common/mterrors"
 	rpc "github.com/multigres/multigres/go/pb/multipoolerservice"
 
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 
 	commonconsensus "github.com/multigres/multigres/go/common/consensus"
@@ -217,6 +218,17 @@ func (pg *PoolerGateway) ServingControl(ctx context.Context, target *query.Targe
 	if err != nil {
 		return nil, err
 	}
-	result, err := conn.ServiceClient().ServingControl(ctx, request)
+	protected, err := pg.servingContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result, err := conn.ServiceClient().ServingControl(protected, request)
 	return result, mterrors.FromGRPC(err)
+}
+
+func (pg *PoolerGateway) servingContext(ctx context.Context) (context.Context, error) {
+	if pg.servingToken == "" {
+		return nil, errors.New("serving control authorization is not configured")
+	}
+	return metadata.AppendToOutgoingContext(ctx, "x-multigres-serving-key", pg.servingToken), nil
 }

@@ -23,7 +23,9 @@ import (
 	"net"
 	"testing"
 
+	"github.com/multigres/multigres/go/common/pgprotocol/scram"
 	pb "github.com/multigres/multigres/go/pb/clustermetadata"
+	"github.com/multigres/multigres/go/pb/query"
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
@@ -51,4 +53,15 @@ func TestServingAuthorityIndependentOfApplicationStatus(t *testing.T) {
 	require.Error(t, pm.servingAuthority("other"))
 	pm.healthStreamer.routingState = &pb.RoutingState{Role: pb.RoutingRole_ROUTING_ROLE_REPLICA}
 	require.Error(t, pm.servingAuthority("postgres"))
+}
+
+func TestServingAdminRejectsSourceCredentialNameCollision(t *testing.T) {
+	targetClient := bytes.Repeat([]byte{8}, 32)
+	targetServer := bytes.Repeat([]byte{9}, 32)
+	stored := sha256.Sum256(targetClient)
+	target := &scram.ScramHash{StoredKey: stored[:], ServerKey: targetServer}
+	require.True(t, matchesTargetVerifier(target, &query.UserAuth{ClientKey: targetClient, ServerKey: targetServer}))
+	require.False(t, matchesTargetVerifier(target, &query.UserAuth{ClientKey: bytes.Repeat([]byte{3}, 32), ServerKey: targetServer}), "same role name on source cannot prove target identity")
+	require.False(t, matchesTargetVerifier(target, &query.UserAuth{ClientKey: targetClient, ServerKey: bytes.Repeat([]byte{4}, 32)}))
+	require.False(t, matchesTargetVerifier(target, nil), "trust sessions do not prove target password possession")
 }

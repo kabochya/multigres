@@ -21,9 +21,12 @@ package multigateway
 import (
 	"context"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -52,7 +55,10 @@ import (
 )
 
 type Multigateway struct {
-	cell viperutil.Value[string]
+	servingTokenFile viperutil.Value[string]
+	pgAdminPort      viperutil.Value[int]
+	pgAdminListener  *server.Listener
+	cell             viperutil.Value[string]
 	// serviceID string
 	serviceID viperutil.Value[string]
 	// pgPort is the PostgreSQL protocol listen port
@@ -253,6 +259,8 @@ func NewMultigateway() *Multigateway {
 			Dynamic:  true,
 			EnvVars:  []string{"MT_KEEP_TRANSACTION_ON_GATEWAY_REJECTION"},
 		}),
+		pgAdminPort:      viperutil.Configure(reg, "pg-admin-port", viperutil.Options[int]{Default: 0, FlagName: "pg-admin-port", EnvVars: []string{"MT_PG_ADMIN_PORT"}}),
+		servingTokenFile: viperutil.Configure(reg, "serving-control-token-file", viperutil.Options[string]{Default: "", FlagName: "serving-control-token-file", EnvVars: []string{"MT_SERVING_CONTROL_TOKEN_FILE"}}),
 		pgReplicaPort: viperutil.Configure(reg, "pg-replica-port", viperutil.Options[int]{
 			Default:  0,
 			FlagName: "pg-replica-port",
@@ -313,6 +321,8 @@ func (mg *Multigateway) RegisterFlags(fs *pflag.FlagSet) {
 	fs.Bool("pg-require-ssl", mg.pgRequireSSL.Default(), "require TLS for all client PostgreSQL connections; multigateway fails to start if no cert/key is configured. CancelRequest still permitted over plaintext.")
 	fs.Bool("enable-slot-based-replication", mg.slotBasedReplicationEnabled.Default(), "admit non-temporary logical replication slots registered for failover (slot-based replication). Default off.")
 	fs.Bool("keep-transaction-on-gateway-rejection", mg.keepTransactionOnGatewayRejection.Default(), "leave an open explicit transaction in-block after a gateway policy rejection (feature_not_supported) instead of aborting it. Off by default so clients see PostgreSQL's contract that any wire error aborts the transaction; intended for pg_regress and compatibility test suites.")
+	fs.Int("pg-admin-port", mg.pgAdminPort.Default(), "optional target-admin authentication port for serving control; ordinary SQL remains application-routed")
+	fs.String("serving-control-token-file", mg.servingTokenFile.Default(), "file containing the 64-character cluster serving-control bearer proof")
 	fs.Int("pg-replica-port", mg.pgReplicaPort.Default(), "optional port for replica-reads connections; 0 disables the replica listener")
 	fs.Int("low-replication-lag-ms", mg.pgReplicaLowLagMs.Default(), "replicas at or below this lag (milliseconds) are preferred; 0 treats all replicas equally")
 	fs.Int("high-replication-lag-tolerance-ms", mg.pgReplicaHighLagToleranceMs.Default(), "absolute max lag (milliseconds) for replicas; 0 means no upper bound")
@@ -334,6 +344,8 @@ func (mg *Multigateway) RegisterFlags(fs *pflag.FlagSet) {
 		mg.slotBasedReplicationEnabled,
 		mg.keepTransactionOnGatewayRejection,
 		mg.pgReplicaPort,
+		mg.pgAdminPort,
+		mg.servingTokenFile,
 		mg.pgReplicaLowLagMs,
 		mg.pgReplicaHighLagToleranceMs,
 		mg.planCacheMemory,
@@ -395,7 +407,23 @@ func (mg *Multigateway) Init(ctx context.Context) error {
 		return fmt.Errorf("failed to configure multipooler TLS: %w", err)
 	}
 
+	var servingToken string
+	if path := mg.servingTokenFile.Get(); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return errors.New("cannot read serving control token file")
+		}
+		servingToken = strings.TrimSpace(string(data))
+		decoded, err := hex.DecodeString(servingToken)
+		if err != nil || len(decoded) != 32 {
+			return errors.New("serving control token must be 64 hexadecimal characters")
+		}
+	}
+	if mg.pgAdminPort.Get() > 0 && servingToken == "" {
+		return errors.New("pg-admin-port requires serving-control-token-file")
+	}
 	mg.poolerGateway = poolergateway.NewPoolerGateway(poolergateway.PoolerGatewayOpts{
+		ServingToken:  servingToken,
 		Ctx:           mg.shutdownCtx,
 		Source:        mg.ts,
 		LocalCell:     mg.cell.Get(),
@@ -546,8 +574,10 @@ func (mg *Multigateway) Init(ctx context.Context) error {
 		notifMetrics,
 	)
 	mg.pgHandler.SetNotificationManager(notifMgr, notifMetrics.NotificationDropped)
+	connectionIDs := &server.ConnectionIDPool{}
 	pgAddr := fmt.Sprintf("%s:%d", mg.pgBindAddress.Get(), mg.pgPort.Get())
 	mg.pgListener, err = server.NewListener(server.ListenerConfig{
+		ConnectionIDs:         connectionIDs,
 		Address:               pgAddr,
 		Handler:               mg.pgHandler,
 		GatewayID:             pidPrefix,
@@ -562,6 +592,22 @@ func (mg *Multigateway) Init(ctx context.Context) error {
 		return fmt.Errorf("failed to create PostgreSQL listener on port %d: %w", mg.pgPort.Get(), err)
 	}
 
+	// This listener uses the managed target's verifier even while applications
+	// are fenced. It grants no ordinary SQL routing bypass.
+	if adminPort := mg.pgAdminPort.Get(); adminPort > 0 {
+		mg.pgAdminListener, err = server.NewListener(server.ListenerConfig{
+			ConnectionIDs: connectionIDs,
+			Address:       fmt.Sprintf("%s:%d", mg.pgBindAddress.Get(), adminPort),
+			Handler:       mg.pgHandler, GatewayID: pidPrefix,
+			CredentialProvider: auth.NewPoolerCredentialProvider(auth.ServingAdminClient{Client: mg.poolerGateway}, gatewayMetrics),
+			TLSConfig:          pgTLSConfig, RequireTLS: requireSSL,
+			AuthenticationTimeout: mg.authenticationTimeout.Get(), AuthMetrics: gatewayMetrics, Logger: logger,
+		})
+		if err != nil {
+			return errors.New("cannot create serving-admin listener")
+		}
+	}
+
 	// Optionally create a second listener for replica-reads connections.
 	var replicaCancelFn func(pid, secret uint32) bool
 	if replicaPort := mg.pgReplicaPort.Get(); replicaPort > 0 {
@@ -573,6 +619,7 @@ func (mg *Multigateway) Init(ctx context.Context) error {
 		replicaHandler.SetKeepTransactionOnGatewayRejection(mg.keepTransactionOnGatewayRejection.Get)
 		replicaAddr := fmt.Sprintf("%s:%d", mg.pgBindAddress.Get(), replicaPort)
 		mg.pgReplicaListener, err = server.NewListener(server.ListenerConfig{
+			ConnectionIDs:         connectionIDs,
 			Address:               replicaAddr,
 			Handler:               replicaHandler,
 			GatewayID:             pidPrefix,
@@ -610,8 +657,14 @@ func (mg *Multigateway) Init(ctx context.Context) error {
 	// Set up cross-gateway cancel request handling.
 	// The cancel manager routes to the correct listener based on the connection
 	// type (primary vs replica) carried in the cancel request / gRPC forward.
+	primaryCancel := func(pid, secret uint32) bool {
+		if mg.pgAdminListener != nil && mg.pgAdminListener.CancelLocalConnection(pid, secret) {
+			return true
+		}
+		return mg.pgListener.CancelLocalConnection(pid, secret)
+	}
 	mg.cancelManager = NewCancelManager(
-		mg.pgListener.CancelLocalConnection,
+		primaryCancel,
 		replicaCancelFn,
 		pidPrefix,
 		mg.ts,
@@ -619,6 +672,9 @@ func (mg *Multigateway) Init(ctx context.Context) error {
 		poolerTransportCreds,
 	)
 	mg.pgListener.SetCancelHandler(mg.cancelManager.ForListener(false))
+	if mg.pgAdminListener != nil {
+		mg.pgAdminListener.SetCancelHandler(mg.cancelManager.ForListener(false))
+	}
 	if mg.pgReplicaListener != nil {
 		mg.pgReplicaListener.SetCancelHandler(mg.cancelManager.ForListener(true))
 	}
@@ -639,6 +695,13 @@ func (mg *Multigateway) Init(ctx context.Context) error {
 	}()
 
 	// Start the replica listener if configured.
+	if mg.pgAdminListener != nil {
+		go func() {
+			if err := mg.pgAdminListener.Serve(); err != nil {
+				logger.ErrorContext(ctx, "serving-admin listener stopped", "error", err)
+			}
+		}()
+	}
 	if mg.pgReplicaListener != nil {
 		go func() {
 			replicaPort := mg.pgReplicaPort.Get()
@@ -756,6 +819,11 @@ func (mg *Multigateway) Shutdown() {
 	}
 
 	// Stop replica PostgreSQL listener (if running)
+	if mg.pgAdminListener != nil {
+		if err := mg.pgAdminListener.Close(); err != nil {
+			mg.senv.GetLogger().Error("serving-admin listener close failed", "error", err)
+		}
+	}
 	if mg.pgReplicaListener != nil {
 		if err := mg.pgReplicaListener.Close(); err != nil {
 			mg.senv.GetLogger().Error("error closing replica Postgres listener", "error", err)

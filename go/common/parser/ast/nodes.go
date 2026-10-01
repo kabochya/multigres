@@ -347,12 +347,15 @@ const (
 	T_String    // String literal - postgres/src/include/nodes/value.h:63-69
 	T_BitString // Bit string literal - postgres/src/include/nodes/value.h:71-77
 	T_Null      // NULL literal
+	T_ServingControlStmt
 )
 
 // String returns the string representation of a NodeTag.
 // Used for debugging and error reporting.
 func (nt NodeTag) String() string {
 	switch nt {
+	case T_ServingControlStmt:
+		return "T_ServingControlStmt"
 	case T_Invalid:
 		return "T_Invalid"
 	case T_Node:

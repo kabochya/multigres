@@ -52,3 +52,25 @@ The managed writable leader publishes catalog mode in health independently of it
 Gateway policy survives managed endpoint removal for the lifetime of the gateway. Cold coexistence discovery without authoritative mode buffers. UNMANAGED routes every application mode to ready, identity-matching source endpoints, preferring the gateway cell. FENCED uses the existing bounded failover buffer. MANAGED and authoritative UNSET use managed routing. Source readiness cannot release a buffer awaiting the target or vice versa. By-ID reservations and cleanup keep their original owner; no session state transfers at a mode switch.
 
 Only the dedicated ServingControl RPC uses the managed-control selector while target application admission is closed. It does not retry an ambiguous transition automatically. Administrative retries supply the same durable request ID.
+
+## Administrative SQL
+
+Commands must stand alone and run from an idle session without a reserved backend. Both simple and extended protocol are supported; bind parameters and multi-statement batches are not supported for control commands. Mutations require an explicit request ID, up to 128 characters. Retry an incomplete operation with the same ID and arguments; SHOW inspects the current authority. ALTER replaces the full connection configuration and requires FENCED for an attached connection.
+
+```sql
+CREATE CONNECTION source WITH (
+ host='127.0.0.1', port='5432', database='postgres', username='postgres',
+ password='<secret>', sslmode='disable'
+) REQUEST ID 'create-source-1';
+ATTACH CONNECTION source REQUEST ID 'attach-source-1';
+SHOW SERVING MODE;
+PAUSE SERVING REQUEST ID 'pause-source-1';
+RESUME SERVING REQUEST ID 'resume-source-1';
+DETACH CONNECTION source REQUEST ID 'detach-source-1';
+```
+
+TLS defaults to verify-full when sslmode is omitted. Never put real credentials in shell arguments or versioned SQL files. Commands/results and malformed control input are redacted in protocol, handler, planner and executor logs. Audit records contain operation/request identifiers only. Results contain mode, connection name and completion, not endpoint credentials.
+
+The gateway's `--serving-control-token-file` contains the 64-character hexadecimal SHA-256 digest of the poolers' raw migration key. It is a bearer secret and needs protected storage/TLS, but cannot decrypt catalog credentials. The optional `--pg-admin-port` authenticates target superusers directly through protected control lookup even while applications are fenced. It uses normal PostgreSQL listener TLS settings. It grants no ordinary SQL bypass. Target-only administrators use this port; existing source-authenticated sessions may administer only if their SCRAM client/server keys match the current target verifier and the role is an unexpired LOGIN superuser there. Role-name equality alone is insufficient. Trust sessions cannot administer.
+
+Transparent routing switches for application sessions require identical SCRAM verifiers on source and target; the same plaintext password with independently generated salts does not preserve passthrough keys. Importing those verifiers and role changes remains the migration controller's responsibility. The disposable demo uses matching verifiers. Admin SQL cannot select MANAGED or override a controller-owned fence.

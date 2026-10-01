@@ -33,6 +33,9 @@ var parserPool = sync.Pool{
 // ParseSQL parses SQL input and returns the AST, using the default parse options
 // (standard_conforming_strings on, matching a fresh PostgreSQL session).
 func ParseSQL(input string) ([]ast.Stmt, error) {
+	if stmts, handled, err := parseServingSQL(input, DefaultParseOptions()); handled {
+		return stmts, err
+	}
 	return parseWithLexer(NewLexer(input))
 }
 
@@ -45,6 +48,9 @@ func ParseSQL(input string) ([]ast.Stmt, error) {
 func ParseSQLWithStandardConformingStrings(input string, standardConformingStrings bool) ([]ast.Stmt, error) {
 	opts := DefaultParseOptions()
 	opts.StandardConformingStrings = standardConformingStrings
+	if stmts, handled, err := parseServingSQL(input, opts); handled {
+		return stmts, err
+	}
 	return parseWithLexer(NewLexerWithOptions(input, opts))
 }
 

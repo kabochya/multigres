@@ -31,6 +31,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/multigres/multigres/go/common/parser"
+
 	"github.com/multigres/multigres/go/common/mterrors"
 	"github.com/multigres/multigres/go/common/pgprotocol/protocol"
 	"github.com/multigres/multigres/go/common/sqltypes"
@@ -1146,7 +1148,7 @@ func (c *Conn) handleQuery() error {
 		return fmt.Errorf("reading query message: %w", err)
 	}
 
-	c.logger.Debug("received query", "query", queryStr)
+	c.logger.Debug("received query", "query", parser.RedactServingSQL(queryStr))
 
 	// Create a cancelable query context so cancel requests can interrupt this query.
 	queryCtx := c.BeginQueryCancel()
@@ -1222,7 +1224,7 @@ func (c *Conn) handleQuery() error {
 	})
 	if err != nil {
 		err = queryContextError(queryCtx, err)
-		c.logger.Error("query execution failed", "query", queryStr, "error", err)
+		c.logger.Error("query execution failed", "query", parser.RedactServingSQL(queryStr), "error", err)
 		if passthroughRowInProgress {
 			return fmt.Errorf("%w: %w", errIncompleteDataRow, err)
 		}
@@ -1345,7 +1347,7 @@ func (c *Conn) handleParse() error {
 		return c.writeExtendedProtocolViolation("invalid Parse message", err)
 	}
 
-	c.logger.Debug("parse", "name", stmtName, "query", queryStr, "param_count", paramCount)
+	c.logger.Debug("parse", "name", stmtName, "query", parser.RedactServingSQL(queryStr), "param_count", paramCount)
 
 	// Call the handler to validate and prepare the statement.
 	// The handler is responsible for storing any state it needs.
