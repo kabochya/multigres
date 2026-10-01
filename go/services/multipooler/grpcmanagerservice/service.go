@@ -41,6 +41,9 @@ type managerService struct {
 func RegisterPoolerManagerServices(senv *servenv.ServEnv, grpc *servenv.GrpcServer) {
 	// Register ourselves to be invoked when the manager starts
 	manager.RegisterPoolerManagerServices = append(manager.RegisterPoolerManagerServices, func(pm *manager.MultipoolerManager) {
+		if pm.IsUnmanaged() {
+			return
+		}
 		if grpc.CheckServiceMap("poolermanager", senv) {
 			srv := &managerService{
 				manager: pm,

@@ -25,6 +25,9 @@ import (
 
 // Config holds configuration for the MultipoolerManager
 type Config struct {
+	// ExternalHost and ExternalDatabase are unmanaged backend coordinates, not pooler identity.
+	ExternalHost        string
+	ExternalDatabase    string
 	SocketFilePath      string
 	TopoClient          topoclient.Store
 	HeartbeatIntervalMs int
