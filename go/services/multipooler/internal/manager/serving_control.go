@@ -181,21 +181,13 @@ func (pm *MultipoolerManager) ServingControl(ctx context.Context, r *rpc.Serving
 	}
 	pm.servingMu.Lock()
 	defer pm.servingMu.Unlock()
-	c, err := pm.catalogLocked(ctx)
-	if err != nil {
-		return nil, err
-	}
+	var err error
 	switch r.Operation {
 	case "show":
 		state, err := pm.confirmedRoutingLocked(ctx)
 		return &rpc.ServingControlResponse{Routing: state}, err
 	case "create", "alter":
-		lockCtx, lockErr := pm.actionLock.Acquire(ctx, "ServingControl")
-		if lockErr != nil {
-			return nil, lockErr
-		}
-		defer pm.actionLock.Release(lockCtx)
-		err = c.Update(ctx, func(tx executor.InternalTx, state *pb.MigrationRouting) error {
+		_, err = pm.updateRoutingLocked(ctx, true, func(c *servingcontrol.Catalog, tx executor.InternalTx, state *pb.MigrationRouting) error {
 			if state.Mode == pb.MigrationMode_MIGRATION_MODE_FENCED && !state.ResumeSourceAllowed {
 				return errors.New("controller owns the fenced transition")
 			}
@@ -220,7 +212,7 @@ func (pm *MultipoolerManager) ServingControl(ctx context.Context, r *rpc.Serving
 	if err != nil {
 		return nil, err
 	}
-	state, err := c.ConfirmedRouting(ctx)
+	state, err := pm.confirmedRoutingLocked(ctx)
 	return &rpc.ServingControlResponse{Routing: state}, err
 }
 

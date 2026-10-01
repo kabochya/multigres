@@ -1064,6 +1064,13 @@ export class Multipooler extends Message<Multipooler> {
    */
   sourceConnection = "";
 
+  /**
+   * Managed leader observation for operators; the PostgreSQL catalog is authoritative.
+   *
+   * @generated from field: clustermetadata.MigrationRouting migration_routing = 16;
+   */
+  migrationRouting?: MigrationRouting;
+
   constructor(data?: PartialMessage<Multipooler>) {
     super();
     proto3.util.initPartial(data, this);
@@ -1085,6 +1092,7 @@ export class Multipooler extends Message<Multipooler> {
     { no: 13, name: "routing_state", kind: "message", T: RoutingState },
     { no: 14, name: "management_mode", kind: "enum", T: proto3.getEnumType(PoolerManagementMode) },
     { no: 15, name: "source_connection", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 16, name: "migration_routing", kind: "message", T: MigrationRouting },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): Multipooler {

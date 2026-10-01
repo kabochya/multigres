@@ -44,3 +44,11 @@ Administrative request IDs and keyed request hashes are persisted with the first
 The in-process `ControllerTransition` and `CompleteMigration` hooks require a journal callback in the same transaction. There is no administrative MANAGED switch. Controller-owned fences cannot be resumed by admin SQL. Completion is persisted independently of MANAGED; detach requires completion and restores ordinary managed routing. The operator must retain source workloads until completion.
 
 Connection changes require FENCED. This prototype requires restarting prepared source poolers after a connection change; Unfence compares their bootstrapped settings to the current catalog. Changing the physical source identity is rejected. Source process IDs must be unique, and topology records must be retained until shutdown is proven. The fence set cannot establish that an untracked or prematurely pruned process stopped; the operator companion must preserve this contract.
+
+## Gateway propagation
+
+The managed writable leader publishes catalog mode in health independently of its application serving status. Gateways use existing consensus rules to reject an older managed authority; unmanaged endpoints never join the managed primary set. The topology copy is observation only. A role change closes managed application admission and invalidates reads started in the prior role before a fresh policy can open it.
+
+Gateway policy survives managed endpoint removal for the lifetime of the gateway. Cold coexistence discovery without authoritative mode buffers. UNMANAGED routes every application mode to ready, identity-matching source endpoints, preferring the gateway cell. FENCED uses the existing bounded failover buffer. MANAGED and authoritative UNSET use managed routing. Source readiness cannot release a buffer awaiting the target or vice versa. By-ID reservations and cleanup keep their original owner; no session state transfers at a mode switch.
+
+Only the dedicated ServingControl RPC uses the managed-control selector while target application admission is closed. It does not retry an ambiguous transition automatically. Administrative retries supply the same durable request ID.
