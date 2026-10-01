@@ -48,6 +48,9 @@ func (s *QueryPoolerServer) notifyRequestsLocked() {
 func (s *QueryPoolerServer) SetApplicationAdmission(allow bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !allow {
+		s.admissionGeneration++
+	}
 	s.applicationBlocked = !allow
 }
 
@@ -88,4 +91,30 @@ func (s *QueryPoolerServer) FenceApplication(ctx context.Context) error {
 		}
 	}
 	return s.awaitRequests(ctx)
+}
+
+// EnableMigrationAdmission is called once before state fanout. Local generation
+// tokens prevent a read begun before promotion from opening the new leader's gate.
+// They are process-lifetime ordering, not persisted migration-mode versions.
+func (s *QueryPoolerServer) EnableMigrationAdmission(managed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.applicationBlocked = true
+	s.closeGateOnRoleChange = managed
+}
+
+func (s *QueryPoolerServer) AdmissionGeneration() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.admissionGeneration
+}
+
+func (s *QueryPoolerServer) ApplyAdmissionGeneration(generation uint64, allow bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if generation != s.admissionGeneration {
+		return false
+	}
+	s.applicationBlocked = !allow
+	return true
 }

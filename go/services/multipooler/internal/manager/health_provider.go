@@ -56,10 +56,11 @@ type healthStreamer struct {
 	shard      string
 
 	// Mutable fields (updated via typed methods)
-	servingStatus   clustermetadatapb.PoolerServingStatus
-	backendReady    bool
-	backendIdentity *clustermetadatapb.ExternalBackendIdentity
-	routingState    *clustermetadatapb.RoutingState
+	servingStatus    clustermetadatapb.PoolerServingStatus
+	backendReady     bool
+	backendIdentity  *clustermetadatapb.ExternalBackendIdentity
+	migrationRouting *clustermetadatapb.MigrationRouting
+	routingState     *clustermetadatapb.RoutingState
 
 	// Client management
 	clients map[chan *poolerserver.HealthState]struct{}
@@ -158,6 +159,9 @@ func (hs *healthStreamer) OnStateChange(ctx context.Context, state servingstate.
 	// rule). A leader mid-promotion is not yet routing PRIMARY, so it advertises
 	// REPLICA until its rule commits.
 	hs.routingState = state.Routing.ToProto()
+	if state.Routing.Role.ToProto() != clustermetadatapb.RoutingRole_ROUTING_ROLE_PRIMARY {
+		hs.migrationRouting = nil
+	}
 	hs.servingStatus = state.ServingStatus
 	hs.broadcastLocked()
 	if prev != state.ServingStatus {
@@ -191,6 +195,7 @@ func (hs *healthStreamer) buildStateLocked() *poolerserver.HealthState {
 		RecommendedStalenessTimeout: hs.recommendedStalenessTimeout,
 		ReplicationLagNs:            hs.replicationLagNs.Load(),
 		BackendReady:                hs.backendReady, BackendIdentity: hs.backendIdentity,
+		MigrationRouting: hs.migrationRouting,
 	}
 }
 
@@ -364,5 +369,16 @@ func (hs *healthStreamer) setBackendReadiness(ready bool, identity *clustermetad
 	defer hs.mu.Unlock()
 	hs.backendReady = ready
 	hs.backendIdentity = identity
+	hs.broadcastLocked()
+}
+
+func (hs *healthStreamer) setMigrationRouting(state *clustermetadatapb.MigrationRouting) {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	if hs.routingState.GetRole() != clustermetadatapb.RoutingRole_ROUTING_ROLE_PRIMARY {
+		hs.migrationRouting = nil
+		return
+	}
+	hs.migrationRouting = state
 	hs.broadcastLocked()
 }

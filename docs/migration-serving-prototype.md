@@ -34,3 +34,13 @@ Fence and Unfence have empty requests. The source discovers the managed authorit
 Fence immediately blocks new requests and waits for handler admission permits plus regular and reserved backend connections. Existing reservations can finish on their original backend. COPY holds a permit for its full handler lifetime. Timeout/cancellation returns an error and leaves the gate closed; it does not force rollback and claim completion. Serving control and replication internals use their existing narrow admin paths.
 
 A running source retains its accepted state through target outages. Restarting sources need target access to retrieve their catalog configuration and authorization. Cold gateways are addressed by the gateway PR. Managed poolers with the key start their application gates closed and read durable mode before opening.
+
+## Serving transitions
+
+Attach verifies that every registered source endpoint is prepared and identifies the same physical database. It commits FENCED, drains the target, fences the full registered source set, then commits UNMANAGED and calls Unfence. Pause commits FENCED before source enumeration and enforcement. Resume validates the prepared identity before committing UNMANAGED and opening source endpoints. No database lock is held across source RPCs, which read the committed mode themselves.
+
+Administrative request IDs and keyed request hashes are persisted with the first decision. Completed retries return current state without replaying network work. Pending operations can be repeated with the same ID; different arguments or superseded requests fail. A failed fence leaves FENCED. Partial activation leaves its committed destination selected and reports incomplete enforcement; it never falls back to the other database.
+
+The in-process `ControllerTransition` and `CompleteMigration` hooks require a journal callback in the same transaction. There is no administrative MANAGED switch. Controller-owned fences cannot be resumed by admin SQL. Completion is persisted independently of MANAGED; detach requires completion and restores ordinary managed routing. The operator must retain source workloads until completion.
+
+Connection changes require FENCED. This prototype requires restarting prepared source poolers after a connection change; Unfence compares their bootstrapped settings to the current catalog. Changing the physical source identity is rejected. Source process IDs must be unique, and topology records must be retained until shutdown is proven. The fence set cannot establish that an untracked or prematurely pruned process stopped; the operator companion must preserve this contract.

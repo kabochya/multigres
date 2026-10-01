@@ -19,10 +19,12 @@ import (
 	"errors"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/multigres/multigres/go/common/migrationcontrol"
-	"github.com/multigres/multigres/go/common/mterrors"
+
 	pb "github.com/multigres/multigres/go/pb/clustermetadata"
-	code "github.com/multigres/multigres/go/pb/mtrpc"
+
 	rpc "github.com/multigres/multigres/go/pb/multipoolerservice"
 	"github.com/multigres/multigres/go/services/multipooler/internal/servingcontrol"
 )
@@ -44,6 +46,9 @@ func (pm *MultipoolerManager) sourceMode(ctx context.Context) (*pb.MigrationRout
 	if pm.sourceModeReader != nil {
 		return pm.sourceModeReader(ctx)
 	}
+	if pm.config.TopoClient == nil {
+		return nil, errors.New("migration authority discovery unavailable")
+	}
 	var state *pb.MigrationRouting
 	err := migrationcontrol.WithAuthority(ctx, pm.config.TopoClient, pm.record.ShardKey().Database, pm.config.ControlTransport, func(c rpc.MultipoolerServiceClient) error {
 		r, err := c.GetMigrationMode(ctx, &rpc.GetMigrationModeRequest{Database: pm.record.ShardKey().Database})
@@ -59,98 +64,198 @@ func (pm *MultipoolerManager) sourceMode(ctx context.Context) (*pb.MigrationRout
 	return state, err
 }
 
-// servingMu spans remote reads AND application. An older Unfence completes
-// before a newer Fence acquires it. After Fence acknowledges, no earlier check
-// can reopen this process. Readiness never writes sourceAdmission.
-func (pm *MultipoolerManager) applySourceGate(ctx context.Context, open bool) error {
-	if !pm.IsUnmanaged() || pm.config.SourceConnection == "" {
-		return mterrors.New(code.Code_FAILED_PRECONDITION, "migration-enabled unmanaged pooler required")
+// One authority discovery and protected callback returns both configuration and
+// a confirmed routing snapshot. Bootstrap uses this same protected transport.
+func (pm *MultipoolerManager) sourceCommandState(ctx context.Context, checkConfiguration bool) (*pb.MigrationRouting, error) {
+	if pm.sourceModeReader != nil {
+		return pm.sourceModeReader(ctx)
 	}
-	pm.servingMu.Lock()
-	defer pm.servingMu.Unlock()
-	state, err := pm.sourceMode(ctx)
-	if err != nil {
-		return err
+	if pm.config.TopoClient == nil {
+		return nil, errors.New("migration authority discovery unavailable")
 	}
-	if open && (state.Mode != pb.MigrationMode_MIGRATION_MODE_UNMANAGED || state.SourceConnection != pm.config.SourceConnection) {
-		return mterrors.New(code.Code_FAILED_PRECONDITION, "current authority does not permit source serving")
-	}
-	if !open && state.Mode != pb.MigrationMode_MIGRATION_MODE_FENCED && state.Mode != pb.MigrationMode_MIGRATION_MODE_MANAGED {
-		return mterrors.New(code.Code_FAILED_PRECONDITION, "current authority does not permit fencing")
-	}
-	g, err := pm.gate()
-	if err != nil {
-		return err
-	}
-	if open {
-		pm.sourceAdmission.Store(true)
-		g.SetApplicationAdmission(true)
-		pm.sourceModeLoaded.Store(true)
+	var state *pb.MigrationRouting
+	err := migrationcontrol.WithAuthority(ctx, pm.config.TopoClient, pm.record.ShardKey().Database, pm.config.ControlTransport, func(c rpc.MultipoolerServiceClient) error {
+		reply, err := c.GetSourceConnection(migrationcontrol.AuthorizedContext(ctx, pm.config.MigrationKey), &rpc.GetSourceConnectionRequest{Database: pm.record.ShardKey().Database, ConnectionName: pm.config.SourceConnection})
+		if err != nil {
+			return err
+		}
+		if reply.Routing == nil {
+			return errors.New("migration authority not initialized")
+		}
+		if checkConfiguration && (pm.config.SourceConfiguration == nil || !proto.Equal(reply.Connection, pm.config.SourceConfiguration)) {
+			return errors.New("connection changed; restart the prepared source pooler before serving")
+		}
+		state = reply.Routing
 		return nil
-	}
-	pm.sourceAdmission.Store(false)
-	if err = g.FenceApplication(ctx); err != nil {
-		return err
-	}
-	pm.sourceModeLoaded.Store(true)
-	lockCtx, err := pm.actionLock.Acquire(ctx, "MigrationFence")
-	if err != nil {
-		return err
-	}
-	defer pm.actionLock.Release(lockCtx)
-	return pm.stateManager.Mutate(lockCtx, func(s *servingStateMutation) { s.ServingStatus = pb.PoolerServingStatus_DISABLED })
+	})
+	return state, err
 }
 
-func (pm *MultipoolerManager) runServingControl(ctx context.Context) {
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			refreshCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-			pm.refreshServingControl(refreshCtx)
-			cancel()
+// The same serialized read/apply/drain path serves both management modes.
+// Expected state is correlation only: only the reader supplies admission policy.
+// Lifecycle withdrawal advances the existing gate generation, rejecting an open
+// based on a read that crossed a backend or consensus transition.
+func (pm *MultipoolerManager) enforceRouting(ctx context.Context, expected *pb.MigrationRouting) (*rpc.RefreshRoutingResponse, error) {
+	pm.servingMu.Lock()
+	defer pm.servingMu.Unlock()
+	cold := expected == nil
+	g, err := pm.gate()
+	if err != nil {
+		return nil, err
+	}
+	guarded, ok := g.(interface {
+		AdmissionGeneration() uint64
+		ApplyAdmissionGeneration(uint64, bool) bool
+	})
+	var generation uint64
+	if ok {
+		generation = guarded.AdmissionGeneration()
+	}
+	state, err := pm.readEnforcementState(ctx, expected)
+	if err != nil {
+		return nil, err
+	}
+	if expected != nil && (state.ActiveRequestId != expected.ActiveRequestId || state.Mode != expected.Mode) {
+		return nil, errors.New("routing operation/mode mismatch; recover the same operation")
+	}
+	allow := routingAdmission(state, pm.record.desired.Load().ManagementMode, pm.config.SourceConnection)
+	if pm.IsUnmanaged() {
+		if pm.config.SourceConnection == "" {
+			return nil, errors.New("migration-enabled source required")
+		}
+		if allow {
+			health, _ := pm.GetHealthState(ctx)
+			if state.GetSourceIdentity().GetSystemIdentifier() == "" || health == nil || !health.BackendReady || !proto.Equal(health.BackendIdentity, state.SourceIdentity) {
+				return nil, errors.New("source identity not prepared for current attachment")
+			}
 		}
 	}
-}
-
-func (pm *MultipoolerManager) refreshServingControl(ctx context.Context) {
-	pm.servingMu.Lock()
-	defer pm.servingMu.Unlock()
-	g, err := pm.gate()
+	lockCtx, err := pm.actionLock.Acquire(ctx, "RefreshRoutingApply")
 	if err != nil {
-		return
+		return nil, err
+	}
+	if !pm.IsUnmanaged() {
+		role := pm.healthStreamer.getState().RoutingState.GetRole()
+		if pm.stateManager != nil {
+			role = pm.stateManager.RoutingRole()
+		}
+		if allow && role != pb.RoutingRole_ROUTING_ROLE_PRIMARY && role != pb.RoutingRole_ROUTING_ROLE_REPLICA {
+			pm.actionLock.Release(lockCtx)
+			return nil, errors.New("managed routing role is not established")
+		}
+		pm.servingEvents.mu.Lock()
+		unavailable := pm.servingEvents.backendKnown && !pm.servingEvents.backendReady
+		initialized := pm.servingEvents.confirmed
+		pm.servingEvents.mu.Unlock()
+		if allow && !cold && !initialized && pm.servingAuthority(pm.record.ShardKey().Database) != nil {
+			pm.actionLock.Release(lockCtx)
+			return nil, errors.New("managed admission not initialized by current authority")
+		}
+		if allow && unavailable {
+			pm.actionLock.Release(lockCtx)
+			return nil, errors.New("managed backend unavailable")
+		}
+	}
+	if ok && allow {
+		if !guarded.ApplyAdmissionGeneration(generation, allow) {
+			pm.actionLock.Release(lockCtx)
+			return nil, errors.New("admission changed during routing validation")
+		}
+	} else {
+		g.SetApplicationAdmission(allow)
 	}
 	if pm.IsUnmanaged() {
-		if pm.sourceModeLoaded.Load() {
-			return
-		} // warm processes keep accepted state on target loss.
+		pm.sourceAdmission.Store(allow)
+	}
+	pm.actionLock.Release(lockCtx)
+	// Never hold the action lock across a drain: completion callbacks need it.
+	if !allow {
+		if err = g.FenceApplication(ctx); err != nil {
+			return nil, err
+		}
+		if pm.IsUnmanaged() {
+			lockCtx, err = pm.actionLock.Acquire(ctx, "RefreshRoutingDrained")
+			if err != nil {
+				return nil, err
+			}
+			err = pm.stateManager.Mutate(lockCtx, func(s *servingStateMutation) { s.ServingStatus = pb.PoolerServingStatus_DISABLED })
+			pm.actionLock.Release(lockCtx)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	if pm.IsUnmanaged() {
+		pm.sourceModeLoaded.Store(true)
+	} else if cold {
+		pm.servingEvents.mu.Lock()
+		pm.servingEvents.confirmed = true
+		pm.servingEvents.mu.Unlock()
+	}
+	return &rpc.RefreshRoutingResponse{OperationId: state.ActiveRequestId, Mode: state.Mode, ProcessId: pm.record.desired.Load().Id, AdmissionOpen: allow}, nil
+}
+
+// Source state is a protected, confirmed current-authority callback. Followers
+// use local WAL metadata: an exact request is sent only after the controller's
+// durable commit. Opaque IDs carry no ordering; mismatch is bounded/retryable.
+func (pm *MultipoolerManager) readEnforcementState(ctx context.Context, expected *pb.MigrationRouting) (*pb.MigrationRouting, error) {
+	if pm.IsUnmanaged() {
+		return pm.sourceCommandState(ctx, expected == nil || expected.Mode == pb.MigrationMode_MIGRATION_MODE_UNMANAGED)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if expected == nil && pm.servingAuthority(pm.record.ShardKey().Database) != nil {
 		state, err := pm.sourceMode(ctx)
 		if err != nil {
-			return
+			return nil, err
 		}
-		allow := state.Mode == pb.MigrationMode_MIGRATION_MODE_UNMANAGED && state.SourceConnection == pm.config.SourceConnection
-		pm.sourceAdmission.Store(allow)
-		g.SetApplicationAdmission(allow)
-		pm.sourceModeLoaded.Store(true)
-		return
+		if state == nil {
+			return nil, errors.New("migration authority not initialized")
+		}
+		expected = state
 	}
-	var c *servingcontrol.Catalog
+	if pm.sourceModeReader != nil { // deterministic authoritative-read test seam
+		return pm.sourceModeReader(ctx)
+	}
 	if pm.servingAuthority(pm.record.ShardKey().Database) == nil {
-		c, err = pm.catalogLocked(ctx)
-	} else {
+		pm.servingEvents.mu.Lock()
+		confirmed := pm.servingEvents.confirmed
+		pm.servingEvents.mu.Unlock()
+		if !confirmed {
+			return pm.confirmedRoutingLocked(ctx)
+		}
+		return pm.servingCatalog.Routing(ctx)
+	}
+	c := pm.servingCatalog
+	if c == nil {
+		var err error
 		c, err = servingcontrol.New(pm.qsc.InternalQueryService(), pm.config.MigrationKey)
+		if err != nil {
+			return nil, err
+		}
 	}
-	if err != nil {
-		g.SetApplicationAdmission(false)
-		return
+	return c.AwaitRouting(ctx, expected.ActiveRequestId, expected.Mode)
+}
+
+// Admission policy is shared by local enforcement and remote acknowledgment
+// validation; readiness and identity checks remain local enforcement duties.
+func routingAdmission(state *pb.MigrationRouting, management pb.PoolerManagementMode, connection string) bool {
+	if management == pb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED {
+		return state.Mode == pb.MigrationMode_MIGRATION_MODE_UNMANAGED && state.SourceConnection == connection
 	}
-	state, err := c.Routing(ctx)
-	if err != nil {
-		g.SetApplicationAdmission(false)
-		return
+	return state.Mode == pb.MigrationMode_MIGRATION_MODE_UNSET || state.Mode == pb.MigrationMode_MIGRATION_MODE_MANAGED
+}
+
+// Initial follower activation still requires fresh authority confirmation. Once
+// initialized, operation-time refreshes use only local replay. Startup is not an
+// acknowledgment and never substitutes for an explicit operation barrier.
+func (pm *MultipoolerManager) initializeManagedAdmission(ctx context.Context) error {
+	pm.servingEvents.mu.Lock()
+	confirmed := pm.servingEvents.confirmed
+	pm.servingEvents.mu.Unlock()
+	if confirmed {
+		return nil
 	}
-	g.SetApplicationAdmission(state.Mode == pb.MigrationMode_MIGRATION_MODE_UNSET || state.Mode == pb.MigrationMode_MIGRATION_MODE_MANAGED)
+	_, err := pm.enforceRouting(ctx, nil)
+	return err
 }

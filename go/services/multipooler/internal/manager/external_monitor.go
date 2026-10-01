@@ -18,6 +18,8 @@ import (
 	"context"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	pb "github.com/multigres/multigres/go/pb/clustermetadata"
 	"github.com/multigres/multigres/go/services/multipooler/internal/executor"
 	"github.com/multigres/multigres/go/services/multipooler/internal/pgmode"
@@ -53,7 +55,11 @@ func (pm *MultipoolerManager) checkExternalReadiness(ctx context.Context) {
 		}
 	}
 	if pm.healthStreamer != nil {
+		previous := pm.healthStreamer.getState()
 		pm.healthStreamer.setBackendReadiness(err == nil && writable, identity)
+		if previous.BackendReady != (err == nil && writable) || !proto.Equal(previous.BackendIdentity, identity) {
+			pm.signalServingRecovery()
+		}
 	}
 	cancel()
 	lockCtx, lockErr := pm.actionLock.Acquire(ctx, "ExternalReadiness")
@@ -66,6 +72,12 @@ func (pm *MultipoolerManager) checkExternalReadiness(ctx context.Context) {
 	if err == nil && writable {
 		if pm.config.SourceConnection == "" || pm.sourceAdmission.Load() {
 			status = pb.PoolerServingStatus_SERVING
+		} else {
+			// Fence owns the healthy-source drain. DISABLED here would run the
+			// lifecycle force-close timeout underneath Fence's reservation wait.
+			// Cold/fully fenced processes remain disabled; a pending fence retains
+			// the previous lifecycle status while its application gate is closed.
+			status = pm.record.ServingStatus()
 		}
 		mode = pgmode.Primary
 	}

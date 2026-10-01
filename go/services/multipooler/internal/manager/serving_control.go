@@ -89,6 +89,30 @@ func (pm *MultipoolerManager) catalogLocked(ctx context.Context) (*servingcontro
 	return c, nil
 }
 
+// Caller owns servingMu. The action lock pins local leadership while confirming
+// durability; remote drains never run under either this lock or the transaction.
+func (pm *MultipoolerManager) confirmedRoutingLocked(ctx context.Context) (*pb.MigrationRouting, error) {
+	lockCtx, err := pm.actionLock.Acquire(ctx, "ConfirmServingCatalog")
+	if err != nil {
+		return nil, err
+	}
+	defer pm.actionLock.Release(lockCtx)
+	if err = pm.servingAuthority(pm.record.ShardKey().Database); err != nil {
+		return nil, err
+	}
+	c, err := pm.catalogLocked(ctx)
+	if err != nil {
+		return nil, err
+	}
+	state, err := c.ConfirmedRouting(ctx)
+	if err != nil {
+		pm.invalidateServingPublication()
+		return nil, err
+	}
+	pm.publishServingSnapshot(lockCtx, state)
+	return state, nil
+}
+
 func (pm *MultipoolerManager) GetMigrationMode(ctx context.Context, r *rpc.GetMigrationModeRequest) (*rpc.GetMigrationModeResponse, error) {
 	if err := pm.servingAuthority(r.Database); err != nil {
 		return nil, err
@@ -98,11 +122,7 @@ func (pm *MultipoolerManager) GetMigrationMode(ctx context.Context, r *rpc.GetMi
 	if len(pm.config.MigrationKey) == 0 {
 		return &rpc.GetMigrationModeResponse{Routing: &pb.MigrationRouting{}}, nil
 	}
-	c, err := pm.catalogLocked(ctx)
-	if err != nil {
-		return nil, err
-	}
-	state, err := c.Routing(ctx)
+	state, err := pm.confirmedRoutingLocked(ctx)
 	return &rpc.GetMigrationModeResponse{Routing: state}, err
 }
 
@@ -123,7 +143,7 @@ func (pm *MultipoolerManager) GetSourceConnection(ctx context.Context, r *rpc.Ge
 	if err != nil {
 		return nil, err
 	}
-	state, err := c.Routing(ctx)
+	state, err := pm.confirmedRoutingLocked(ctx)
 	return &rpc.GetSourceConnectionResponse{Connection: v, Routing: state}, err
 }
 
@@ -149,6 +169,16 @@ func (pm *MultipoolerManager) ServingControl(ctx context.Context, r *rpc.Serving
 	if err := pm.authorizeServingAdmin(ctx, r.Username); err != nil {
 		return nil, err
 	}
+	if r.Operation != "show" {
+		if !pm.transitionMu.TryLock() {
+			return nil, mterrors.New(code.Code_FAILED_PRECONDITION, "serving transition already running; recover by request ID")
+		}
+		defer pm.transitionMu.Unlock()
+	}
+	switch r.Operation {
+	case "attach", "pause", "resume", "detach":
+		return pm.adminServingTransition(ctx, r)
+	}
 	pm.servingMu.Lock()
 	defer pm.servingMu.Unlock()
 	c, err := pm.catalogLocked(ctx)
@@ -157,6 +187,8 @@ func (pm *MultipoolerManager) ServingControl(ctx context.Context, r *rpc.Serving
 	}
 	switch r.Operation {
 	case "show":
+		state, err := pm.confirmedRoutingLocked(ctx)
+		return &rpc.ServingControlResponse{Routing: state}, err
 	case "create", "alter":
 		lockCtx, lockErr := pm.actionLock.Acquire(ctx, "ServingControl")
 		if lockErr != nil {
@@ -164,13 +196,23 @@ func (pm *MultipoolerManager) ServingControl(ctx context.Context, r *rpc.Serving
 		}
 		defer pm.actionLock.Release(lockCtx)
 		err = c.Update(ctx, func(tx executor.InternalTx, state *pb.MigrationRouting) error {
+			if state.Mode == pb.MigrationMode_MIGRATION_MODE_FENCED && !state.ResumeSourceAllowed {
+				return errors.New("controller owns the fenced transition")
+			}
+			done, err := c.ReserveRequest(ctx, tx, r.RequestId, pm.requestHash(r), r.Operation, state)
+			if err != nil || done {
+				return err
+			}
 			if state.SourceConnection == r.Connection.GetName() && state.Mode != pb.MigrationMode_MIGRATION_MODE_FENCED {
 				return errors.New("attached connection changes require FENCED mode")
 			}
 			if err := pm.servingAuthority(r.Database); err != nil {
 				return err
 			}
-			return c.Put(ctx, tx, r.Connection, r.Operation == "alter")
+			if err := c.Put(ctx, tx, r.Connection, r.Operation == "alter"); err != nil {
+				return err
+			}
+			return c.CompleteRequest(ctx, tx, r.RequestId)
 		})
 	default:
 		return nil, mterrors.New(code.Code_UNIMPLEMENTED, "serving transition not implemented")
@@ -178,10 +220,16 @@ func (pm *MultipoolerManager) ServingControl(ctx context.Context, r *rpc.Serving
 	if err != nil {
 		return nil, err
 	}
-	state, err := c.Routing(ctx)
+	state, err := c.ConfirmedRouting(ctx)
 	return &rpc.ServingControlResponse{Routing: state}, err
 }
 
-func (pm *MultipoolerManager) RefreshRouting(context.Context, *rpc.RefreshRoutingRequest) (*rpc.RefreshRoutingResponse, error) {
-	return nil, mterrors.New(code.Code_UNIMPLEMENTED, "operation enforcement requires the serving journal")
+func (pm *MultipoolerManager) RefreshRouting(ctx context.Context, r *rpc.RefreshRoutingRequest) (*rpc.RefreshRoutingResponse, error) {
+	if err := pm.authorizeControl(ctx); err != nil {
+		return nil, err
+	}
+	if r.Database != pm.record.ShardKey().Database || r.OperationId == "" || r.ExpectedMode < 0 || r.ExpectedMode > 3 {
+		return nil, mterrors.New(code.Code_INVALID_ARGUMENT, "database, operation ID and valid expected mode required")
+	}
+	return pm.enforceRouting(ctx, &pb.MigrationRouting{ActiveRequestId: r.OperationId, Mode: r.ExpectedMode})
 }

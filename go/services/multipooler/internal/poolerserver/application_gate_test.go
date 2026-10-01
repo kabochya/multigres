@@ -16,7 +16,10 @@ package poolerserver
 
 import (
 	"context"
+	"log/slog"
 	"testing"
+
+	"github.com/multigres/multigres/go/services/multipooler/internal/servingstate"
 
 	"github.com/stretchr/testify/require"
 
@@ -51,4 +54,17 @@ func TestApplicationFenceAllowsReservationCleanup(t *testing.T) {
 	release()
 	require.NoError(t, s.FenceApplication(t.Context()))
 	require.Error(t, s.StartRequest(nil, RequestNewReservation))
+}
+
+func TestPromotionRejectsAdmissionReadFromPreviousRole(t *testing.T) {
+	s := NewQueryPoolerServer(slog.New(slog.DiscardHandler), nil, nil, "", "", nil, 0, false)
+	s.EnableMigrationAdmission(true)
+	require.NoError(t, s.OnStateChange(t.Context(), servingstate.State{Routing: servingstate.RoutingState{Role: servingstate.RoutingRoleReplica}, ServingStatus: pb.PoolerServingStatus_SERVING}))
+	previous := s.AdmissionGeneration()
+	require.True(t, s.ApplyAdmissionGeneration(previous, true))
+	require.NoError(t, s.OnStateChange(t.Context(), servingstate.State{Routing: servingstate.RoutingState{Role: servingstate.RoutingRolePrimary}, ServingStatus: pb.PoolerServingStatus_SERVING}))
+	require.False(t, s.ApplyAdmissionGeneration(previous, true))
+	require.Error(t, s.StartRequest(nil, RequestSingleQuery))
+	require.True(t, s.ApplyAdmissionGeneration(s.AdmissionGeneration(), true))
+	require.NoError(t, s.StartRequest(nil, RequestSingleQuery))
 }

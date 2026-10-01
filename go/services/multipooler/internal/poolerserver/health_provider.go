@@ -47,6 +47,7 @@ type HealthState struct {
 	ReplicationLagNs int64
 	BackendReady     bool
 	BackendIdentity  *clustermetadatapb.ExternalBackendIdentity
+	MigrationRouting *clustermetadatapb.MigrationRouting
 }
 
 // HealthProvider provides health information for the pooler.

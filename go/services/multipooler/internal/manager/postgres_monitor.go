@@ -263,6 +263,8 @@ func (pm *MultipoolerManager) monitorPostgresIteration(ctx context.Context) (pos
 
 	// Discover current state
 	currentState, err := pm.discoverPostgresState(ctx)
+	pm.observeServingBackend(ctx, err == nil && currentState.postgresRunning)
+	pm.observeManagedPolicy(ctx)
 	if err != nil {
 		// Log and skip this tick; the next iteration will retry. A persistent
 		// failure keeps the error loud rather than silently triggering the wrong
