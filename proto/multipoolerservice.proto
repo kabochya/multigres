@@ -30,6 +30,10 @@ option go_package = "github.com/multigres/multigres/go/pb/multipoolerservice";
 
 // MultipoolerService provides connection pooling and query execution
 service MultipoolerService {
+ // Controller expectations correlate with metadata; they cannot override it.
+ rpc RefreshAdmission(RefreshAdmissionRequest) returns (RefreshAdmissionResponse) {}
+ rpc ReadAdmissionIntent(ReadAdmissionIntentRequest) returns (ReadAdmissionIntentResponse) {}
+
  // Write routing metadata only; this never fences, drains or advances migration.
  rpc SetRoutingPolicy(SetRoutingPolicyRequest) returns (SetRoutingPolicyResponse);
  rpc GetRoutingPolicy(GetRoutingPolicyRequest) returns (GetRoutingPolicyResponse);
@@ -717,3 +721,18 @@ message SetRoutingPolicyRequest {
 message SetRoutingPolicyResponse { clustermetadata.GatewayRoutingPolicy policy = 1; }
 message GetRoutingPolicyRequest { string database = 1; }
 message GetRoutingPolicyResponse { clustermetadata.GatewayRoutingPolicy policy = 1; }
+
+message ReadAdmissionIntentRequest {
+ string database = 1;
+ clustermetadata.AdmissionSubject subject = 2;
+}
+message ReadAdmissionIntentResponse { clustermetadata.AdmissionSnapshot snapshot = 1; }
+message RefreshAdmissionRequest {
+ string database = 1;
+ clustermetadata.AdmissionIntent expected = 2;
+}
+message RefreshAdmissionResponse {
+ clustermetadata.AdmissionIntent observed = 1;
+ clustermetadata.ID process_id = 2;
+ bool admission_open = 3;
+}

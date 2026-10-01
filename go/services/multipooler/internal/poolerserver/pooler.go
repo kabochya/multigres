@@ -55,7 +55,12 @@ type QueryPoolerServer struct {
 	tableGroup string
 	shard      string
 
-	mu sync.Mutex
+	mu                    sync.Mutex
+	applicationBlocked    bool
+	closeGateOnRoleChange bool
+	admissionGeneration   uint64
+	activeRequests        int
+	requestsChanged       chan struct{}
 	// routingRole is the write-safety role from OnStateChange: PRIMARY iff this
 	// pooler is the writable leader (out of recovery AND the active — committed,
 	// non-revoked, highest-known — consensus leader). Both leader-bound query
@@ -189,6 +194,12 @@ func (s *QueryPoolerServer) ReplicationMetrics() *replication.Metrics {
 // follows. On timeout, errors are acceptable — that is what the grace period
 // bounds.
 func (s *QueryPoolerServer) OnStateChange(ctx context.Context, state servingstate.State) error {
+	s.mu.Lock()
+	if s.closeGateOnRoleChange && (s.routingRole != state.Routing.Role || state.ServingStatus != clustermetadatapb.PoolerServingStatus_SERVING) {
+		s.applicationBlocked = true
+		s.admissionGeneration++
+	}
+	s.mu.Unlock()
 	routingRole := state.Routing.Role
 	servingStatus := state.ServingStatus
 	if s.executor != nil {
@@ -304,6 +315,10 @@ func (s *QueryPoolerServer) StartRequest(target *query.Target, kind RequestKind)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.startRequestLocked(target, kind)
+}
+
+func (s *QueryPoolerServer) startRequestLocked(target *query.Target, kind RequestKind) error {
 	existingReserved := kind == RequestExistingReserved
 	if err := s.checkTargetLocked(target, existingReserved); err != nil {
 		return err
@@ -321,6 +336,9 @@ func (s *QueryPoolerServer) StartRequest(target *query.Target, kind RequestKind)
 		return nil
 	}
 
+	if s.applicationBlocked {
+		return mterrors.MTF01.New()
+	}
 	switch s.drainPhase {
 	case drainNone:
 		// Not draining: admit while serving, reject once not-serving.

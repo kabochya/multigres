@@ -18,6 +18,8 @@ package manager
 import (
 	"time"
 
+	"google.golang.org/grpc"
+
 	rpc "github.com/multigres/multigres/go/pb/multipoolerservice"
 
 	"github.com/multigres/multigres/go/common/backup"
@@ -27,6 +29,7 @@ import (
 
 // Config holds configuration for the MultipoolerManager
 type Config struct {
+	ControlTransport           grpc.DialOption
 	MigrationKey               []byte
 	SourceConfiguration        *rpc.SourceConnection
 	SourceConfigurationBinding string

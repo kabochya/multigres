@@ -93,3 +93,37 @@ Routing BLOCKED is traffic intent, not proof of completed fencing. M1 source
 poolers can still admit requests from a stale gateway. Controller-owned admission
 and close/drain barriers are implemented in M2; they remain separate from gateway
 destination activation.
+
+## Admission control
+
+Gateway routing and backend readiness do not grant application admission.
+Migration-capable processes register before applicability reads and start with
+closed gates. The managed catalog retains a sticky `admission_scopes` marker
+and per-subject normalized `admission_intents`. A controlled scope with a
+missing intent fails closed; terminal cleanup must retain explicit source CLOSED
+and target OPEN intents and the durable owner identity.
+
+The controller composes intent and journal writes in a short authority-checked
+synchronous transaction. Catalog helpers do not implement workflow sequencing,
+fanout, global completion, or controller recovery. Both subjects share the same
+scope row lock. Controller journal preconditions must prevent obsolete workers
+from creating a conflicting next operation.
+
+Authenticated `RefreshAdmission` carries an expected owner, exact opaque intent
+ID, permission and binding. These are expectations, not overrides. Source
+processes call the current managed authority; initialized managed followers
+read replicated local metadata. Cold followers first confirm the authority and
+wait for its exact replay boundary. Replay waits and lifecycle recovery retries
+are bounded and cancellation-aware; unchanged idle state has no refresh ticker.
+
+The shared actuator serializes reads, application and drain. OPEN validates
+source preparation/binding and local lifecycle generation. CLOSED blocks new
+work and waits for handler permits and backend reservations to drain. Existing
+reserved work can finish on its original backend. No remote/drain waits hold
+catalog transactions or the manager action lock. Acknowledgments identify the
+exact intent and process incarnation, after enforcement completes and its local
+lifecycle generation is rechecked. Timeout leaves admission closed and is not a
+completion acknowledgment. Routing publication has separate initialization.
+
+The local integration fixture writes normalized intents to test the primitives;
+it is not a production migration controller and supplies no replication barrier.
