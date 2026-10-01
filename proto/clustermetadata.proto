@@ -941,3 +941,18 @@ enum CohortEligibilitySignal {
 message CohortEligibilityStatus {
   CohortEligibilitySignal signal = 1;
 }
+
+// Gateway destination policy does not grant pooler admission or journal work.
+enum RoutingDestination {
+ ROUTING_DESTINATION_UNSPECIFIED = 0;
+ ROUTING_DESTINATION_MANAGED = 1;
+ ROUTING_DESTINATION_SOURCE = 2;
+ ROUTING_DESTINATION_BLOCKED = 3;
+}
+message ExternalBackendIdentity { string system_identifier = 1; string database = 2; }
+message GatewayRoutingPolicy {
+ RoutingDestination destination = 1;
+ string source_connection = 2;
+ ExternalBackendIdentity source_identity = 3;
+ string source_configuration_binding = 4;
+}

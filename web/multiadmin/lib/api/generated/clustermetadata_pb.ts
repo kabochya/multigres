@@ -391,6 +391,40 @@ proto3.util.setEnumType(CohortEligibilitySignal, "clustermetadata.CohortEligibil
 ]);
 
 /**
+ * Gateway destination policy does not grant pooler admission or journal work.
+ *
+ * @generated from enum clustermetadata.RoutingDestination
+ */
+export enum RoutingDestination {
+  /**
+   * @generated from enum value: ROUTING_DESTINATION_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: ROUTING_DESTINATION_MANAGED = 1;
+   */
+  MANAGED = 1,
+
+  /**
+   * @generated from enum value: ROUTING_DESTINATION_SOURCE = 2;
+   */
+  SOURCE = 2,
+
+  /**
+   * @generated from enum value: ROUTING_DESTINATION_BLOCKED = 3;
+   */
+  BLOCKED = 3,
+}
+// Retrieve enum metadata with: proto3.getEnumType(RoutingDestination)
+proto3.util.setEnumType(RoutingDestination, "clustermetadata.RoutingDestination", [
+  { no: 0, name: "ROUTING_DESTINATION_UNSPECIFIED" },
+  { no: 1, name: "ROUTING_DESTINATION_MANAGED" },
+  { no: 2, name: "ROUTING_DESTINATION_SOURCE" },
+  { no: 3, name: "ROUTING_DESTINATION_BLOCKED" },
+]);
+
+/**
  * TopoConfig defines the connection parameters for a topology service.
  * It specifies the type of topology backend, where it's hosted, and the
  * logical root path within that backend.
@@ -2628,6 +2662,104 @@ export class CohortEligibilityStatus extends Message<CohortEligibilityStatus> {
 
   static equals(a: CohortEligibilityStatus | PlainMessage<CohortEligibilityStatus> | undefined, b: CohortEligibilityStatus | PlainMessage<CohortEligibilityStatus> | undefined): boolean {
     return proto3.util.equals(CohortEligibilityStatus, a, b);
+  }
+}
+
+/**
+ * @generated from message clustermetadata.ExternalBackendIdentity
+ */
+export class ExternalBackendIdentity extends Message<ExternalBackendIdentity> {
+  /**
+   * @generated from field: string system_identifier = 1;
+   */
+  systemIdentifier = "";
+
+  /**
+   * @generated from field: string database = 2;
+   */
+  database = "";
+
+  constructor(data?: PartialMessage<ExternalBackendIdentity>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "clustermetadata.ExternalBackendIdentity";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "system_identifier", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "database", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ExternalBackendIdentity {
+    return new ExternalBackendIdentity().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ExternalBackendIdentity {
+    return new ExternalBackendIdentity().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ExternalBackendIdentity {
+    return new ExternalBackendIdentity().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ExternalBackendIdentity | PlainMessage<ExternalBackendIdentity> | undefined, b: ExternalBackendIdentity | PlainMessage<ExternalBackendIdentity> | undefined): boolean {
+    return proto3.util.equals(ExternalBackendIdentity, a, b);
+  }
+}
+
+/**
+ * @generated from message clustermetadata.GatewayRoutingPolicy
+ */
+export class GatewayRoutingPolicy extends Message<GatewayRoutingPolicy> {
+  /**
+   * @generated from field: clustermetadata.RoutingDestination destination = 1;
+   */
+  destination = RoutingDestination.UNSPECIFIED;
+
+  /**
+   * @generated from field: string source_connection = 2;
+   */
+  sourceConnection = "";
+
+  /**
+   * @generated from field: clustermetadata.ExternalBackendIdentity source_identity = 3;
+   */
+  sourceIdentity?: ExternalBackendIdentity;
+
+  /**
+   * @generated from field: string source_configuration_binding = 4;
+   */
+  sourceConfigurationBinding = "";
+
+  constructor(data?: PartialMessage<GatewayRoutingPolicy>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "clustermetadata.GatewayRoutingPolicy";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "destination", kind: "enum", T: proto3.getEnumType(RoutingDestination) },
+    { no: 2, name: "source_connection", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "source_identity", kind: "message", T: ExternalBackendIdentity },
+    { no: 4, name: "source_configuration_binding", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): GatewayRoutingPolicy {
+    return new GatewayRoutingPolicy().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): GatewayRoutingPolicy {
+    return new GatewayRoutingPolicy().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): GatewayRoutingPolicy {
+    return new GatewayRoutingPolicy().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: GatewayRoutingPolicy | PlainMessage<GatewayRoutingPolicy> | undefined, b: GatewayRoutingPolicy | PlainMessage<GatewayRoutingPolicy> | undefined): boolean {
+    return proto3.util.equals(GatewayRoutingPolicy, a, b);
   }
 }
 

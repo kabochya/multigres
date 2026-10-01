@@ -51,6 +51,11 @@ func (pm *MultipoolerManager) checkExternalReadiness(ctx context.Context) {
 		}
 	}
 
+	var identity *pb.ExternalBackendIdentity
+	if err == nil && writable {
+		identity = &pb.ExternalBackendIdentity{SystemIdentifier: pm.config.SourceConfiguration.ExpectedSystemIdentifier, Database: pm.config.ExternalDatabase}
+	}
+	pm.healthStreamer.setBackendReadiness(err == nil && writable, identity)
 	cancel()
 	lockCtx, lockErr := pm.actionLock.Acquire(ctx, "ExternalReadiness")
 	if lockErr != nil {

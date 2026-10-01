@@ -64,3 +64,32 @@ admission milestone adds independent controller-owned permission.
 `/ready` remains control-plane reachability. Backend availability travels through
 the existing health stream. Pooler shutdown withdraws service and leaves external
 PostgreSQL running. Rotation and configuration hot reload remain unsupported.
+
+## Gateway destination policy
+
+`multigres.gateway_routing` stores a database-level MANAGED, SOURCE or BLOCKED
+destination. SOURCE requires the named configuration binding and expected
+physical identity. It does not contain admission intent, migration ownership or
+workflow completion. `SetRoutingPolicy` validates protected target-admin
+credentials and commits metadata once under `remote_apply`; it publishes the
+snapshot from that transaction after confirmed commit, never a subsequent local
+reread. It does not drain work, call peers or advance a migration.
+
+Managed authority health streams deliver the confirmed policy. Startup,
+leadership/backend transitions and a reconnect while initialization is incomplete
+trigger bounded recovery bursts. Stable health broadcasts reuse the confirmed
+snapshot. There is no periodic migration state-refresh transaction.
+
+Sources remain outside the managed primary set. Gateways select ready source
+processes with matching association/binding/physical identity, prefer their local
+cell, and refuse automatic source/target fallback. A warm gateway retains its
+accepted source destination during target outages. A cold gateway observing the
+routing capability requires confirmed policy, even before source discovery.
+Obsolete authority rules, canceled streams and replaced riders cannot replace
+accepted policy. Existing reservations and cancel requests retain process
+ownership; routing changes govern new destination selection.
+
+Routing BLOCKED is traffic intent, not proof of completed fencing. M1 source
+poolers can still admit requests from a stale gateway. Controller-owned admission
+and close/drain barriers are implemented in M2; they remain separate from gateway
+destination activation.

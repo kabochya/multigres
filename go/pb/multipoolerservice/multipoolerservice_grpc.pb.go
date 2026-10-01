@@ -36,6 +36,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	MultipoolerService_SetRoutingPolicy_FullMethodName          = "/multipoolerservice.MultipoolerService/SetRoutingPolicy"
+	MultipoolerService_GetRoutingPolicy_FullMethodName          = "/multipoolerservice.MultipoolerService/GetRoutingPolicy"
 	MultipoolerService_CreateSourceConnection_FullMethodName    = "/multipoolerservice.MultipoolerService/CreateSourceConnection"
 	MultipoolerService_GetSourceConnection_FullMethodName       = "/multipoolerservice.MultipoolerService/GetSourceConnection"
 	MultipoolerService_ExecuteQuery_FullMethodName              = "/multipoolerservice.MultipoolerService/ExecuteQuery"
@@ -59,6 +61,9 @@ const (
 //
 // MultipoolerService provides connection pooling and query execution
 type MultipoolerServiceClient interface {
+	// Write routing metadata only; this never fences, drains or advances migration.
+	SetRoutingPolicy(ctx context.Context, in *SetRoutingPolicyRequest, opts ...grpc.CallOption) (*SetRoutingPolicyResponse, error)
+	GetRoutingPolicy(ctx context.Context, in *GetRoutingPolicyRequest, opts ...grpc.CallOption) (*GetRoutingPolicyResponse, error)
 	// Provision immutable source configuration on the managed authority.
 	CreateSourceConnection(ctx context.Context, in *CreateSourceConnectionRequest, opts ...grpc.CallOption) (*CreateSourceConnectionResponse, error)
 	// Protected bootstrap: never call through application routing.
@@ -137,6 +142,26 @@ type multipoolerServiceClient struct {
 
 func NewMultipoolerServiceClient(cc grpc.ClientConnInterface) MultipoolerServiceClient {
 	return &multipoolerServiceClient{cc}
+}
+
+func (c *multipoolerServiceClient) SetRoutingPolicy(ctx context.Context, in *SetRoutingPolicyRequest, opts ...grpc.CallOption) (*SetRoutingPolicyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetRoutingPolicyResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_SetRoutingPolicy_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *multipoolerServiceClient) GetRoutingPolicy(ctx context.Context, in *GetRoutingPolicyRequest, opts ...grpc.CallOption) (*GetRoutingPolicyResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetRoutingPolicyResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_GetRoutingPolicy_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *multipoolerServiceClient) CreateSourceConnection(ctx context.Context, in *CreateSourceConnectionRequest, opts ...grpc.CallOption) (*CreateSourceConnectionResponse, error) {
@@ -334,6 +359,9 @@ type MultipoolerService_NotificationStreamClient = grpc.BidiStreamingClient[Noti
 //
 // MultipoolerService provides connection pooling and query execution
 type MultipoolerServiceServer interface {
+	// Write routing metadata only; this never fences, drains or advances migration.
+	SetRoutingPolicy(context.Context, *SetRoutingPolicyRequest) (*SetRoutingPolicyResponse, error)
+	GetRoutingPolicy(context.Context, *GetRoutingPolicyRequest) (*GetRoutingPolicyResponse, error)
 	// Provision immutable source configuration on the managed authority.
 	CreateSourceConnection(context.Context, *CreateSourceConnectionRequest) (*CreateSourceConnectionResponse, error)
 	// Protected bootstrap: never call through application routing.
@@ -414,6 +442,12 @@ type MultipoolerServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedMultipoolerServiceServer struct{}
 
+func (UnimplementedMultipoolerServiceServer) SetRoutingPolicy(context.Context, *SetRoutingPolicyRequest) (*SetRoutingPolicyResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetRoutingPolicy not implemented")
+}
+func (UnimplementedMultipoolerServiceServer) GetRoutingPolicy(context.Context, *GetRoutingPolicyRequest) (*GetRoutingPolicyResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetRoutingPolicy not implemented")
+}
 func (UnimplementedMultipoolerServiceServer) CreateSourceConnection(context.Context, *CreateSourceConnectionRequest) (*CreateSourceConnectionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CreateSourceConnection not implemented")
 }
@@ -478,6 +512,42 @@ func RegisterMultipoolerServiceServer(s grpc.ServiceRegistrar, srv MultipoolerSe
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&MultipoolerService_ServiceDesc, srv)
+}
+
+func _MultipoolerService_SetRoutingPolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetRoutingPolicyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MultipoolerServiceServer).SetRoutingPolicy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MultipoolerService_SetRoutingPolicy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MultipoolerServiceServer).SetRoutingPolicy(ctx, req.(*SetRoutingPolicyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MultipoolerService_GetRoutingPolicy_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRoutingPolicyRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MultipoolerServiceServer).GetRoutingPolicy(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MultipoolerService_GetRoutingPolicy_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MultipoolerServiceServer).GetRoutingPolicy(ctx, req.(*GetRoutingPolicyRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _MultipoolerService_CreateSourceConnection_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -692,6 +762,14 @@ var MultipoolerService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "multipoolerservice.MultipoolerService",
 	HandlerType: (*MultipoolerServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "SetRoutingPolicy",
+			Handler:    _MultipoolerService_SetRoutingPolicy_Handler,
+		},
+		{
+			MethodName: "GetRoutingPolicy",
+			Handler:    _MultipoolerService_GetRoutingPolicy_Handler,
+		},
 		{
 			MethodName: "CreateSourceConnection",
 			Handler:    _MultipoolerService_CreateSourceConnection_Handler,

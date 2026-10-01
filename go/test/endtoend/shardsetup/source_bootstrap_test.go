@@ -52,7 +52,7 @@ func TestCatalogSourceBootstrap(t *testing.T) {
 	require.NoError(t, err)
 	keyPath := filepath.Join(dir, "migration-key")
 	require.NoError(t, os.WriteFile(keyPath, key, 0o600))
-	s, cleanup := NewIsolated(t, WithMultipoolerCount(3), WithMultipoolerExtraArgs("--migration-key-file="+keyPath))
+	s, cleanup := NewIsolated(t, WithMultipoolerCount(3), WithMultigateway(), WithMultipoolerExtraArgs("--migration-key-file="+keyPath))
 	defer cleanup()
 	target, err := pgx.Connect(ctx, fmt.Sprintf("host=127.0.0.1 port=%d user=postgres password=%s dbname=postgres sslmode=disable", s.PrimaryPgctld(t).PgPort, TestPostgresPassword))
 	require.NoError(t, err)
@@ -115,6 +115,42 @@ func TestCatalogSourceBootstrap(t *testing.T) {
 	record, err := s.TopoServer.GetMultipooler(ctx, id)
 	require.NoError(t, err)
 	require.Equal(t, created.ConfigurationBinding, record.SourceConfigurationBinding)
+	_, err = target.Exec(ctx, "CREATE ROLE alice LOGIN PASSWORD 'alice-routing-test'; CREATE TABLE routing_marker(value TEXT); INSERT INTO routing_marker VALUES('managed'); GRANT SELECT ON routing_marker TO alice")
+	require.NoError(t, err)
+	var aliceVerifier string
+	require.NoError(t, target.QueryRow(ctx, "SELECT rolpassword FROM pg_authid WHERE rolname='alice'").Scan(&aliceVerifier))
+	_, err = source.Exec(ctx, "CREATE ROLE alice LOGIN PASSWORD '"+aliceVerifier+"'; CREATE TABLE routing_marker(value TEXT); INSERT INTO routing_marker VALUES('source'); GRANT SELECT ON routing_marker TO alice")
+	require.NoError(t, err)
+	setPolicy := func(policy *pb.GatewayRoutingPolicy) {
+		_, err := client.SetRoutingPolicy(protected, &rpc.SetRoutingPolicyRequest{Database: "postgres", Username: "postgres", UserAuth: request.UserAuth, Policy: policy})
+		require.NoError(t, err)
+	}
+	sourcePolicy := &pb.GatewayRoutingPolicy{Destination: pb.RoutingDestination_ROUTING_DESTINATION_SOURCE, SourceConnection: "source", SourceConfigurationBinding: created.ConfigurationBinding, SourceIdentity: &pb.ExternalBackendIdentity{SystemIdentifier: sysid, Database: "postgres"}}
+	setPolicy(sourcePolicy)
+	var app *pgx.Conn
+	require.Eventually(t, func() bool {
+		app, err = pgx.Connect(ctx, fmt.Sprintf("host=127.0.0.1 port=%d user=alice password=alice-routing-test dbname=postgres sslmode=disable", s.MultigatewayPgPort))
+		return err == nil
+	}, 15*time.Second, 100*time.Millisecond)
+	defer app.Close(context.Background())
+	marker := func(expected string) {
+		require.Eventually(t, func() bool {
+			var marker string
+			err := app.QueryRow(ctx, "SELECT value FROM routing_marker").Scan(&marker)
+			return err == nil && marker == expected
+		}, 10*time.Second, 100*time.Millisecond)
+	}
+	marker("source")
+	setPolicy(&pb.GatewayRoutingPolicy{Destination: pb.RoutingDestination_ROUTING_DESTINATION_BLOCKED})
+	require.Eventually(t, func() bool { _, err := app.Exec(ctx, "SELECT value FROM routing_marker"); return err != nil }, 10*time.Second, 100*time.Millisecond)
+	// Routing BLOCKED is not completed fencing: source application admission is
+	// still open in M1. The independent admission milestone supplies that barrier.
+	require.NoError(t, source.Ping(ctx))
+	setPolicy(&pb.GatewayRoutingPolicy{Destination: pb.RoutingDestination_ROUTING_DESTINATION_MANAGED})
+	marker("managed")
+	setPolicy(sourcePolicy)
+	marker("source")
+
 	stopSource()
 	require.NoError(t, source.Ping(ctx), "source PostgreSQL remains running after pooler shutdown")
 }

@@ -41,6 +41,11 @@ const (
 // that atomically update state and broadcast to clients.
 // Following the Vitess healthStreamer pattern.
 type healthStreamer struct {
+	routingPolicy         *clustermetadatapb.GatewayRoutingPolicy
+	routingPolicyRequired bool
+	backendReady          bool
+	backendIdentity       *clustermetadatapb.ExternalBackendIdentity
+
 	logger *slog.Logger
 
 	mu sync.Mutex
@@ -183,6 +188,8 @@ func (hs *healthStreamer) SetReplicationLag(lagNs int64) {
 // buildStateLocked builds the current health state. Caller must hold hs.mu.
 func (hs *healthStreamer) buildStateLocked() *poolerserver.HealthState {
 	return &poolerserver.HealthState{
+		RoutingPolicy: hs.routingPolicy, RoutingPolicyRequired: hs.routingPolicyRequired,
+		BackendReady: hs.backendReady, BackendIdentity: hs.backendIdentity,
 		PoolerID:                    hs.poolerID,
 		ServingStatus:               hs.servingStatus,
 		RoutingState:                hs.routingState,
@@ -276,6 +283,9 @@ func (pm *MultipoolerManager) GetHealthState(ctx context.Context) (*poolerserver
 // falls too far behind (buffer full).
 // Implements poolerserver.HealthProvider.
 func (pm *MultipoolerManager) SubscribeHealth(ctx context.Context) (*poolerserver.HealthState, <-chan *poolerserver.HealthState, error) {
+	if pm.healthStreamer != nil && pm.config != nil && len(pm.config.MigrationKey) == 32 && !pm.IsUnmanaged() && pm.healthStreamer.getState().RoutingPolicy == nil {
+		pm.signalRoutingPublication()
+	}
 	if pm.healthStreamer == nil {
 		return nil, nil, nil
 	}
@@ -354,4 +364,19 @@ func (pm *MultipoolerManager) runHealthHeartbeat(ctx context.Context, interval t
 			pm.broadcastHealth()
 		}
 	}
+}
+
+func (hs *healthStreamer) setRoutingPolicy(p *clustermetadatapb.GatewayRoutingPolicy) {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	hs.routingPolicy = p
+	hs.broadcastLocked()
+}
+
+func (hs *healthStreamer) setBackendReadiness(ready bool, identity *clustermetadatapb.ExternalBackendIdentity) {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	hs.backendReady = ready
+	hs.backendIdentity = identity
+	hs.broadcastLocked()
 }

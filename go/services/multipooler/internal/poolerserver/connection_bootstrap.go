@@ -23,6 +23,8 @@ import (
 
 // ConnectionBootstrapProvider is independent of application query admission.
 type ConnectionBootstrapProvider interface {
+	SetRoutingPolicy(context.Context, *rpc.SetRoutingPolicyRequest) (*rpc.SetRoutingPolicyResponse, error)
+	GetRoutingPolicy(context.Context, *rpc.GetRoutingPolicyRequest) (*rpc.GetRoutingPolicyResponse, error)
 	CreateSourceConnection(context.Context, *rpc.CreateSourceConnectionRequest) (*rpc.CreateSourceConnectionResponse, error)
 	GetSourceConnection(context.Context, *rpc.GetSourceConnectionRequest) (*rpc.GetSourceConnectionResponse, error)
 }

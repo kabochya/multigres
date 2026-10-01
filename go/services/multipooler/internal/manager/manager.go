@@ -74,7 +74,8 @@ const (
 
 // MultipoolerManager manages the pooler lifecycle and PostgreSQL operations
 type MultipoolerManager struct {
-	connectionCatalog *connectioncatalog.Catalog
+	connectionCatalog  *connectioncatalog.Catalog
+	routingPublication routingPublication
 
 	logger     *slog.Logger
 	metrics    *managerMetrics
@@ -455,6 +456,7 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 	if pm.consensusMgr != nil {
 		status = pm.consensusMgr.CachedConsensusStatus
 	}
+	pm.healthStreamer.routingPolicyRequired = len(config.MigrationKey) == 32 && !pm.IsUnmanaged()
 	pm.stateManager = NewStateManager(logger, pm.record, status, pm.qsc, pm.healthStreamer)
 	if stateAwareConnPoolMgr, ok := connPoolMgr.(StateAware); ok {
 		if err := registerAndSyncStateAware(ctx, pm.stateManager, stateAwareConnPoolMgr); err != nil {
@@ -1735,6 +1737,7 @@ func (pm *MultipoolerManager) Start(senv *servenv.ServEnv) {
 	}
 	pm.Open(lockCtx)
 	pm.actionLock.Release(lockCtx)
+	pm.startRoutingPublication()
 
 	// Register the SIGTERM-driven graceful shutdown sequence. Runs as an
 	// OnTermSync hook so it is bounded by the lameduck window and completes

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package connectioncatalog
+package connectioncatalog_test
 
 import (
 	"bytes"
@@ -32,6 +32,7 @@ import (
 
 	"github.com/multigres/multigres/go/common/sqltypes"
 	rpc "github.com/multigres/multigres/go/pb/multipoolerservice"
+	"github.com/multigres/multigres/go/services/multipooler/internal/connectioncatalog"
 	"github.com/multigres/multigres/go/services/multipooler/internal/executor"
 	qmock "github.com/multigres/multigres/go/services/multipooler/internal/executor/mock"
 	"github.com/multigres/multigres/go/tools/executil"
@@ -177,7 +178,7 @@ func TestPostgresConnectionDurability(t *testing.T) {
 	_, err = observer.Exec(t.Context(), "CREATE SCHEMA multigres")
 	require.NoError(t, err)
 	key := bytes.Repeat([]byte{1}, 32)
-	catalog, err := New(postgresQueries{dsn: dsn}, key)
+	catalog, err := connectioncatalog.New(postgresQueries{dsn: dsn}, key)
 	require.NoError(t, err)
 	require.NoError(t, catalog.Initialize(t.Context()))
 	require.NoError(t, catalog.Initialize(t.Context()))
@@ -217,7 +218,7 @@ func TestPostgresConnectionDurability(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond)
 	// Locally visible uncertain creation is insufficient for protected bootstrap,
 	// including with a new catalog instance after a pooler-only restart.
-	restarted, err := New(postgresQueries{dsn: dsn}, key)
+	restarted, err := connectioncatalog.New(postgresQueries{dsn: dsn}, key)
 	require.NoError(t, err)
 	confirmCtx, stop := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	record, err := restarted.Confirmed(confirmCtx, "source")
@@ -256,7 +257,7 @@ func TestPostgresConnectionDurability(t *testing.T) {
 	var stored string
 	require.NoError(t, replica.QueryRow(t.Context(), "SELECT binding FROM multigres.connections WHERE name='source'").Scan(&stored))
 	require.Equal(t, binding, stored)
-	follower, err := New(postgresQueries{dsn: replicaDSN}, key)
+	follower, err := connectioncatalog.New(postgresQueries{dsn: replicaDSN}, key)
 	require.NoError(t, err)
 	record, err = follower.Confirmed(confirmedCtx, "source")
 	require.Error(t, err)
@@ -271,7 +272,7 @@ func TestPostgresConnectionDurability(t *testing.T) {
 	record, err = follower.Confirmed(confirmedCtx, "source")
 	require.NoError(t, err)
 	require.Equal(t, binding, record.Binding)
-	wrong, err := New(postgresQueries{dsn: replicaDSN}, bytes.Repeat([]byte{2}, 32))
+	wrong, err := connectioncatalog.New(postgresQueries{dsn: replicaDSN}, bytes.Repeat([]byte{2}, 32))
 	require.NoError(t, err)
 	record, err = wrong.Confirmed(confirmedCtx, "source")
 	require.Error(t, err)
