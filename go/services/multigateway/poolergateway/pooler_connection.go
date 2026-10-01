@@ -55,7 +55,11 @@ type poolerHealth struct {
 	// RoutingState is the pooler's self-reported routing/HA role plus the rule
 	// that qualifies it. role == PRIMARY marks the writable routing primary; the
 	// rule number is used as the failover-overlap tiebreaker among primaries.
-	RoutingState *clustermetadatapb.RoutingState
+	RoutingState          *clustermetadatapb.RoutingState
+	RoutingPolicy         *clustermetadatapb.GatewayRoutingPolicy
+	RoutingPolicyRequired bool
+	BackendReady          bool
+	BackendIdentity       *clustermetadatapb.ExternalBackendIdentity
 
 	// ReplicationLagNs is the replication lag in nanoseconds reported by the pooler.
 	// Zero on the primary or when not yet measured.
@@ -86,9 +90,10 @@ func (h *poolerHealth) simpleCopy() *poolerHealth {
 		return nil
 	}
 	return &poolerHealth{
-		PoolerID:         h.PoolerID,
-		ServingStatus:    h.ServingStatus,
-		RoutingState:     h.RoutingState,
+		PoolerID:      h.PoolerID,
+		ServingStatus: h.ServingStatus,
+		RoutingState:  h.RoutingState,
+		RoutingPolicy: h.RoutingPolicy, RoutingPolicyRequired: h.RoutingPolicyRequired, BackendReady: h.BackendReady, BackendIdentity: h.BackendIdentity,
 		ReplicationLagNs: h.ReplicationLagNs,
 		LastError:        h.LastError,
 		LastResponse:     h.LastResponse,
@@ -398,6 +403,10 @@ func (pc *poolerConnection) streamHealth(
 		}
 		stalenessTimer.Reset(stalenessTimeout)
 
+		if streamCtx.Err() != nil {
+			return streamCtx.Err()
+		}
+
 		// Process the health response.
 		pc.processHealthResponse(response)
 	}
@@ -410,9 +419,10 @@ func (pc *poolerConnection) processHealthResponse(response *multipoolerservice.S
 
 	// Build new health snapshot from the response.
 	newHealth := &poolerHealth{
-		PoolerID:         response.PoolerId,
-		ServingStatus:    response.ServingStatus,
-		RoutingState:     response.RoutingState,
+		PoolerID:      response.PoolerId,
+		ServingStatus: response.ServingStatus,
+		RoutingState:  response.RoutingState,
+		RoutingPolicy: response.RoutingPolicy, RoutingPolicyRequired: response.RoutingPolicyRequired, BackendReady: response.BackendReady, BackendIdentity: response.BackendIdentity,
 		ReplicationLagNs: response.ReplicationLagNs,
 		LastError:        nil,
 		LastResponse:     time.Now(),

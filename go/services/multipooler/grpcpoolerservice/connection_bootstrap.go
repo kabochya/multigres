@@ -38,3 +38,21 @@ func (s *poolerService) GetSourceConnection(ctx context.Context, r *rpc.GetSourc
 	reply, err := p.GetSourceConnection(ctx, r)
 	return reply, mterrors.ToGRPC(err)
 }
+
+func (s *poolerService) SetRoutingPolicy(ctx context.Context, r *rpc.SetRoutingPolicyRequest) (*rpc.SetRoutingPolicyResponse, error) {
+	p, err := s.pooler.ConnectionBootstrapProvider()
+	if err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
+	v, err := p.SetRoutingPolicy(ctx, r)
+	return v, mterrors.ToGRPC(err)
+}
+
+func (s *poolerService) GetRoutingPolicy(ctx context.Context, r *rpc.GetRoutingPolicyRequest) (*rpc.GetRoutingPolicyResponse, error) {
+	p, err := s.pooler.ConnectionBootstrapProvider()
+	if err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
+	v, err := p.GetRoutingPolicy(ctx, r)
+	return v, mterrors.ToGRPC(err)
+}

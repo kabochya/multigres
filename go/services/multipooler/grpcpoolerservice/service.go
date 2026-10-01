@@ -1039,6 +1039,8 @@ func (s *poolerService) StreamPoolerHealth(req *multipoolerpb.StreamPoolerHealth
 // healthStateToProto converts internal health state to proto response.
 func healthStateToProto(state *poolerserver.HealthState) *multipoolerpb.StreamPoolerHealthResponse {
 	resp := &multipoolerpb.StreamPoolerHealthResponse{
+		RoutingPolicy: state.RoutingPolicy, RoutingPolicyRequired: state.RoutingPolicyRequired,
+		BackendReady: state.BackendReady, BackendIdentity: state.BackendIdentity,
 		PoolerId:      state.PoolerID,
 		ServingStatus: state.ServingStatus,
 		RoutingState:  state.RoutingState,

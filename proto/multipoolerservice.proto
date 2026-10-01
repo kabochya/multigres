@@ -30,6 +30,9 @@ option go_package = "github.com/multigres/multigres/go/pb/multipoolerservice";
 
 // MultipoolerService provides connection pooling and query execution
 service MultipoolerService {
+ // Write routing metadata only; this never fences, drains or advances migration.
+ rpc SetRoutingPolicy(SetRoutingPolicyRequest) returns (SetRoutingPolicyResponse);
+ rpc GetRoutingPolicy(GetRoutingPolicyRequest) returns (GetRoutingPolicyResponse);
   // Provision immutable source configuration on the managed authority.
   rpc CreateSourceConnection(CreateSourceConnectionRequest) returns (CreateSourceConnectionResponse);
   // Protected bootstrap: never call through application routing.
@@ -650,6 +653,11 @@ message StreamPoolerHealthResponse {
   // replication_lag_ns is the current replication lag in nanoseconds,
   // measured via heartbeat timestamps. Zero on a leader or when unknown.
   int64 replication_lag_ns = 6;
+ clustermetadata.GatewayRoutingPolicy routing_policy = 10;
+ bool routing_policy_required = 11;
+ bool backend_ready = 12;
+ clustermetadata.ExternalBackendIdentity backend_identity = 13;
+
 }
 
 // NotificationStreamRequest updates the subscribed channels for one gateway
@@ -699,3 +707,13 @@ message CreateSourceConnectionRequest {
 message CreateSourceConnectionResponse { string configuration_binding = 1; }
 message GetSourceConnectionRequest { string database = 1; string connection_name = 2; }
 message GetSourceConnectionResponse { SourceConnection connection = 1; string configuration_binding = 2; clustermetadata.ShardKey authority_shard_key = 3; }
+
+message SetRoutingPolicyRequest {
+ string database = 1;
+ clustermetadata.GatewayRoutingPolicy policy = 2;
+ string username = 3;
+ query.UserAuth user_auth = 4;
+}
+message SetRoutingPolicyResponse { clustermetadata.GatewayRoutingPolicy policy = 1; }
+message GetRoutingPolicyRequest { string database = 1; }
+message GetRoutingPolicyResponse { clustermetadata.GatewayRoutingPolicy policy = 1; }

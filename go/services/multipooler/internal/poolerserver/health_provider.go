@@ -28,6 +28,10 @@ import (
 // StreamPoolerHealthResponse.target — the gateway derives shard identity
 // from topology and routing role from serving_status + routing_state.
 type HealthState struct {
+	RoutingPolicy         *clustermetadatapb.GatewayRoutingPolicy
+	RoutingPolicyRequired bool
+	BackendReady          bool
+	BackendIdentity       *clustermetadatapb.ExternalBackendIdentity
 	// PoolerID identifies this multipooler instance.
 	PoolerID *clustermetadatapb.ID
 

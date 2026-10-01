@@ -49,6 +49,12 @@ const (
 // reflection-formatted method names, remove the leading slash and convert the remaining slash to a
 // period.
 const (
+	// MultipoolerServiceSetRoutingPolicyProcedure is the fully-qualified name of the
+	// MultipoolerService's SetRoutingPolicy RPC.
+	MultipoolerServiceSetRoutingPolicyProcedure = "/multipoolerservice.MultipoolerService/SetRoutingPolicy"
+	// MultipoolerServiceGetRoutingPolicyProcedure is the fully-qualified name of the
+	// MultipoolerService's GetRoutingPolicy RPC.
+	MultipoolerServiceGetRoutingPolicyProcedure = "/multipoolerservice.MultipoolerService/GetRoutingPolicy"
 	// MultipoolerServiceCreateSourceConnectionProcedure is the fully-qualified name of the
 	// MultipoolerService's CreateSourceConnection RPC.
 	MultipoolerServiceCreateSourceConnectionProcedure = "/multipoolerservice.MultipoolerService/CreateSourceConnection"
@@ -98,6 +104,9 @@ const (
 
 // MultipoolerServiceClient is a client for the multipoolerservice.MultipoolerService service.
 type MultipoolerServiceClient interface {
+	// Write routing metadata only; this never fences, drains or advances migration.
+	SetRoutingPolicy(context.Context, *connect.Request[multipoolerservice.SetRoutingPolicyRequest]) (*connect.Response[multipoolerservice.SetRoutingPolicyResponse], error)
+	GetRoutingPolicy(context.Context, *connect.Request[multipoolerservice.GetRoutingPolicyRequest]) (*connect.Response[multipoolerservice.GetRoutingPolicyResponse], error)
 	// Provision immutable source configuration on the managed authority.
 	CreateSourceConnection(context.Context, *connect.Request[multipoolerservice.CreateSourceConnectionRequest]) (*connect.Response[multipoolerservice.CreateSourceConnectionResponse], error)
 	// Protected bootstrap: never call through application routing.
@@ -181,6 +190,18 @@ func NewMultipoolerServiceClient(httpClient connect.HTTPClient, baseURL string, 
 	baseURL = strings.TrimRight(baseURL, "/")
 	multipoolerServiceMethods := multipoolerservice.File_multipoolerservice_proto.Services().ByName("MultipoolerService").Methods()
 	return &multipoolerServiceClient{
+		setRoutingPolicy: connect.NewClient[multipoolerservice.SetRoutingPolicyRequest, multipoolerservice.SetRoutingPolicyResponse](
+			httpClient,
+			baseURL+MultipoolerServiceSetRoutingPolicyProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("SetRoutingPolicy")),
+			connect.WithClientOptions(opts...),
+		),
+		getRoutingPolicy: connect.NewClient[multipoolerservice.GetRoutingPolicyRequest, multipoolerservice.GetRoutingPolicyResponse](
+			httpClient,
+			baseURL+MultipoolerServiceGetRoutingPolicyProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("GetRoutingPolicy")),
+			connect.WithClientOptions(opts...),
+		),
 		createSourceConnection: connect.NewClient[multipoolerservice.CreateSourceConnectionRequest, multipoolerservice.CreateSourceConnectionResponse](
 			httpClient,
 			baseURL+MultipoolerServiceCreateSourceConnectionProcedure,
@@ -276,6 +297,8 @@ func NewMultipoolerServiceClient(httpClient connect.HTTPClient, baseURL string, 
 
 // multipoolerServiceClient implements MultipoolerServiceClient.
 type multipoolerServiceClient struct {
+	setRoutingPolicy          *connect.Client[multipoolerservice.SetRoutingPolicyRequest, multipoolerservice.SetRoutingPolicyResponse]
+	getRoutingPolicy          *connect.Client[multipoolerservice.GetRoutingPolicyRequest, multipoolerservice.GetRoutingPolicyResponse]
 	createSourceConnection    *connect.Client[multipoolerservice.CreateSourceConnectionRequest, multipoolerservice.CreateSourceConnectionResponse]
 	getSourceConnection       *connect.Client[multipoolerservice.GetSourceConnectionRequest, multipoolerservice.GetSourceConnectionResponse]
 	executeQuery              *connect.Client[multipoolerservice.ExecuteQueryRequest, multipoolerservice.ExecuteQueryResponse]
@@ -291,6 +314,16 @@ type multipoolerServiceClient struct {
 	releaseReservedConnection *connect.Client[multipoolerservice.ReleaseReservedConnectionRequest, multipoolerservice.ReleaseReservedConnectionResponse]
 	streamPoolerHealth        *connect.Client[multipoolerservice.StreamPoolerHealthRequest, multipoolerservice.StreamPoolerHealthResponse]
 	notificationStream        *connect.Client[multipoolerservice.NotificationStreamRequest, multipoolerservice.NotificationStreamResponse]
+}
+
+// SetRoutingPolicy calls multipoolerservice.MultipoolerService.SetRoutingPolicy.
+func (c *multipoolerServiceClient) SetRoutingPolicy(ctx context.Context, req *connect.Request[multipoolerservice.SetRoutingPolicyRequest]) (*connect.Response[multipoolerservice.SetRoutingPolicyResponse], error) {
+	return c.setRoutingPolicy.CallUnary(ctx, req)
+}
+
+// GetRoutingPolicy calls multipoolerservice.MultipoolerService.GetRoutingPolicy.
+func (c *multipoolerServiceClient) GetRoutingPolicy(ctx context.Context, req *connect.Request[multipoolerservice.GetRoutingPolicyRequest]) (*connect.Response[multipoolerservice.GetRoutingPolicyResponse], error) {
+	return c.getRoutingPolicy.CallUnary(ctx, req)
 }
 
 // CreateSourceConnection calls multipoolerservice.MultipoolerService.CreateSourceConnection.
@@ -371,6 +404,9 @@ func (c *multipoolerServiceClient) NotificationStream(ctx context.Context) *conn
 // MultipoolerServiceHandler is an implementation of the multipoolerservice.MultipoolerService
 // service.
 type MultipoolerServiceHandler interface {
+	// Write routing metadata only; this never fences, drains or advances migration.
+	SetRoutingPolicy(context.Context, *connect.Request[multipoolerservice.SetRoutingPolicyRequest]) (*connect.Response[multipoolerservice.SetRoutingPolicyResponse], error)
+	GetRoutingPolicy(context.Context, *connect.Request[multipoolerservice.GetRoutingPolicyRequest]) (*connect.Response[multipoolerservice.GetRoutingPolicyResponse], error)
 	// Provision immutable source configuration on the managed authority.
 	CreateSourceConnection(context.Context, *connect.Request[multipoolerservice.CreateSourceConnectionRequest]) (*connect.Response[multipoolerservice.CreateSourceConnectionResponse], error)
 	// Protected bootstrap: never call through application routing.
@@ -450,6 +486,18 @@ type MultipoolerServiceHandler interface {
 // and JSON codecs. They also support gzip compression.
 func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect.HandlerOption) (string, http.Handler) {
 	multipoolerServiceMethods := multipoolerservice.File_multipoolerservice_proto.Services().ByName("MultipoolerService").Methods()
+	multipoolerServiceSetRoutingPolicyHandler := connect.NewUnaryHandler(
+		MultipoolerServiceSetRoutingPolicyProcedure,
+		svc.SetRoutingPolicy,
+		connect.WithSchema(multipoolerServiceMethods.ByName("SetRoutingPolicy")),
+		connect.WithHandlerOptions(opts...),
+	)
+	multipoolerServiceGetRoutingPolicyHandler := connect.NewUnaryHandler(
+		MultipoolerServiceGetRoutingPolicyProcedure,
+		svc.GetRoutingPolicy,
+		connect.WithSchema(multipoolerServiceMethods.ByName("GetRoutingPolicy")),
+		connect.WithHandlerOptions(opts...),
+	)
 	multipoolerServiceCreateSourceConnectionHandler := connect.NewUnaryHandler(
 		MultipoolerServiceCreateSourceConnectionProcedure,
 		svc.CreateSourceConnection,
@@ -542,6 +590,10 @@ func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect
 	)
 	return "/multipoolerservice.MultipoolerService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case MultipoolerServiceSetRoutingPolicyProcedure:
+			multipoolerServiceSetRoutingPolicyHandler.ServeHTTP(w, r)
+		case MultipoolerServiceGetRoutingPolicyProcedure:
+			multipoolerServiceGetRoutingPolicyHandler.ServeHTTP(w, r)
 		case MultipoolerServiceCreateSourceConnectionProcedure:
 			multipoolerServiceCreateSourceConnectionHandler.ServeHTTP(w, r)
 		case MultipoolerServiceGetSourceConnectionProcedure:
@@ -580,6 +632,14 @@ func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect
 
 // UnimplementedMultipoolerServiceHandler returns CodeUnimplemented from all methods.
 type UnimplementedMultipoolerServiceHandler struct{}
+
+func (UnimplementedMultipoolerServiceHandler) SetRoutingPolicy(context.Context, *connect.Request[multipoolerservice.SetRoutingPolicyRequest]) (*connect.Response[multipoolerservice.SetRoutingPolicyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.SetRoutingPolicy is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) GetRoutingPolicy(context.Context, *connect.Request[multipoolerservice.GetRoutingPolicyRequest]) (*connect.Response[multipoolerservice.GetRoutingPolicyResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.GetRoutingPolicy is not implemented"))
+}
 
 func (UnimplementedMultipoolerServiceHandler) CreateSourceConnection(context.Context, *connect.Request[multipoolerservice.CreateSourceConnectionRequest]) (*connect.Response[multipoolerservice.CreateSourceConnectionResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.CreateSourceConnection is not implemented"))

@@ -211,7 +211,8 @@ type loadBalancer struct {
 	// name a pooler we are not currently connected to — GetConnection handles
 	// that at read time by consulting the cache. Entries are auto-cleared by
 	// onPoolerGone once no poolers remain in the shard.
-	shards map[shardKey]*shardSummary
+	shards          map[shardKey]*shardSummary
+	routingPolicies map[string]*acceptedRoutingPolicy
 
 	// cache is the pooler cache that owns the per-pooler *poolerConnection
 	// riders. Supplied at construction via loadBalancerOpts.Cache; callers
@@ -355,6 +356,9 @@ func (lb *loadBalancer) getConnection(target *query.Target) (*poolerConnection, 
 	}
 
 	sk := target.GetShardKey()
+	if conn, handled, err := lb.routingPolicyConnection(target); handled {
+		return conn, err
+	}
 	key := shardKeyOf(sk)
 
 	// Look up the shard summary under lb.mu, release it, then read the elected
@@ -389,6 +393,10 @@ func (lb *loadBalancer) getConnection(target *query.Target) (*poolerConnection, 
 				"leader %s known but not connected for database=%s, tablegroup=%s, shard=%s",
 				leaderID, sk.GetDatabase(), sk.GetTableGroup(), sk.GetShard())
 		}
+		if policy, known := lb.routingPolicy(sk.Database); known && commonconsensus.CompareRuleNumbers(conn.Health().RoutingState.GetRule(), policy.rule) < 0 {
+			return nil, newNoWritablePrimaryError("managed routing primary is obsolete")
+		}
+
 		return conn, nil
 	}
 
@@ -576,6 +584,15 @@ func (lb *loadBalancer) selectReplicaConnection(candidates []*poolerConnection) 
 // Safe to call concurrently: both processHealthResponse and setHealthError
 // release healthMu before invoking this callback.
 func (lb *loadBalancer) onPoolerHealthUpdate(conn *poolerConnection) {
+	if conn.ctx != nil && conn.ctx.Err() != nil {
+		return
+	}
+	if lb.cache != nil {
+		if current, exists := lb.cache.GetRider(conn.ID()); exists && current != conn {
+			return
+		}
+	}
+
 	health := conn.Health()
 	if health == nil {
 		return
@@ -613,7 +630,7 @@ func (lb *loadBalancer) onPoolerHealthUpdate(conn *poolerConnection) {
 	// errors (UNAVAILABLE is actionFail, not buffered).
 	rs := health.RoutingState
 	live := health.LastError == nil
-	if live && rs.GetRole() == clustermetadatapb.RoutingRole_ROUTING_ROLE_PRIMARY {
+	if live && conn.PoolerInfo().GetManagementMode() != clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED && rs.GetRole() == clustermetadatapb.RoutingRole_ROUTING_ROLE_PRIMARY {
 		if summary.setPrimary(poolerID, rs) {
 			lb.logger.Debug("routing primary recorded",
 				"tablegroup", summary.shardKey.GetTableGroup(),
@@ -628,6 +645,11 @@ func (lb *loadBalancer) onPoolerHealthUpdate(conn *poolerConnection) {
 			"pooler_id", poolerID,
 			"stale_stream", !live,
 			"last_error", health.LastError)
+	}
+
+	lb.acceptRoutingPolicy(summary, conn)
+	if lb.notifyPolicyDestinationReady(summary.shardKey) {
+		return
 	}
 
 	// Re-check the SERVING-leader notification: if the elected routing primary is
@@ -688,7 +710,7 @@ func (lb *loadBalancer) matchesReplicaTarget(conn *poolerConnection, target *que
 	if !matchesShardTarget(conn, target) {
 		return false
 	}
-	return !lb.claimsPrimary(conn)
+	return conn.PoolerInfo().GetManagementMode() != clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED && !lb.claimsPrimary(conn)
 }
 
 // claimsPrimary reports whether conn currently claims to be a routing primary
