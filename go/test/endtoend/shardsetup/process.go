@@ -41,6 +41,9 @@ import (
 // ProcessInstance represents a process instance for testing (pgctld, multipooler, or multiorch).
 // This struct is extracted from multipooler/setup_test.go and extended for multiorch support.
 type ProcessInstance struct {
+	// Launch is an optional isolated test-process launcher; production binaries are unchanged.
+	Launch func(context.Context, *ProcessInstance, []string) *executil.Cmd
+
 	Name       string
 	PoolerDir  string // Used by pgctld, multipooler
 	ConfigFile string // Used by pgctld
@@ -310,7 +313,11 @@ func (p *ProcessInstance) startMultipooler(ctx context.Context, t *testing.T) er
 	args := p.multipoolerArgs()
 
 	// Start the multipooler server
-	p.Process = executil.Command(ctx, p.Binary, args...).WithProcessGroup()
+	if p.Launch != nil {
+		p.Process = p.Launch(ctx, p, args)
+	} else {
+		p.Process = executil.Command(ctx, p.Binary, args...).WithProcessGroup()
+	}
 
 	// Set MULTIGRES_TESTDATA_DIR for directory-deletion triggered cleanup
 	if len(p.Environment) > 0 {

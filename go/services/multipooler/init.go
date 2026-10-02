@@ -891,3 +891,10 @@ func parseManagementMode(value string) (clustermetadatapb.PoolerManagementMode, 
 		return 0, fmt.Errorf("invalid management-mode %q: expected managed or unmanaged", value)
 	}
 }
+
+// ManagerForTesting exposes the in-process metadata authority to the isolated
+// demo harness. Production RPCs do not expose arbitrary transaction callbacks.
+func (mp *Multipooler) ManagerForTesting() *manager.MultipoolerManager { return mp.poolerManager }
+
+// TopologyForTesting exposes existing discovery to the isolated controller harness.
+func (mp *Multipooler) TopologyForTesting() topoclient.Store { return mp.ts }

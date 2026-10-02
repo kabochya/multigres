@@ -61,6 +61,8 @@ import (
 
 // SetupConfig holds the configuration for creating a ShardSetup.
 type SetupConfig struct {
+	MultipoolerLauncher func(context.Context, *ProcessInstance, []string) *executil.Cmd
+
 	MultipoolerCount                   int
 	MultiorchCount                     int
 	EnableMultigateway                 bool // Enable multigateway (opt-in, default: false)
@@ -648,6 +650,7 @@ func New(t *testing.T, opts ...SetupOption) *ShardSetup {
 
 		inst := setup.CreateMultipoolerInstance(t, name, grpcPort, pgPort, multipoolerPort)
 		inst.Multipooler.ExtraArgs = append(inst.Multipooler.ExtraArgs, config.MultipoolerExtraArgs...)
+		inst.Multipooler.Launch = config.MultipoolerLauncher
 		if config.EnableMultipoolerPGTLS {
 			paths := setup.MultipoolerPGTLSCertPaths
 			// Live-include SSL config into the generated postgresql.conf.
@@ -2481,4 +2484,9 @@ func formatPoolerHealth(healthList []*multiorchpb.PoolerHealth) string {
 	}
 
 	return fmt.Sprintf("%d/%d reachable (%s)", reachableCount, len(healthList), strings.Join(poolerStatuses, ", "))
+}
+
+// WithMultipoolerLauncher runs a controller only inside isolated test pooler processes.
+func WithMultipoolerLauncher(launch func(context.Context, *ProcessInstance, []string) *executil.Cmd) SetupOption {
+	return func(c *SetupConfig) { c.MultipoolerLauncher = launch }
 }
