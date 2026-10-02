@@ -74,9 +74,11 @@ const (
 
 // MultipoolerManager manages the pooler lifecycle and PostgreSQL operations
 type MultipoolerManager struct {
-	connectionCatalog  *connectioncatalog.Catalog
-	routingPublication routingPublication
-	admissionRuntime   admissionRuntime
+	connectionCatalog           *connectioncatalog.Catalog
+	routingPublication          routingPublication
+	admissionRuntime            admissionRuntime
+	metadataWriter              atomic.Pointer[MetadataWriter]
+	metadataLifecycleRegistered bool
 
 	logger     *slog.Logger
 	metrics    *managerMetrics
