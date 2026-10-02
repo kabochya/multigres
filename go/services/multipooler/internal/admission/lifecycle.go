@@ -25,7 +25,7 @@ import (
 	"github.com/multigres/multigres/go/services/multipooler/internal/executor"
 )
 
-const lifecycleSchema = `CREATE TABLE IF NOT EXISTS multigres.source_lifecycle (database TEXT PRIMARY KEY REFERENCES multigres.admission_scopes(database), authorization TEXT NOT NULL)`
+const lifecycleSchema = `CREATE TABLE IF NOT EXISTS multigres.source_lifecycle (database TEXT PRIMARY KEY REFERENCES multigres.admission_scopes(database), payload TEXT NOT NULL)`
 
 func InitializeLifecycle(ctx context.Context, tx executor.InternalTx) error {
 	for _, sql := range []string{lifecycleSchema, `REVOKE ALL ON multigres.source_lifecycle FROM PUBLIC`} {
@@ -74,7 +74,7 @@ func WriteLifecycle(ctx context.Context, tx executor.InternalTx, sk *pb.ShardKey
 	if err != nil {
 		return err
 	}
-	_, err = tx.QueryArgs(ctx, `INSERT INTO multigres.source_lifecycle(database,authorization) VALUES($1,$2) ON CONFLICT(database) DO UPDATE SET authorization=EXCLUDED.authorization`, sk.Database, hex.EncodeToString(data))
+	_, err = tx.QueryArgs(ctx, `INSERT INTO multigres.source_lifecycle(database,payload) VALUES($1,$2) ON CONFLICT(database) DO UPDATE SET payload=EXCLUDED.payload`, sk.Database, hex.EncodeToString(data))
 	return err
 }
 
@@ -83,7 +83,7 @@ func ConfirmLifecycle(ctx context.Context, tx executor.InternalTx, sk *pb.ShardK
 	if err != nil {
 		return nil, err
 	}
-	r, err := tx.QueryArgs(ctx, `SELECT authorization FROM multigres.source_lifecycle WHERE database=$1`, sk.Database)
+	r, err := tx.QueryArgs(ctx, `SELECT payload FROM multigres.source_lifecycle WHERE database=$1`, sk.Database)
 	if err != nil {
 		return nil, err
 	}

@@ -161,3 +161,38 @@ func TestPostgresAdmissionReplayAndMissingScope(t *testing.T) {
 		return err
 	}))
 }
+
+func TestPostgresSourceLifecycleAuthorization(t *testing.T) {
+	dsn, _, _ := disposablePostgres(t)
+	ctx := t.Context()
+	observer, err := pgx.Connect(ctx, dsn)
+	require.NoError(t, err)
+	defer observer.Close(context.Background())
+	_, err = observer.Exec(ctx, "CREATE SCHEMA multigres")
+	require.NoError(t, err)
+	c, err := connectioncatalog.New(postgresQueries{dsn: dsn}, bytes.Repeat([]byte{1}, 32))
+	require.NoError(t, err)
+	sk := &pb.ShardKey{Database: "postgres", TableGroup: "default", Shard: "0"}
+	source := &pb.AdmissionIntent{Owner: "owner", IntentId: "closed-source", Subject: pb.AdmissionSubject_ADMISSION_SUBJECT_SOURCE, Permission: pb.AdmissionPermission_ADMISSION_PERMISSION_CLOSED, SourceConnection: "source", SourceConfigurationBinding: "binding", SourceIdentity: &pb.ExternalBackendIdentity{SystemIdentifier: "123", Database: "postgres"}}
+	target := &pb.AdmissionIntent{Owner: "owner", IntentId: "closed-target", Subject: pb.AdmissionSubject_ADMISSION_SUBJECT_TARGET, Permission: pb.AdmissionPermission_ADMISSION_PERMISSION_CLOSED}
+	authorization := &pb.SourceLifecycleAuthorization{Owner: "owner", ClosedIntentId: source.IntentId, SourceConnection: "source", SourceConfigurationBinding: "binding", RetireSource: true}
+	require.NoError(t, c.Transaction(ctx, func(ctx context.Context, tx executor.InternalTx) error {
+		if err := admission.InitializeOrdinary(ctx, tx, sk); err != nil {
+			return err
+		}
+		if err := admission.Enable(ctx, tx, sk, source, target); err != nil {
+			return err
+		}
+		if err := admission.InitializeLifecycle(ctx, tx); err != nil {
+			return err
+		}
+		return admission.WriteLifecycle(ctx, tx, sk, authorization)
+	}))
+	var observed *pb.SourceLifecycleAuthorization
+	require.NoError(t, c.Transaction(ctx, func(ctx context.Context, tx executor.InternalTx) error {
+		var err error
+		observed, err = admission.ConfirmLifecycle(ctx, tx, sk)
+		return err
+	}))
+	require.True(t, proto.Equal(authorization, observed))
+}
