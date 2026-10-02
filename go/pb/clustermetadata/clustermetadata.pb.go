@@ -1413,8 +1413,10 @@ type Multipooler struct {
 	// Immutable catalog reference and prepared non-secret configuration identity.
 	SourceConnection           string `protobuf:"bytes,15,opt,name=source_connection,json=sourceConnection,proto3" json:"source_connection,omitempty"`
 	SourceConfigurationBinding string `protobuf:"bytes,16,opt,name=source_configuration_binding,json=sourceConfigurationBinding,proto3" json:"source_configuration_binding,omitempty"`
-	unknownFields              protoimpl.UnknownFields
-	sizeCache                  protoimpl.SizeCache
+	// Random process-lifetime identity, distinct from stable consensus membership.
+	ProcessIncarnation string `protobuf:"bytes,17,opt,name=process_incarnation,json=processIncarnation,proto3" json:"process_incarnation,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *Multipooler) Reset() {
@@ -1542,6 +1544,13 @@ func (x *Multipooler) GetSourceConnection() string {
 func (x *Multipooler) GetSourceConfigurationBinding() string {
 	if x != nil {
 		return x.SourceConfigurationBinding
+	}
+	return ""
+}
+
+func (x *Multipooler) GetProcessIncarnation() string {
+	if x != nil {
+		return x.ProcessIncarnation
 	}
 	return ""
 }
@@ -3511,6 +3520,91 @@ func (x *AdmissionSnapshot) GetIntent() *AdmissionIntent {
 	return nil
 }
 
+// Controller authorization is independent of topology termination evidence.
+type SourceLifecycleAuthorization struct {
+	state                      protoimpl.MessageState `protogen:"open.v1"`
+	Owner                      string                 `protobuf:"bytes,1,opt,name=owner,proto3" json:"owner,omitempty"`
+	ClosedIntentId             string                 `protobuf:"bytes,2,opt,name=closed_intent_id,json=closedIntentId,proto3" json:"closed_intent_id,omitempty"`
+	SourceConnection           string                 `protobuf:"bytes,3,opt,name=source_connection,json=sourceConnection,proto3" json:"source_connection,omitempty"`
+	SourceConfigurationBinding string                 `protobuf:"bytes,4,opt,name=source_configuration_binding,json=sourceConfigurationBinding,proto3" json:"source_configuration_binding,omitempty"`
+	RetireSource               bool                   `protobuf:"varint,5,opt,name=retire_source,json=retireSource,proto3" json:"retire_source,omitempty"`
+	ProofReleaseProcesses      []*ID                  `protobuf:"bytes,6,rep,name=proof_release_processes,json=proofReleaseProcesses,proto3" json:"proof_release_processes,omitempty"`
+	unknownFields              protoimpl.UnknownFields
+	sizeCache                  protoimpl.SizeCache
+}
+
+func (x *SourceLifecycleAuthorization) Reset() {
+	*x = SourceLifecycleAuthorization{}
+	mi := &file_clustermetadata_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SourceLifecycleAuthorization) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SourceLifecycleAuthorization) ProtoMessage() {}
+
+func (x *SourceLifecycleAuthorization) ProtoReflect() protoreflect.Message {
+	mi := &file_clustermetadata_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SourceLifecycleAuthorization.ProtoReflect.Descriptor instead.
+func (*SourceLifecycleAuthorization) Descriptor() ([]byte, []int) {
+	return file_clustermetadata_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *SourceLifecycleAuthorization) GetOwner() string {
+	if x != nil {
+		return x.Owner
+	}
+	return ""
+}
+
+func (x *SourceLifecycleAuthorization) GetClosedIntentId() string {
+	if x != nil {
+		return x.ClosedIntentId
+	}
+	return ""
+}
+
+func (x *SourceLifecycleAuthorization) GetSourceConnection() string {
+	if x != nil {
+		return x.SourceConnection
+	}
+	return ""
+}
+
+func (x *SourceLifecycleAuthorization) GetSourceConfigurationBinding() string {
+	if x != nil {
+		return x.SourceConfigurationBinding
+	}
+	return ""
+}
+
+func (x *SourceLifecycleAuthorization) GetRetireSource() bool {
+	if x != nil {
+		return x.RetireSource
+	}
+	return false
+}
+
+func (x *SourceLifecycleAuthorization) GetProofReleaseProcesses() []*ID {
+	if x != nil {
+		return x.ProofReleaseProcesses
+	}
+	return nil
+}
+
 var File_clustermetadata_proto protoreflect.FileDescriptor
 
 const file_clustermetadata_proto_rawDesc = "" +
@@ -3555,7 +3649,7 @@ const file_clustermetadata_proto_rawDesc = "" +
 	"\rPoolerAddress\x12#\n" +
 	"\x02id\x18\x01 \x01(\v2\x13.clustermetadata.IDR\x02id\x12\x12\n" +
 	"\x04host\x18\x02 \x01(\tR\x04host\x12#\n" +
-	"\rpostgres_port\x18\x03 \x01(\x05R\fpostgresPort\"\xd1\x06\n" +
+	"\rpostgres_port\x18\x03 \x01(\x05R\fpostgresPort\"\x82\a\n" +
 	"\vMultipooler\x12#\n" +
 	"\x02id\x18\x01 \x01(\v2\x13.clustermetadata.IDR\x02id\x126\n" +
 	"\tshard_key\x18\x02 \x01(\v2\x19.clustermetadata.ShardKeyR\bshardKey\x126\n" +
@@ -3572,7 +3666,8 @@ const file_clustermetadata_proto_rawDesc = "" +
 	"\rrouting_state\x18\r \x01(\v2\x1d.clustermetadata.RoutingStateR\froutingState\x12N\n" +
 	"\x0fmanagement_mode\x18\x0e \x01(\x0e2%.clustermetadata.PoolerManagementModeR\x0emanagementMode\x12+\n" +
 	"\x11source_connection\x18\x0f \x01(\tR\x10sourceConnection\x12@\n" +
-	"\x1csource_configuration_binding\x18\x10 \x01(\tR\x1asourceConfigurationBinding\x1a:\n" +
+	"\x1csource_configuration_binding\x18\x10 \x01(\tR\x1asourceConfigurationBinding\x12/\n" +
+	"\x13process_incarnation\x18\x11 \x01(\tR\x12processIncarnation\x1a:\n" +
 	"\fPortMapEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x05R\x05value:\x028\x01\"\xf1\x01\n" +
@@ -3708,7 +3803,14 @@ const file_clustermetadata_proto_rawDesc = "" +
 	"controlled\x18\x02 \x01(\bR\n" +
 	"controlled\x12\x14\n" +
 	"\x05owner\x18\x03 \x01(\tR\x05owner\x128\n" +
-	"\x06intent\x18\x04 \x01(\v2 .clustermetadata.AdmissionIntentR\x06intent*\x88\x01\n" +
+	"\x06intent\x18\x04 \x01(\v2 .clustermetadata.AdmissionIntentR\x06intent\"\xbf\x02\n" +
+	"\x1cSourceLifecycleAuthorization\x12\x14\n" +
+	"\x05owner\x18\x01 \x01(\tR\x05owner\x12(\n" +
+	"\x10closed_intent_id\x18\x02 \x01(\tR\x0eclosedIntentId\x12+\n" +
+	"\x11source_connection\x18\x03 \x01(\tR\x10sourceConnection\x12@\n" +
+	"\x1csource_configuration_binding\x18\x04 \x01(\tR\x1asourceConfigurationBinding\x12#\n" +
+	"\rretire_source\x18\x05 \x01(\bR\fretireSource\x12K\n" +
+	"\x17proof_release_processes\x18\x06 \x03(\v2\x13.clustermetadata.IDR\x15proofReleaseProcesses*\x88\x01\n" +
 	"\x14PoolerManagementMode\x12&\n" +
 	"\"POOLER_MANAGEMENT_MODE_UNSPECIFIED\x10\x00\x12\"\n" +
 	"\x1ePOOLER_MANAGEMENT_MODE_MANAGED\x10\x01\x12$\n" +
@@ -3774,7 +3876,7 @@ func file_clustermetadata_proto_rawDescGZIP() []byte {
 }
 
 var file_clustermetadata_proto_enumTypes = make([]protoimpl.EnumInfo, 12)
-var file_clustermetadata_proto_msgTypes = make([]protoimpl.MessageInfo, 39)
+var file_clustermetadata_proto_msgTypes = make([]protoimpl.MessageInfo, 40)
 var file_clustermetadata_proto_goTypes = []any{
 	(PoolerManagementMode)(0),             // 0: clustermetadata.PoolerManagementMode
 	(PoolerType)(0),                       // 1: clustermetadata.PoolerType
@@ -3824,10 +3926,11 @@ var file_clustermetadata_proto_goTypes = []any{
 	(*GatewayRoutingPolicy)(nil),          // 45: clustermetadata.GatewayRoutingPolicy
 	(*AdmissionIntent)(nil),               // 46: clustermetadata.AdmissionIntent
 	(*AdmissionSnapshot)(nil),             // 47: clustermetadata.AdmissionSnapshot
-	nil,                                   // 48: clustermetadata.Multipooler.PortMapEntry
-	nil,                                   // 49: clustermetadata.Multigateway.PortMapEntry
-	nil,                                   // 50: clustermetadata.Multiorch.PortMapEntry
-	(*timestamppb.Timestamp)(nil),         // 51: google.protobuf.Timestamp
+	(*SourceLifecycleAuthorization)(nil),  // 48: clustermetadata.SourceLifecycleAuthorization
+	nil,                                   // 49: clustermetadata.Multipooler.PortMapEntry
+	nil,                                   // 50: clustermetadata.Multigateway.PortMapEntry
+	nil,                                   // 51: clustermetadata.Multiorch.PortMapEntry
+	(*timestamppb.Timestamp)(nil),         // 52: google.protobuf.Timestamp
 }
 var file_clustermetadata_proto_depIdxs = []int32{
 	16, // 0: clustermetadata.Database.backup_location:type_name -> clustermetadata.BackupLocation
@@ -3842,24 +3945,24 @@ var file_clustermetadata_proto_depIdxs = []int32{
 	25, // 9: clustermetadata.Multipooler.key_range:type_name -> clustermetadata.KeyRange
 	1,  // 10: clustermetadata.Multipooler.type:type_name -> clustermetadata.PoolerType
 	3,  // 11: clustermetadata.Multipooler.serving_status:type_name -> clustermetadata.PoolerServingStatus
-	48, // 12: clustermetadata.Multipooler.port_map:type_name -> clustermetadata.Multipooler.PortMapEntry
+	49, // 12: clustermetadata.Multipooler.port_map:type_name -> clustermetadata.Multipooler.PortMapEntry
 	26, // 13: clustermetadata.Multipooler.lifecycle_status:type_name -> clustermetadata.PoolerLifecycle
 	35, // 14: clustermetadata.Multipooler.routing_state:type_name -> clustermetadata.RoutingState
 	0,  // 15: clustermetadata.Multipooler.management_mode:type_name -> clustermetadata.PoolerManagementMode
 	24, // 16: clustermetadata.Multigateway.id:type_name -> clustermetadata.ID
-	49, // 17: clustermetadata.Multigateway.port_map:type_name -> clustermetadata.Multigateway.PortMapEntry
+	50, // 17: clustermetadata.Multigateway.port_map:type_name -> clustermetadata.Multigateway.PortMapEntry
 	24, // 18: clustermetadata.Multiorch.id:type_name -> clustermetadata.ID
-	50, // 19: clustermetadata.Multiorch.port_map:type_name -> clustermetadata.Multiorch.PortMapEntry
+	51, // 19: clustermetadata.Multiorch.port_map:type_name -> clustermetadata.Multiorch.PortMapEntry
 	11, // 20: clustermetadata.ID.component:type_name -> clustermetadata.ID.ComponentType
 	2,  // 21: clustermetadata.PoolerLifecycle.status:type_name -> clustermetadata.PoolerLifecycleStatus
-	51, // 22: clustermetadata.PoolerLifecycle.updated:type_name -> google.protobuf.Timestamp
+	52, // 22: clustermetadata.PoolerLifecycle.updated:type_name -> google.protobuf.Timestamp
 	4,  // 23: clustermetadata.DurabilityPolicy.quorum_type:type_name -> clustermetadata.QuorumType
 	28, // 24: clustermetadata.ShardRule.rule_number:type_name -> clustermetadata.RuleNumber
 	24, // 25: clustermetadata.ShardRule.leader_id:type_name -> clustermetadata.ID
 	24, // 26: clustermetadata.ShardRule.cohort_members:type_name -> clustermetadata.ID
 	27, // 27: clustermetadata.ShardRule.durability_policy:type_name -> clustermetadata.DurabilityPolicy
 	24, // 28: clustermetadata.ShardRule.coordinator_id:type_name -> clustermetadata.ID
-	51, // 29: clustermetadata.ShardRule.creation_time:type_name -> google.protobuf.Timestamp
+	52, // 29: clustermetadata.ShardRule.creation_time:type_name -> google.protobuf.Timestamp
 	29, // 30: clustermetadata.RulePosition.decision:type_name -> clustermetadata.ShardRule
 	29, // 31: clustermetadata.RulePosition.proposal:type_name -> clustermetadata.ShardRule
 	30, // 32: clustermetadata.PoolerPosition.position:type_name -> clustermetadata.RulePosition
@@ -3873,7 +3976,7 @@ var file_clustermetadata_proto_depIdxs = []int32{
 	30, // 40: clustermetadata.ReplicationPrimary.position:type_name -> clustermetadata.RulePosition
 	19, // 41: clustermetadata.ReplicationPrimary.primary:type_name -> clustermetadata.PoolerAddress
 	24, // 42: clustermetadata.TermRevocation.accepted_coordinator_id:type_name -> clustermetadata.ID
-	51, // 43: clustermetadata.TermRevocation.coordinator_initiated_at:type_name -> google.protobuf.Timestamp
+	52, // 43: clustermetadata.TermRevocation.coordinator_initiated_at:type_name -> google.protobuf.Timestamp
 	28, // 44: clustermetadata.TermRevocation.outgoing_rule:type_name -> clustermetadata.RuleNumber
 	38, // 45: clustermetadata.TermRevocation.recruit_intent:type_name -> clustermetadata.RecruitIntent
 	28, // 46: clustermetadata.RecruitIntent.replace_decision:type_name -> clustermetadata.RuleNumber
@@ -3894,11 +3997,12 @@ var file_clustermetadata_proto_depIdxs = []int32{
 	44, // 61: clustermetadata.AdmissionIntent.source_identity:type_name -> clustermetadata.ExternalBackendIdentity
 	22, // 62: clustermetadata.AdmissionSnapshot.authority_shard_key:type_name -> clustermetadata.ShardKey
 	46, // 63: clustermetadata.AdmissionSnapshot.intent:type_name -> clustermetadata.AdmissionIntent
-	64, // [64:64] is the sub-list for method output_type
-	64, // [64:64] is the sub-list for method input_type
-	64, // [64:64] is the sub-list for extension type_name
-	64, // [64:64] is the sub-list for extension extendee
-	0,  // [0:64] is the sub-list for field type_name
+	24, // 64: clustermetadata.SourceLifecycleAuthorization.proof_release_processes:type_name -> clustermetadata.ID
+	65, // [65:65] is the sub-list for method output_type
+	65, // [65:65] is the sub-list for method input_type
+	65, // [65:65] is the sub-list for extension type_name
+	65, // [65:65] is the sub-list for extension extendee
+	0,  // [0:65] is the sub-list for field type_name
 }
 
 func init() { file_clustermetadata_proto_init() }
@@ -3916,7 +4020,7 @@ func file_clustermetadata_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_clustermetadata_proto_rawDesc), len(file_clustermetadata_proto_rawDesc)),
 			NumEnums:      12,
-			NumMessages:   39,
+			NumMessages:   40,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

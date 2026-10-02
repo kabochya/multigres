@@ -237,6 +237,8 @@ message Multipooler {
   // Immutable catalog reference and prepared non-secret configuration identity.
   string source_connection = 15;
   string source_configuration_binding = 16;
+ // Random process-lifetime identity, distinct from stable consensus membership.
+ string process_incarnation = 17;
 
 }
 
@@ -983,4 +985,14 @@ message AdmissionSnapshot {
  bool controlled = 2;
  string owner = 3;
  AdmissionIntent intent = 4;
+}
+
+// Controller authorization is independent of topology termination evidence.
+message SourceLifecycleAuthorization {
+ string owner = 1;
+ string closed_intent_id = 2;
+ string source_connection = 3;
+ string source_configuration_binding = 4;
+ bool retire_source = 5;
+ repeated ID proof_release_processes = 6;
 }

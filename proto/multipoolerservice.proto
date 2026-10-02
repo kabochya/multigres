@@ -30,6 +30,7 @@ option go_package = "github.com/multigres/multigres/go/pb/multipoolerservice";
 
 // MultipoolerService provides connection pooling and query execution
 service MultipoolerService {
+ rpc ReadSourceLifecycle(ReadSourceLifecycleRequest) returns (ReadSourceLifecycleResponse) {}
  // Controller expectations correlate with metadata; they cannot override it.
  rpc RefreshAdmission(RefreshAdmissionRequest) returns (RefreshAdmissionResponse) {}
  rpc ReadAdmissionIntent(ReadAdmissionIntentRequest) returns (ReadAdmissionIntentResponse) {}
@@ -661,6 +662,7 @@ message StreamPoolerHealthResponse {
  bool routing_policy_required = 11;
  bool backend_ready = 12;
  clustermetadata.ExternalBackendIdentity backend_identity = 13;
+ string process_incarnation = 14;
 
 }
 
@@ -730,9 +732,17 @@ message ReadAdmissionIntentResponse { clustermetadata.AdmissionSnapshot snapshot
 message RefreshAdmissionRequest {
  string database = 1;
  clustermetadata.AdmissionIntent expected = 2;
+ string expected_process_incarnation = 3;
 }
 message RefreshAdmissionResponse {
  clustermetadata.AdmissionIntent observed = 1;
  clustermetadata.ID process_id = 2;
  bool admission_open = 3;
+ string process_incarnation = 4;
+}
+
+message ReadSourceLifecycleRequest { string database = 1; string source_connection = 2; }
+message ReadSourceLifecycleResponse {
+ clustermetadata.ShardKey authority_shard_key = 1;
+ clustermetadata.SourceLifecycleAuthorization authorization = 2;
 }

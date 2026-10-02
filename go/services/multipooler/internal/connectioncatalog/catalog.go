@@ -219,9 +219,15 @@ func (c *Catalog) Confirmed(ctx context.Context, name string) (*Record, error) {
 // The owning service holds its existing leadership/action lock. Nothing inside
 // the callback may wait on remote RPCs. An uncertain commit is propagated.
 func (c *Catalog) Transaction(ctx context.Context, update func(context.Context, executor.InternalTx) error) error {
+	return Transaction(ctx, c.Queries, update)
+}
+
+// Transaction is also used by non-secret metadata independently of encryption
+// key configuration. The caller supplies current authority/lifecycle ordering.
+func Transaction(ctx context.Context, queries executor.InternalQueryService, update func(context.Context, executor.InternalTx) error) error {
 	ctx, cancel := context.WithTimeout(ctx, timeouts.RuleWriteTimeout)
 	defer cancel()
-	tx, err := c.Queries.BeginAdmin(ctx)
+	tx, err := queries.BeginAdmin(ctx)
 	if err != nil {
 		return err
 	}

@@ -402,6 +402,7 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 	// keeping the built-in default). Set before serving so the very first
 	// broadcast already advertises the override.
 	pm.healthStreamer.SetRecommendedStalenessTimeout(config.HealthStreamStalenessTimeout)
+	pm.healthStreamer.processIncarnation = multipooler.GetProcessIncarnation()
 
 	// shutdownCtx is independent of ctx: ctx is recreated on every Open(),
 	// while shutdownCtx exists for the lifetime of the manager and is
@@ -422,10 +423,8 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 		pm.qsc = poolerserver.NewQueryPoolerServer(logger, connPoolMgr, multipooler.Id, multipooler.GetShardKey().GetTableGroup(), multipooler.GetShardKey().GetShard(), pm, drainGracePeriod, config.BackendVpidTrackingEnabled)
 	}
 
-	if len(config.MigrationKey) == 32 {
-		if gate, ok := pm.qsc.(interface{ EnableAdmissionControl(bool) }); ok {
-			gate.EnableAdmissionControl(!pm.IsUnmanaged())
-		}
+	if gate, ok := pm.qsc.(interface{ EnableAdmissionControl(bool) }); ok {
+		gate.EnableAdmissionControl(!pm.IsUnmanaged())
 	}
 
 	// ConsensusManager owns its own wiring (durable promise store + rule store +
@@ -1745,7 +1744,6 @@ func (pm *MultipoolerManager) Start(senv *servenv.ServEnv) {
 	pm.Open(lockCtx)
 	pm.actionLock.Release(lockCtx)
 	pm.startRoutingPublication()
-	pm.startAdmission()
 
 	// Register the SIGTERM-driven graceful shutdown sequence. Runs as an
 	// OnTermSync hook so it is bounded by the lameduck window and completes

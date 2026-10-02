@@ -29,6 +29,8 @@ import (
 	"github.com/multigres/multigres/go/services/multipooler/internal/executor"
 )
 
+var ErrInvalidProjection = errors.New("invalid controlled admission projection")
+
 const scopeSchema = `CREATE TABLE IF NOT EXISTS multigres.admission_scopes (
  database TEXT PRIMARY KEY, table_group TEXT NOT NULL, shard TEXT NOT NULL,
  controlled BOOLEAN NOT NULL DEFAULT FALSE, owner TEXT NOT NULL DEFAULT '',
@@ -44,12 +46,23 @@ const intentSchema = `CREATE TABLE IF NOT EXISTS multigres.admission_intents (
 // InitializeOrdinary creates an explicit ordinary marker under confirmed managed
 // authority. ON CONFLICT never clears a controlled scope or terminal owner.
 func InitializeOrdinary(ctx context.Context, tx executor.InternalTx, sk *pb.ShardKey) error {
+	result, err := tx.Query(ctx, `SELECT to_regclass('multigres.admission_scopes') IS NULL`)
+	if err != nil {
+		return err
+	}
+	var firstInstall bool
+	if err = executor.ScanSingleRow(result, &firstInstall); err != nil {
+		return err
+	}
 	for _, sql := range []string{scopeSchema, intentSchema, `REVOKE ALL ON multigres.admission_scopes, multigres.admission_intents FROM PUBLIC`} {
 		if _, err := tx.Query(ctx, sql); err != nil {
 			return err
 		}
 	}
-	_, err := tx.QueryArgs(ctx, `INSERT INTO multigres.admission_scopes(database,table_group,shard) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, sk.Database, sk.TableGroup, sk.Shard)
+	if !firstInstall {
+		return nil
+	}
+	_, err = tx.QueryArgs(ctx, `INSERT INTO multigres.admission_scopes(database,table_group,shard) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, sk.Database, sk.TableGroup, sk.Shard)
 	return err
 }
 
@@ -69,6 +82,9 @@ func Read(ctx context.Context, q Reader, sk *pb.ShardKey, subject pb.AdmissionSu
 	}
 	var tg, shard, owner, encoded string
 	var controlled bool
+	if len(r.Rows) != 1 {
+		return nil, ErrInvalidProjection
+	}
 	if err = executor.ScanSingleRow(r, &tg, &shard, &controlled, &owner, &encoded); err != nil {
 		return nil, errors.New("admission applicability unknown")
 	}
@@ -87,7 +103,7 @@ func Read(ctx context.Context, q Reader, sk *pb.ShardKey, subject pb.AdmissionSu
 		}
 	}
 	if controlled && (owner == "" || s.Intent == nil || s.Intent.Owner != owner || s.Intent.Subject != subject) {
-		return nil, errors.New("controlled admission intent missing or ambiguous")
+		return nil, ErrInvalidProjection
 	}
 	if s.Intent != nil {
 		if err = Validate(s.Intent); err != nil {
@@ -125,6 +141,9 @@ func LockScope(ctx context.Context, tx executor.InternalTx, sk *pb.ShardKey) err
 		return err
 	}
 	var tg, shard string
+	if len(r.Rows) != 1 {
+		return ErrInvalidProjection
+	}
 	if err = executor.ScanSingleRow(r, &tg, &shard); err != nil {
 		return err
 	}

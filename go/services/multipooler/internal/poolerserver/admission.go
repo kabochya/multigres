@@ -22,6 +22,7 @@ import (
 )
 
 type AdmissionProvider interface {
+	ReadSourceLifecycle(context.Context, *rpc.ReadSourceLifecycleRequest) (*rpc.ReadSourceLifecycleResponse, error)
 	ReadAdmissionIntent(context.Context, *rpc.ReadAdmissionIntentRequest) (*rpc.ReadAdmissionIntentResponse, error)
 	RefreshAdmission(context.Context, *rpc.RefreshAdmissionRequest) (*rpc.RefreshAdmissionResponse, error)
 }

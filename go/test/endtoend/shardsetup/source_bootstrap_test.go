@@ -156,11 +156,13 @@ func TestCatalogSourceBootstrap(t *testing.T) {
 			}
 			c, err := migrationcontrol.Dial(pooler, grpc.WithTransportCredentials(insecure.NewCredentials()))
 			require.NoError(t, err)
-			reply, err := rpc.NewMultipoolerServiceClient(c).RefreshAdmission(protected, &rpc.RefreshAdmissionRequest{Database: "postgres", Expected: intent})
+			reply, err := rpc.NewMultipoolerServiceClient(c).RefreshAdmission(protected, &rpc.RefreshAdmissionRequest{Database: "postgres", Expected: intent, ExpectedProcessIncarnation: pooler.GetProcessIncarnation()})
 			_ = c.Close()
 			require.NoError(t, err)
 			require.True(t, proto.Equal(reply.Observed, intent))
 			require.True(t, proto.Equal(reply.ProcessId, pooler.Id))
+			require.Equal(t, pooler.GetProcessIncarnation(), reply.ProcessIncarnation)
+			require.NotEmpty(t, reply.ProcessIncarnation)
 		}
 	}
 	writeIntent(sourceIntent)

@@ -20,13 +20,19 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/multigres/multigres/go/common/mterrors"
+	code "github.com/multigres/multigres/go/pb/mtrpc"
 
 	"github.com/multigres/multigres/go/common/migrationcontrol"
 	"github.com/multigres/multigres/go/common/sqltypes"
 	pb "github.com/multigres/multigres/go/pb/clustermetadata"
 	rpc "github.com/multigres/multigres/go/pb/multipoolerservice"
 	"github.com/multigres/multigres/go/services/multipooler/internal/admission"
+	"github.com/multigres/multigres/go/services/multipooler/internal/connectioncatalog"
 	"github.com/multigres/multigres/go/services/multipooler/internal/executor"
 	"github.com/multigres/multigres/go/services/multipooler/internal/servingstate"
 )
@@ -107,10 +113,9 @@ func (l admissionLifecycle) OnStateChange(_ context.Context, s servingstate.Stat
 	return nil
 }
 
-func (pm *MultipoolerManager) startAdmission() {
-	if len(pm.config.MigrationKey) != 32 {
-		return
-	}
+// StartAdmission opts the service into startup/applicability validation. Unit
+// managers do not run service background work against strict mock databases.
+func (pm *MultipoolerManager) StartAdmission() {
 	pm.signalAdmission()
 	_ = pm.stateManager.RegisterAndSync(pm.shutdownCtx, admissionLifecycle{pm})
 	go pm.runAdmission(pm.shutdownCtx)
@@ -152,14 +157,20 @@ func (pm *MultipoolerManager) runAdmission(ctx context.Context) {
 	}
 }
 
-// ReadAdmissionIntent is non-secret but requires protected control transport.
+// ReadAdmissionIntent is non-secret. Migration-key deployments require their
+// protected control transport; ordinary clusters retain existing internal reads.
 // It returns no snapshot on uncertain commit, including ordinary applicability.
 func (pm *MultipoolerManager) ReadAdmissionIntent(ctx context.Context, r *rpc.ReadAdmissionIntentRequest) (*rpc.ReadAdmissionIntentResponse, error) {
-	if err := pm.authorizeControl(ctx); err != nil {
-		return nil, err
+	if len(pm.config.MigrationKey) != 0 {
+		if err := pm.authorizeControl(ctx); err != nil {
+			return nil, err
+		}
 	}
 	s, err := pm.confirmAdmission(ctx, r.Database, r.Subject)
 	if err != nil {
+		if errors.Is(err, admission.ErrInvalidProjection) {
+			return nil, mterrors.New(code.Code_DATA_LOSS, "controlled admission projection invalid")
+		}
 		return nil, err
 	}
 	return &rpc.ReadAdmissionIntentResponse{Snapshot: s}, nil
@@ -174,12 +185,8 @@ func (pm *MultipoolerManager) confirmAdmission(ctx context.Context, database str
 	if err = pm.servingAuthority(database); err != nil {
 		return nil, err
 	}
-	c, err := pm.connectionCatalogLocked(lockCtx)
-	if err != nil {
-		return nil, err
-	}
 	var s *pb.AdmissionSnapshot
-	err = c.Transaction(lockCtx, func(ctx context.Context, tx executor.InternalTx) error {
+	err = connectioncatalog.Transaction(lockCtx, pm.qsc.InternalQueryService(), func(ctx context.Context, tx executor.InternalTx) error {
 		if err := admission.InitializeOrdinary(ctx, tx, pm.record.ShardKey()); err != nil {
 			return err
 		}
@@ -196,6 +203,9 @@ func (pm *MultipoolerManager) confirmAdmission(ctx context.Context, database str
 func (pm *MultipoolerManager) authorityAdmission(ctx context.Context, subject pb.AdmissionSubject) (*pb.AdmissionSnapshot, error) {
 	if pm.admissionRuntime.reader != nil {
 		return pm.admissionRuntime.reader(ctx, subject)
+	}
+	if pm.config.TopoClient == nil {
+		return nil, errors.New("admission authority discovery unavailable")
 	}
 	var s *pb.AdmissionSnapshot
 	err := migrationcontrol.WithAuthority(ctx, pm.config.TopoClient, pm.record.ShardKey().Database, pm.config.ControlTransport, func(c rpc.MultipoolerServiceClient) error {
@@ -247,6 +257,9 @@ func (pm *MultipoolerManager) readAdmission(ctx context.Context, expected *pb.Ad
 			return s, nil
 		}
 		if n == 6 {
+			if errors.Is(err, admission.ErrInvalidProjection) {
+				return nil, err
+			}
 			return nil, errors.New("admission replay has not reached expected intent")
 		}
 		timer := time.NewTimer((20 * time.Millisecond) << n)
@@ -262,6 +275,9 @@ func (pm *MultipoolerManager) readAdmission(ctx context.Context, expected *pb.Ad
 
 func (pm *MultipoolerManager) RefreshAdmission(ctx context.Context, r *rpc.RefreshAdmissionRequest) (*rpc.RefreshAdmissionResponse, error) {
 	if err := pm.authorizeControl(ctx); err != nil {
+		return nil, err
+	}
+	if err := pm.validateAdmissionIncarnation(r.GetExpectedProcessIncarnation()); err != nil {
 		return nil, err
 	}
 	if r.GetDatabase() != pm.record.ShardKey().Database {
@@ -301,6 +317,9 @@ func (pm *MultipoolerManager) enforceAdmission(ctx context.Context, expected *pb
 	a.mu.Unlock()
 	s, err := pm.readAdmission(ctx, expected, initialized)
 	if err != nil {
+		if errors.Is(err, admission.ErrInvalidProjection) || status.Code(err) == codes.DataLoss {
+			g.SetApplicationAdmission(false)
+		}
 		return nil, err
 	}
 	if s == nil || !proto.Equal(s.AuthorityShardKey, pm.record.ShardKey()) {
@@ -368,5 +387,12 @@ func (pm *MultipoolerManager) enforceAdmission(ctx context.Context, expected *pb
 	a.initialized = true
 	a.mu.Unlock()
 	pm.actionLock.Release(lockCtx)
-	return &rpc.RefreshAdmissionResponse{Observed: s.Intent, ProcessId: proto.Clone(pm.record.desired.Load().Id).(*pb.ID), AdmissionOpen: allow}, nil
+	return &rpc.RefreshAdmissionResponse{Observed: s.Intent, ProcessId: proto.Clone(pm.record.desired.Load().Id).(*pb.ID), AdmissionOpen: allow, ProcessIncarnation: pm.record.desired.Load().GetProcessIncarnation()}, nil
+}
+
+func (pm *MultipoolerManager) validateAdmissionIncarnation(expected string) error {
+	if expected == "" || expected != pm.record.desired.Load().GetProcessIncarnation() {
+		return errors.New("admission process incarnation mismatch; rediscover membership")
+	}
+	return nil
 }
