@@ -49,6 +49,13 @@ func newPoolerCache(
 	logger *slog.Logger,
 ) *store.PoolerCache {
 	matchesAnyTarget := func(p *clustermetadatapb.Multipooler) bool {
+		// Unknown future modes are not authority to manage a database either.
+		switch p.GetManagementMode() {
+		case clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNSPECIFIED, clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_MANAGED:
+		default:
+			return false
+		}
+
 		for _, t := range targets() {
 			if t.MatchesShard(p.GetShardKey().GetDatabase(), p.GetShardKey().GetTableGroup(), p.GetShardKey().GetShard()) {
 				return true
