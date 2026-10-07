@@ -71,13 +71,8 @@ func externalDSN(port int) string {
 	return fmt.Sprintf("postgres://postgres:%s@127.0.0.1:%d/postgres?sslmode=disable", externalPostgresPassword, port)
 }
 
-// startTestProcess runs a binary for the lifetime of the test and returns a
-// function that stops it early.
-func startTestProcess(t *testing.T, binary string, args ...string) func() {
-	t.Helper()
-	return startTestProcessEnv(t, nil, binary, args...)
-}
-
+// startTestProcessEnv runs a binary with extra environment variables for the
+// lifetime of the test and returns a function that stops it early.
 func startTestProcessEnv(t *testing.T, env []string, binary string, args ...string) func() {
 	t.Helper()
 	logPath := filepath.Join(t.TempDir(), binary+".log")
@@ -128,7 +123,7 @@ func TestUnmanagedPoolerServesExternalPostgres(t *testing.T) {
 	stop := startTestProcessEnv(t,
 		[]string{"MULTIPOOLER_PROTOTYPE_BACKING_URL=" + externalDSN(extPort)},
 		"multipooler",
-		"--management-mode=unmanaged", "--backing-connection=src",
+		"--backing-connection=src",
 		"--database=postgres", "--table-group=migrateTG", "--shard=0-inf",
 		"--cell="+s.CellName, "--service-id="+name, "--hostname=localhost",
 		"--grpc-port="+strconv.Itoa(grpcPort), "--http-port="+strconv.Itoa(utils.GetFreePort(t)),

@@ -54,35 +54,27 @@ func (c *backingConnection) Validate() error {
 	return nil
 }
 
-// parseManagementMode converts the --management-mode flag value.
-func parseManagementMode(value string) (clustermetadatapb.PoolerManagementMode, error) {
-	switch value {
-	case "managed":
-		return clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_MANAGED, nil
-	case "unmanaged":
-		return clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED, nil
-	default:
-		return 0, fmt.Errorf("invalid management-mode %q: expected managed or unmanaged", value)
+// managementModeFor derives the pooler's management mode. A pooler that names a
+// backing connection fronts an external PostgreSQL and is unmanaged; every
+// other pooler owns its postgres through pgctld and is managed.
+func managementModeFor(backingConnection string) clustermetadatapb.PoolerManagementMode {
+	if backingConnection != "" {
+		return clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
 	}
+	return clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_MANAGED
 }
 
-// validateBackendFlags enforces the flag contract between management modes. An
-// unmanaged pooler is configured only through --backing-connection; the flags
-// that describe a pgctld-managed local postgres are rejected rather than
-// silently ignored. A managed pooler must not name a backing connection.
-func validateBackendFlags(mode clustermetadatapb.PoolerManagementMode, backingConnection string, explicit func(name string) bool) error {
-	if mode != clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED {
-		if backingConnection != "" {
-			return errors.New("--backing-connection requires --management-mode=unmanaged")
-		}
-		return nil
-	}
+// validateBackendFlags rejects flags that describe a pgctld-managed local
+// postgres when --backing-connection is set, rather than silently ignoring
+// them: the endpoint of an unmanaged pooler comes only from its backing
+// connection.
+func validateBackendFlags(backingConnection string, explicit func(name string) bool) error {
 	if backingConnection == "" {
-		return errors.New("--management-mode=unmanaged requires --backing-connection")
+		return nil
 	}
 	for _, name := range []string{"socket-file", "pooler-dir", "pg-port"} {
 		if explicit(name) {
-			return fmt.Errorf("--%s describes a managed postgres and cannot be combined with --management-mode=unmanaged; the endpoint comes from --backing-connection", name)
+			return fmt.Errorf("--%s describes a managed postgres and cannot be combined with --backing-connection; the endpoint comes from the backing connection", name)
 		}
 	}
 	return nil

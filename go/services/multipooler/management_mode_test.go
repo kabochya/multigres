@@ -23,40 +23,22 @@ import (
 	clustermetadatapb "github.com/multigres/multigres/go/pb/clustermetadata"
 )
 
-func TestParseManagementMode(t *testing.T) {
-	for _, tc := range []struct {
-		input string
-		want  clustermetadatapb.PoolerManagementMode
-	}{
-		{"managed", clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_MANAGED},
-		{"unmanaged", clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED},
-	} {
-		t.Run(tc.input, func(t *testing.T) {
-			got, err := parseManagementMode(tc.input)
-			require.NoError(t, err)
-			require.Equal(t, tc.want, got)
-		})
-	}
-	for _, value := range []string{"", "MANAGED", "typo"} {
-		_, err := parseManagementMode(value)
-		require.Error(t, err, value)
-	}
+func TestManagementModeFor(t *testing.T) {
+	require.Equal(t, clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_MANAGED, managementModeFor(""))
+	require.Equal(t, clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED, managementModeFor("src"))
 }
 
 func TestValidateBackendFlags(t *testing.T) {
-	managed := clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_MANAGED
-	unmanaged := clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
 	none := func(string) bool { return false }
 	only := func(name string) func(string) bool { return func(n string) bool { return n == name } }
 
-	require.NoError(t, validateBackendFlags(managed, "", none))
-	require.NoError(t, validateBackendFlags(managed, "", only("pg-port")))
-	require.ErrorContains(t, validateBackendFlags(managed, "src", none), "requires --management-mode=unmanaged")
+	// Managed poolers may set any of the local-postgres flags.
+	require.NoError(t, validateBackendFlags("", none))
+	require.NoError(t, validateBackendFlags("", only("pg-port")))
 
-	require.NoError(t, validateBackendFlags(unmanaged, "src", none))
-	require.ErrorContains(t, validateBackendFlags(unmanaged, "", none), "requires --backing-connection")
+	require.NoError(t, validateBackendFlags("src", none))
 	for _, name := range []string{"socket-file", "pooler-dir", "pg-port"} {
-		require.ErrorContains(t, validateBackendFlags(unmanaged, "src", only(name)), "--"+name, name)
+		require.ErrorContains(t, validateBackendFlags("src", only(name)), "--"+name, name)
 	}
 }
 
@@ -99,27 +81,32 @@ func TestResolveBackingConnectionStub(t *testing.T) {
 	}
 }
 
-func TestResolveManagementModeRejectsDirectBackendFlags(t *testing.T) {
+func TestResolveManagementMode(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		args []string
-		want string
+		name    string
+		args    []string
+		want    clustermetadatapb.PoolerManagementMode
+		wantErr string
 	}{
-		{"missing connection", []string{"--management-mode=unmanaged"}, "requires --backing-connection"},
-		{"socket file", []string{"--management-mode=unmanaged", "--backing-connection=src", "--socket-file=/tmp/s"}, "--socket-file"},
-		{"pooler dir", []string{"--management-mode=unmanaged", "--backing-connection=src", "--pooler-dir=/tmp/p"}, "--pooler-dir"},
-		{"pg port", []string{"--management-mode=unmanaged", "--backing-connection=src", "--pg-port=5432"}, "--pg-port"},
-		{"connection on managed", []string{"--backing-connection=src"}, "requires --management-mode=unmanaged"},
-		{"bad mode", []string{"--management-mode=typo"}, "invalid management-mode"},
+		{name: "managed by default", want: clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_MANAGED},
+		{name: "managed keeps local flags", args: []string{"--pg-port=5433", "--pooler-dir=/tmp/p"}, want: clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_MANAGED},
+		{name: "backing connection", args: []string{"--backing-connection=src"}, want: clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED},
+		{name: "socket file", args: []string{"--backing-connection=src", "--socket-file=/tmp/s"}, wantErr: "--socket-file"},
+		{name: "pooler dir", args: []string{"--backing-connection=src", "--pooler-dir=/tmp/p"}, wantErr: "--pooler-dir"},
+		{name: "pg port", args: []string{"--backing-connection=src", "--pg-port=5432"}, wantErr: "--pg-port"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mp := NewMultipooler(nil)
 			flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
 			mp.RegisterFlags(flags)
-			require.Equal(t, "managed", mp.managementMode.Get())
-			require.NoError(t, flags.Parse(append([]string{"--database=app", "--table-group=migrateTG", "--shard=0-inf", "--cell=zone1"}, tc.args...)))
-			_, err := mp.resolveManagementMode()
-			require.ErrorContains(t, err, tc.want)
+			require.NoError(t, flags.Parse(tc.args))
+			got, err := mp.resolveManagementMode()
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
 		})
 	}
 }

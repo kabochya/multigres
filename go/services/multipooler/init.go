@@ -89,10 +89,8 @@ func validateUnrecoverableMinAttempts(n int) error {
 
 // Multipooler represents the main multipooler instance with all configuration and state
 type Multipooler struct {
-	// managementMode selects who owns the backing postgres: "managed" (default,
-	// pgctld + consensus) or "unmanaged" (an external endpoint).
-	managementMode viperutil.Value[string]
-	// backingConnection names the connection an unmanaged pooler fronts.
+	// backingConnection names the connection an unmanaged pooler fronts. Setting
+	// it makes the pooler unmanaged (see managementModeFor).
 	backingConnection   viperutil.Value[string]
 	pgctldAddr          viperutil.Value[string]
 	cell                viperutil.Value[string]
@@ -217,11 +215,6 @@ func NewMultipooler(telemetry *telemetry.Telemetry, opts ...Option) *Multipooler
 			Dynamic:  false,
 			EnvVars:  []string{"MT_SERVICE_ID"},
 		}),
-		managementMode: viperutil.Configure(reg, "management-mode", viperutil.Options[string]{
-			Default:  "managed",
-			FlagName: "management-mode",
-			Dynamic:  false,
-		}),
 		backingConnection: viperutil.Configure(reg, "backing-connection", viperutil.Options[string]{
 			Default:  "",
 			FlagName: "backing-connection",
@@ -345,8 +338,7 @@ func (mp *Multipooler) consensusEnabled() bool {
 
 // RegisterFlags registers all multipooler flags with the given FlagSet
 func (mp *Multipooler) RegisterFlags(flags *pflag.FlagSet) {
-	flags.String("management-mode", mp.managementMode.Default(), "Backend ownership: managed (pgctld-run postgres with consensus) or unmanaged (an external postgres)")
-	flags.String("backing-connection", mp.backingConnection.Default(), "Name of the connection an unmanaged pooler fronts; required with --management-mode=unmanaged")
+	flags.String("backing-connection", mp.backingConnection.Default(), "Name of the connection of an external postgres to front. Setting it makes this an unmanaged pooler: no pgctld, backups or consensus")
 	flags.String("pgctld-addr", mp.pgctldAddr.Default(), "Address of pgctld gRPC service")
 	flags.String("cell", mp.cell.Default(), "cell to use")
 	flags.String("database", mp.database.Default(), "database name this multipooler serves (overrides "+constants.PgDatabaseEnvVar+" env var)")
@@ -371,7 +363,6 @@ func (mp *Multipooler) RegisterFlags(flags *pflag.FlagSet) {
 
 	viperutil.BindFlags(
 		flags,
-		mp.managementMode,
 		mp.backingConnection,
 		mp.pgctldAddr,
 		mp.cell,
@@ -475,17 +466,13 @@ func (mp *Multipooler) pgBackRestCipherKeyFilePath() (string, bool) {
 	return "", false
 }
 
-// resolveManagementMode parses --management-mode and checks that the backend
-// flags agree with it.
+// resolveManagementMode derives the management mode from --backing-connection
+// and checks that the backend flags agree with it.
 func (mp *Multipooler) resolveManagementMode() (clustermetadatapb.PoolerManagementMode, error) {
-	mode, err := parseManagementMode(mp.managementMode.Get())
-	if err != nil {
+	if err := validateBackendFlags(mp.backingConnection.Get(), mp.flagExplicitlySet); err != nil {
 		return 0, err
 	}
-	if err := validateBackendFlags(mode, mp.backingConnection.Get(), mp.flagExplicitlySet); err != nil {
-		return 0, err
-	}
-	return mode, nil
+	return managementModeFor(mp.backingConnection.Get()), nil
 }
 
 // Init initializes the multipooler. If any services fail to start,
