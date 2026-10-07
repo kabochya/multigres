@@ -613,7 +613,11 @@ func (lb *loadBalancer) onPoolerHealthUpdate(conn *poolerConnection) {
 	// errors (UNAVAILABLE is actionFail, not buffered).
 	rs := health.RoutingState
 	live := health.LastError == nil
-	if live && rs.GetRole() == clustermetadatapb.RoutingRole_ROUTING_ROLE_PRIMARY {
+	// An unmanaged pooler has no consensus leader: its PRIMARY role only says
+	// the external postgres is writable, so it never becomes the shard's routing
+	// primary.
+	unmanaged := conn.PoolerInfo().GetManagementMode() == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
+	if live && !unmanaged && rs.GetRole() == clustermetadatapb.RoutingRole_ROUTING_ROLE_PRIMARY {
 		if summary.setPrimary(poolerID, rs) {
 			lb.logger.Debug("routing primary recorded",
 				"tablegroup", summary.shardKey.GetTableGroup(),
@@ -686,6 +690,11 @@ func matchesShardTarget(conn *poolerConnection, target *query.Target) bool {
 // signal carried on the health observation.
 func (lb *loadBalancer) matchesReplicaTarget(conn *poolerConnection, target *query.Target) bool {
 	if !matchesShardTarget(conn, target) {
+		return false
+	}
+	// Unmanaged poolers have no replica role; they are selected by backing
+	// connection, not as followers of a leader.
+	if conn.PoolerInfo().GetManagementMode() == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED {
 		return false
 	}
 	return !lb.claimsPrimary(conn)

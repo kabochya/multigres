@@ -231,6 +231,22 @@ message Multipooler {
   // that publish path (pooler_record.go), not a constraint of the
   // RoutingState message itself — see RoutingState below.
   RoutingState routing_state = 13;
+
+  // management_mode records who owns the backing PostgreSQL. Unspecified is
+  // treated as MANAGED so records written before this field existed keep their
+  // current behavior.
+  PoolerManagementMode management_mode = 14;
+}
+
+// PoolerManagementMode is independent of query-serving role and readiness.
+enum PoolerManagementMode {
+  POOLER_MANAGEMENT_MODE_UNSPECIFIED = 0;
+  // MANAGED poolers front a PostgreSQL owned by multigres (pgctld, consensus,
+  // backups).
+  POOLER_MANAGEMENT_MODE_MANAGED = 1;
+  // UNMANAGED poolers front an external PostgreSQL that multigres neither
+  // starts, replicates, backs up, nor elects.
+  POOLER_MANAGEMENT_MODE_UNMANAGED = 2;
 }
 
 // Multigateway represents metadata about a running multigateway component instance in the cluster.
