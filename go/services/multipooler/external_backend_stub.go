@@ -16,29 +16,20 @@ package multipooler
 
 import (
 	"errors"
-	"fmt"
 	"net/url"
-	"os"
 	"strconv"
 )
 
-// PROTOTYPE STUB: resolving --backing-connection from the environment.
+// PROTOTYPE STUB: backing connections are stored as postgres:// URLs.
 //
-// The real resolution (fetch the named row from the default primary over gRPC)
-// lands with the metadata stub. Until then a name resolves to the single URL in
-// this environment variable, so an unmanaged pooler can be started against a
-// plain external PostgreSQL. Delete this file when the RPC-backed resolver
-// exists.
-const stubBackingConnectionEnv = "MULTIPOOLER_PROTOTYPE_BACKING_URL"
+// The prototype connection table keeps one plaintext URL per connection. Delete
+// this file when connections move to the encrypted catalog, which stores their
+// fields separately.
 
-// resolveBackingConnectionStub parses a postgres:// URL from the environment:
+// parseBackingURL parses a stored connection URL:
 //
 //	postgres://user:password@host:port/database?sslmode=...&sslrootcert=...&sslnegotiation=...
-func resolveBackingConnectionStub(name string) (*backingConnection, error) {
-	raw, ok := os.LookupEnv(stubBackingConnectionEnv)
-	if !ok || raw == "" {
-		return nil, fmt.Errorf("backing connection %q: prototype resolver requires %s", name, stubBackingConnectionEnv)
-	}
+func parseBackingURL(name, raw string) (*backingConnection, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return nil, errors.New("backing connection URL is not valid")

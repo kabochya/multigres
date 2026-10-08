@@ -35,6 +35,10 @@ type backingConnection struct {
 	SSLMode        string
 	SSLRootCert    string
 	SSLNegotiation string
+
+	// ExpectedSystemIdentifier is the pg_control_system() identifier the
+	// endpoint must report.
+	ExpectedSystemIdentifier string
 }
 
 // Validate checks that the connection is complete enough to dial.

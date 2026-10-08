@@ -2411,8 +2411,14 @@ type StreamPoolerHealthResponse struct {
 	// replication_lag_ns is the current replication lag in nanoseconds,
 	// measured via heartbeat timestamps. Zero on a leader or when unknown.
 	ReplicationLagNs int64 `protobuf:"varint,6,opt,name=replication_lag_ns,json=replicationLagNs,proto3" json:"replication_lag_ns,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// backend_ready is true while an unmanaged pooler's external backend is
+	// reachable, writable, and matches the identity of its backing connection.
+	// It is false while unverified, on an identity mismatch, and on any managed
+	// pooler (whose readiness is reported through serving_status and
+	// routing_state).
+	BackendReady  bool `protobuf:"varint,7,opt,name=backend_ready,json=backendReady,proto3" json:"backend_ready,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StreamPoolerHealthResponse) Reset() {
@@ -2480,6 +2486,182 @@ func (x *StreamPoolerHealthResponse) GetReplicationLagNs() int64 {
 	return 0
 }
 
+func (x *StreamPoolerHealthResponse) GetBackendReady() bool {
+	if x != nil {
+		return x.BackendReady
+	}
+	return false
+}
+
+// BackingConnection is the configuration of an external PostgreSQL.
+//
+// PROTOTYPE STUB: url is a plaintext postgres:// URL that embeds the password.
+type BackingConnection struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// name identifies the connection within a database.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// url is a postgres://user:password@host:port/database URL with optional
+	// sslmode, sslrootcert and sslnegotiation query parameters.
+	Url string `protobuf:"bytes,2,opt,name=url,proto3" json:"url,omitempty"`
+	// expected_system_identifier is the pg_control_system() system identifier the
+	// endpoint must report. An endpoint that reports another identifier is not
+	// the intended source.
+	ExpectedSystemIdentifier string `protobuf:"bytes,3,opt,name=expected_system_identifier,json=expectedSystemIdentifier,proto3" json:"expected_system_identifier,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
+}
+
+func (x *BackingConnection) Reset() {
+	*x = BackingConnection{}
+	mi := &file_multipoolerservice_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BackingConnection) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BackingConnection) ProtoMessage() {}
+
+func (x *BackingConnection) ProtoReflect() protoreflect.Message {
+	mi := &file_multipoolerservice_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BackingConnection.ProtoReflect.Descriptor instead.
+func (*BackingConnection) Descriptor() ([]byte, []int) {
+	return file_multipoolerservice_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *BackingConnection) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *BackingConnection) GetUrl() string {
+	if x != nil {
+		return x.Url
+	}
+	return ""
+}
+
+func (x *BackingConnection) GetExpectedSystemIdentifier() string {
+	if x != nil {
+		return x.ExpectedSystemIdentifier
+	}
+	return ""
+}
+
+// GetBackingConnectionRequest asks the default primary for a named connection.
+type GetBackingConnectionRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// database is the database the connection belongs to.
+	Database string `protobuf:"bytes,1,opt,name=database,proto3" json:"database,omitempty"`
+	// connection_name is the name of the requested connection.
+	ConnectionName string `protobuf:"bytes,2,opt,name=connection_name,json=connectionName,proto3" json:"connection_name,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *GetBackingConnectionRequest) Reset() {
+	*x = GetBackingConnectionRequest{}
+	mi := &file_multipoolerservice_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetBackingConnectionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetBackingConnectionRequest) ProtoMessage() {}
+
+func (x *GetBackingConnectionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_multipoolerservice_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetBackingConnectionRequest.ProtoReflect.Descriptor instead.
+func (*GetBackingConnectionRequest) Descriptor() ([]byte, []int) {
+	return file_multipoolerservice_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *GetBackingConnectionRequest) GetDatabase() string {
+	if x != nil {
+		return x.Database
+	}
+	return ""
+}
+
+func (x *GetBackingConnectionRequest) GetConnectionName() string {
+	if x != nil {
+		return x.ConnectionName
+	}
+	return ""
+}
+
+// GetBackingConnectionResponse carries the requested connection.
+type GetBackingConnectionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Connection    *BackingConnection     `protobuf:"bytes,1,opt,name=connection,proto3" json:"connection,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetBackingConnectionResponse) Reset() {
+	*x = GetBackingConnectionResponse{}
+	mi := &file_multipoolerservice_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetBackingConnectionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetBackingConnectionResponse) ProtoMessage() {}
+
+func (x *GetBackingConnectionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_multipoolerservice_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetBackingConnectionResponse.ProtoReflect.Descriptor instead.
+func (*GetBackingConnectionResponse) Descriptor() ([]byte, []int) {
+	return file_multipoolerservice_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *GetBackingConnectionResponse) GetConnection() *BackingConnection {
+	if x != nil {
+		return x.Connection
+	}
+	return nil
+}
+
 // NotificationStreamRequest updates the subscribed channels for one gateway
 // client session.
 type NotificationStreamRequest struct {
@@ -2498,7 +2680,7 @@ type NotificationStreamRequest struct {
 
 func (x *NotificationStreamRequest) Reset() {
 	*x = NotificationStreamRequest{}
-	mi := &file_multipoolerservice_proto_msgTypes[29]
+	mi := &file_multipoolerservice_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2510,7 +2692,7 @@ func (x *NotificationStreamRequest) String() string {
 func (*NotificationStreamRequest) ProtoMessage() {}
 
 func (x *NotificationStreamRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_multipoolerservice_proto_msgTypes[29]
+	mi := &file_multipoolerservice_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2523,7 +2705,7 @@ func (x *NotificationStreamRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NotificationStreamRequest.ProtoReflect.Descriptor instead.
 func (*NotificationStreamRequest) Descriptor() ([]byte, []int) {
-	return file_multipoolerservice_proto_rawDescGZIP(), []int{29}
+	return file_multipoolerservice_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *NotificationStreamRequest) GetTarget() *query.Target {
@@ -2567,7 +2749,7 @@ type NotificationStreamResponse struct {
 
 func (x *NotificationStreamResponse) Reset() {
 	*x = NotificationStreamResponse{}
-	mi := &file_multipoolerservice_proto_msgTypes[30]
+	mi := &file_multipoolerservice_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2579,7 +2761,7 @@ func (x *NotificationStreamResponse) String() string {
 func (*NotificationStreamResponse) ProtoMessage() {}
 
 func (x *NotificationStreamResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_multipoolerservice_proto_msgTypes[30]
+	mi := &file_multipoolerservice_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2592,7 +2774,7 @@ func (x *NotificationStreamResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NotificationStreamResponse.ProtoReflect.Descriptor instead.
 func (*NotificationStreamResponse) Descriptor() ([]byte, []int) {
-	return file_multipoolerservice_proto_rawDescGZIP(), []int{30}
+	return file_multipoolerservice_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *NotificationStreamResponse) GetNotification() *query.PgNotification {
@@ -2762,13 +2944,25 @@ const file_multipoolerservice_proto_rawDesc = "" +
 	"\x18keep_sticky_reservations\x18\x04 \x01(\bR\x16keepStickyReservations\"`\n" +
 	"!ReleaseReservedConnectionResponse\x12;\n" +
 	"\x0ereserved_state\x18\x01 \x01(\v2\x14.query.ReservedStateR\rreservedState\"\x1b\n" +
-	"\x19StreamPoolerHealthRequest\"\xec\x02\n" +
+	"\x19StreamPoolerHealthRequest\"\x91\x03\n" +
 	"\x1aStreamPoolerHealthResponse\x120\n" +
 	"\tpooler_id\x18\x02 \x01(\v2\x13.clustermetadata.IDR\bpoolerId\x12K\n" +
 	"\x0eserving_status\x18\x03 \x01(\x0e2$.clustermetadata.PoolerServingStatusR\rservingStatus\x12B\n" +
 	"\rrouting_state\x18\x04 \x01(\v2\x1d.clustermetadata.RoutingStateR\froutingState\x12]\n" +
 	"\x1drecommended_staleness_timeout\x18\x05 \x01(\v2\x19.google.protobuf.DurationR\x1brecommendedStalenessTimeout\x12,\n" +
-	"\x12replication_lag_ns\x18\x06 \x01(\x03R\x10replicationLagNs\"\xcd\x01\n" +
+	"\x12replication_lag_ns\x18\x06 \x01(\x03R\x10replicationLagNs\x12#\n" +
+	"\rbackend_ready\x18\a \x01(\bR\fbackendReady\"w\n" +
+	"\x11BackingConnection\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
+	"\x03url\x18\x02 \x01(\tR\x03url\x12<\n" +
+	"\x1aexpected_system_identifier\x18\x03 \x01(\tR\x18expectedSystemIdentifier\"b\n" +
+	"\x1bGetBackingConnectionRequest\x12\x1a\n" +
+	"\bdatabase\x18\x01 \x01(\tR\bdatabase\x12'\n" +
+	"\x0fconnection_name\x18\x02 \x01(\tR\x0econnectionName\"e\n" +
+	"\x1cGetBackingConnectionResponse\x12E\n" +
+	"\n" +
+	"connection\x18\x01 \x01(\v2%.multipoolerservice.BackingConnectionR\n" +
+	"connection\"\xcd\x01\n" +
 	"\x19NotificationStreamRequest\x12%\n" +
 	"\x06target\x18\x01 \x01(\v2\r.query.TargetR\x06target\x12-\n" +
 	"\x12subscribe_channels\x18\x02 \x03(\tR\x11subscribeChannels\x121\n" +
@@ -2794,7 +2988,7 @@ const file_multipoolerservice_proto_rawDesc = "" +
 	"\x15TransactionConclusion\x12&\n" +
 	"\"TRANSACTION_CONCLUSION_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dTRANSACTION_CONCLUSION_COMMIT\x10\x01\x12#\n" +
-	"\x1fTRANSACTION_CONCLUSION_ROLLBACK\x10\x022\xda\v\n" +
+	"\x1fTRANSACTION_CONCLUSION_ROLLBACK\x10\x022\xd5\f\n" +
 	"\x12MultipoolerService\x12a\n" +
 	"\fExecuteQuery\x12'.multipoolerservice.ExecuteQueryRequest\x1a(.multipoolerservice.ExecuteQueryResponse\x12f\n" +
 	"\rStreamExecute\x12(.multipoolerservice.StreamExecuteRequest\x1a).multipoolerservice.StreamExecuteResponse0\x01\x12h\n" +
@@ -2808,7 +3002,8 @@ const file_multipoolerservice_proto_rawDesc = "" +
 	"\x11DiscardTempTables\x12,.multipoolerservice.DiscardTempTablesRequest\x1a-.multipoolerservice.DiscardTempTablesResponse\x12\x88\x01\n" +
 	"\x19ReleaseReservedConnection\x124.multipoolerservice.ReleaseReservedConnectionRequest\x1a5.multipoolerservice.ReleaseReservedConnectionResponse\x12u\n" +
 	"\x12StreamPoolerHealth\x12-.multipoolerservice.StreamPoolerHealthRequest\x1a..multipoolerservice.StreamPoolerHealthResponse0\x01\x12w\n" +
-	"\x12NotificationStream\x12-.multipoolerservice.NotificationStreamRequest\x1a..multipoolerservice.NotificationStreamResponse(\x010\x01B9Z7github.com/multigres/multigres/go/pb/multipoolerserviceb\x06proto3"
+	"\x12NotificationStream\x12-.multipoolerservice.NotificationStreamRequest\x1a..multipoolerservice.NotificationStreamResponse(\x010\x01\x12y\n" +
+	"\x14GetBackingConnection\x12/.multipoolerservice.GetBackingConnectionRequest\x1a0.multipoolerservice.GetBackingConnectionResponseB9Z7github.com/multigres/multigres/go/pb/multipoolerserviceb\x06proto3"
 
 var (
 	file_multipoolerservice_proto_rawDescOnce sync.Once
@@ -2823,7 +3018,7 @@ func file_multipoolerservice_proto_rawDescGZIP() []byte {
 }
 
 var file_multipoolerservice_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
-var file_multipoolerservice_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_multipoolerservice_proto_msgTypes = make([]protoimpl.MessageInfo, 36)
 var file_multipoolerservice_proto_goTypes = []any{
 	(ReplicationMode)(0),                      // 0: multipoolerservice.ReplicationMode
 	(ReservationReason)(0),                    // 1: multipoolerservice.ReservationReason
@@ -2860,133 +3055,139 @@ var file_multipoolerservice_proto_goTypes = []any{
 	(*ReleaseReservedConnectionResponse)(nil), // 32: multipoolerservice.ReleaseReservedConnectionResponse
 	(*StreamPoolerHealthRequest)(nil),         // 33: multipoolerservice.StreamPoolerHealthRequest
 	(*StreamPoolerHealthResponse)(nil),        // 34: multipoolerservice.StreamPoolerHealthResponse
-	(*NotificationStreamRequest)(nil),         // 35: multipoolerservice.NotificationStreamRequest
-	(*NotificationStreamResponse)(nil),        // 36: multipoolerservice.NotificationStreamResponse
-	nil,                                       // 37: multipoolerservice.ExecuteStreamRequest.PropagationEntry
-	nil,                                       // 38: multipoolerservice.SessionSettingsSnapshot.VarsEntry
-	(*query.Target)(nil),                      // 39: query.Target
-	(*mtrpc.CallerID)(nil),                    // 40: mtrpc.CallerID
-	(*query.ExecuteOptions)(nil),              // 41: query.ExecuteOptions
-	(*query.QueryResult)(nil),                 // 42: query.QueryResult
-	(*query.ReservedState)(nil),               // 43: query.ReservedState
-	(*query.ReservationOptions)(nil),          // 44: query.ReservationOptions
-	(*query.QueryResultPayload)(nil),          // 45: query.QueryResultPayload
-	(*status.Status)(nil),                     // 46: google.rpc.Status
-	(*query.PreparedStatement)(nil),           // 47: query.PreparedStatement
-	(*query.Portal)(nil),                      // 48: query.Portal
-	(*query.StatementDescription)(nil),        // 49: query.StatementDescription
-	(*query.PgDiagnostic)(nil),                // 50: query.PgDiagnostic
-	(*query.UserAuth)(nil),                    // 51: query.UserAuth
-	(*clustermetadata.ID)(nil),                // 52: clustermetadata.ID
-	(clustermetadata.PoolerServingStatus)(0),  // 53: clustermetadata.PoolerServingStatus
-	(*clustermetadata.RoutingState)(nil),      // 54: clustermetadata.RoutingState
-	(*durationpb.Duration)(nil),               // 55: google.protobuf.Duration
-	(*query.PgNotification)(nil),              // 56: query.PgNotification
+	(*BackingConnection)(nil),                 // 35: multipoolerservice.BackingConnection
+	(*GetBackingConnectionRequest)(nil),       // 36: multipoolerservice.GetBackingConnectionRequest
+	(*GetBackingConnectionResponse)(nil),      // 37: multipoolerservice.GetBackingConnectionResponse
+	(*NotificationStreamRequest)(nil),         // 38: multipoolerservice.NotificationStreamRequest
+	(*NotificationStreamResponse)(nil),        // 39: multipoolerservice.NotificationStreamResponse
+	nil,                                       // 40: multipoolerservice.ExecuteStreamRequest.PropagationEntry
+	nil,                                       // 41: multipoolerservice.SessionSettingsSnapshot.VarsEntry
+	(*query.Target)(nil),                      // 42: query.Target
+	(*mtrpc.CallerID)(nil),                    // 43: mtrpc.CallerID
+	(*query.ExecuteOptions)(nil),              // 44: query.ExecuteOptions
+	(*query.QueryResult)(nil),                 // 45: query.QueryResult
+	(*query.ReservedState)(nil),               // 46: query.ReservedState
+	(*query.ReservationOptions)(nil),          // 47: query.ReservationOptions
+	(*query.QueryResultPayload)(nil),          // 48: query.QueryResultPayload
+	(*status.Status)(nil),                     // 49: google.rpc.Status
+	(*query.PreparedStatement)(nil),           // 50: query.PreparedStatement
+	(*query.Portal)(nil),                      // 51: query.Portal
+	(*query.StatementDescription)(nil),        // 52: query.StatementDescription
+	(*query.PgDiagnostic)(nil),                // 53: query.PgDiagnostic
+	(*query.UserAuth)(nil),                    // 54: query.UserAuth
+	(*clustermetadata.ID)(nil),                // 55: clustermetadata.ID
+	(clustermetadata.PoolerServingStatus)(0),  // 56: clustermetadata.PoolerServingStatus
+	(*clustermetadata.RoutingState)(nil),      // 57: clustermetadata.RoutingState
+	(*durationpb.Duration)(nil),               // 58: google.protobuf.Duration
+	(*query.PgNotification)(nil),              // 59: query.PgNotification
 }
 var file_multipoolerservice_proto_depIdxs = []int32{
-	39, // 0: multipoolerservice.ExecuteQueryRequest.target:type_name -> query.Target
-	40, // 1: multipoolerservice.ExecuteQueryRequest.caller_id:type_name -> mtrpc.CallerID
-	41, // 2: multipoolerservice.ExecuteQueryRequest.options:type_name -> query.ExecuteOptions
-	42, // 3: multipoolerservice.ExecuteQueryResponse.result:type_name -> query.QueryResult
-	43, // 4: multipoolerservice.ExecuteQueryResponse.reserved_state:type_name -> query.ReservedState
-	39, // 5: multipoolerservice.StreamExecuteRequest.target:type_name -> query.Target
-	40, // 6: multipoolerservice.StreamExecuteRequest.caller_id:type_name -> mtrpc.CallerID
-	41, // 7: multipoolerservice.StreamExecuteRequest.options:type_name -> query.ExecuteOptions
-	44, // 8: multipoolerservice.StreamExecuteRequest.reservation_options:type_name -> query.ReservationOptions
-	45, // 9: multipoolerservice.StreamExecuteResponse.result:type_name -> query.QueryResultPayload
-	43, // 10: multipoolerservice.StreamExecuteResponse.reserved_state:type_name -> query.ReservedState
+	42, // 0: multipoolerservice.ExecuteQueryRequest.target:type_name -> query.Target
+	43, // 1: multipoolerservice.ExecuteQueryRequest.caller_id:type_name -> mtrpc.CallerID
+	44, // 2: multipoolerservice.ExecuteQueryRequest.options:type_name -> query.ExecuteOptions
+	45, // 3: multipoolerservice.ExecuteQueryResponse.result:type_name -> query.QueryResult
+	46, // 4: multipoolerservice.ExecuteQueryResponse.reserved_state:type_name -> query.ReservedState
+	42, // 5: multipoolerservice.StreamExecuteRequest.target:type_name -> query.Target
+	43, // 6: multipoolerservice.StreamExecuteRequest.caller_id:type_name -> mtrpc.CallerID
+	44, // 7: multipoolerservice.StreamExecuteRequest.options:type_name -> query.ExecuteOptions
+	47, // 8: multipoolerservice.StreamExecuteRequest.reservation_options:type_name -> query.ReservationOptions
+	48, // 9: multipoolerservice.StreamExecuteResponse.result:type_name -> query.QueryResultPayload
+	46, // 10: multipoolerservice.StreamExecuteResponse.reserved_state:type_name -> query.ReservedState
 	8,  // 11: multipoolerservice.ExecuteStreamRequest.request:type_name -> multipoolerservice.StreamExecuteRequest
-	37, // 12: multipoolerservice.ExecuteStreamRequest.propagation:type_name -> multipoolerservice.ExecuteStreamRequest.PropagationEntry
+	40, // 12: multipoolerservice.ExecuteStreamRequest.propagation:type_name -> multipoolerservice.ExecuteStreamRequest.PropagationEntry
 	9,  // 13: multipoolerservice.ExecuteStreamResponse.response:type_name -> multipoolerservice.StreamExecuteResponse
-	46, // 14: multipoolerservice.ExecuteStreamResponse.completion:type_name -> google.rpc.Status
-	39, // 15: multipoolerservice.PortalStreamExecuteRequest.target:type_name -> query.Target
-	47, // 16: multipoolerservice.PortalStreamExecuteRequest.prepared_statement:type_name -> query.PreparedStatement
-	48, // 17: multipoolerservice.PortalStreamExecuteRequest.portal:type_name -> query.Portal
-	40, // 18: multipoolerservice.PortalStreamExecuteRequest.caller_id:type_name -> mtrpc.CallerID
-	41, // 19: multipoolerservice.PortalStreamExecuteRequest.options:type_name -> query.ExecuteOptions
+	49, // 14: multipoolerservice.ExecuteStreamResponse.completion:type_name -> google.rpc.Status
+	42, // 15: multipoolerservice.PortalStreamExecuteRequest.target:type_name -> query.Target
+	50, // 16: multipoolerservice.PortalStreamExecuteRequest.prepared_statement:type_name -> query.PreparedStatement
+	51, // 17: multipoolerservice.PortalStreamExecuteRequest.portal:type_name -> query.Portal
+	43, // 18: multipoolerservice.PortalStreamExecuteRequest.caller_id:type_name -> mtrpc.CallerID
+	44, // 19: multipoolerservice.PortalStreamExecuteRequest.options:type_name -> query.ExecuteOptions
 	13, // 20: multipoolerservice.PortalStreamExecuteRequest.portal_options:type_name -> multipoolerservice.PortalExecuteOptions
-	44, // 21: multipoolerservice.PortalStreamExecuteRequest.reservation_options:type_name -> query.ReservationOptions
-	45, // 22: multipoolerservice.PortalStreamExecuteResponse.result:type_name -> query.QueryResultPayload
-	43, // 23: multipoolerservice.PortalStreamExecuteResponse.reserved_state:type_name -> query.ReservedState
-	39, // 24: multipoolerservice.DescribeRequest.target:type_name -> query.Target
-	47, // 25: multipoolerservice.DescribeRequest.prepared_statement:type_name -> query.PreparedStatement
-	48, // 26: multipoolerservice.DescribeRequest.portal:type_name -> query.Portal
-	40, // 27: multipoolerservice.DescribeRequest.caller_id:type_name -> mtrpc.CallerID
-	41, // 28: multipoolerservice.DescribeRequest.options:type_name -> query.ExecuteOptions
-	49, // 29: multipoolerservice.DescribeResponse.description:type_name -> query.StatementDescription
+	47, // 21: multipoolerservice.PortalStreamExecuteRequest.reservation_options:type_name -> query.ReservationOptions
+	48, // 22: multipoolerservice.PortalStreamExecuteResponse.result:type_name -> query.QueryResultPayload
+	46, // 23: multipoolerservice.PortalStreamExecuteResponse.reserved_state:type_name -> query.ReservedState
+	42, // 24: multipoolerservice.DescribeRequest.target:type_name -> query.Target
+	50, // 25: multipoolerservice.DescribeRequest.prepared_statement:type_name -> query.PreparedStatement
+	51, // 26: multipoolerservice.DescribeRequest.portal:type_name -> query.Portal
+	43, // 27: multipoolerservice.DescribeRequest.caller_id:type_name -> mtrpc.CallerID
+	44, // 28: multipoolerservice.DescribeRequest.options:type_name -> query.ExecuteOptions
+	52, // 29: multipoolerservice.DescribeResponse.description:type_name -> query.StatementDescription
 	3,  // 30: multipoolerservice.CopyBidiExecuteRequest.phase:type_name -> multipoolerservice.CopyBidiExecuteRequest.Phase
 	4,  // 31: multipoolerservice.CopyBidiExecuteRequest.direction:type_name -> multipoolerservice.CopyBidiExecuteRequest.Direction
-	39, // 32: multipoolerservice.CopyBidiExecuteRequest.target:type_name -> query.Target
-	40, // 33: multipoolerservice.CopyBidiExecuteRequest.caller_id:type_name -> mtrpc.CallerID
-	41, // 34: multipoolerservice.CopyBidiExecuteRequest.options:type_name -> query.ExecuteOptions
-	44, // 35: multipoolerservice.CopyBidiExecuteRequest.reservation_options:type_name -> query.ReservationOptions
+	42, // 32: multipoolerservice.CopyBidiExecuteRequest.target:type_name -> query.Target
+	43, // 33: multipoolerservice.CopyBidiExecuteRequest.caller_id:type_name -> mtrpc.CallerID
+	44, // 34: multipoolerservice.CopyBidiExecuteRequest.options:type_name -> query.ExecuteOptions
+	47, // 35: multipoolerservice.CopyBidiExecuteRequest.reservation_options:type_name -> query.ReservationOptions
 	5,  // 36: multipoolerservice.CopyBidiExecuteResponse.phase:type_name -> multipoolerservice.CopyBidiExecuteResponse.Phase
-	43, // 37: multipoolerservice.CopyBidiExecuteResponse.reserved_state:type_name -> query.ReservedState
-	42, // 38: multipoolerservice.CopyBidiExecuteResponse.result:type_name -> query.QueryResult
-	50, // 39: multipoolerservice.CopyBidiExecuteResponse.notices:type_name -> query.PgDiagnostic
-	50, // 40: multipoolerservice.CopyBidiExecuteResponse.error_diagnostic:type_name -> query.PgDiagnostic
-	39, // 41: multipoolerservice.StreamReplicationInit.target:type_name -> query.Target
-	40, // 42: multipoolerservice.StreamReplicationInit.caller_id:type_name -> mtrpc.CallerID
+	46, // 37: multipoolerservice.CopyBidiExecuteResponse.reserved_state:type_name -> query.ReservedState
+	45, // 38: multipoolerservice.CopyBidiExecuteResponse.result:type_name -> query.QueryResult
+	53, // 39: multipoolerservice.CopyBidiExecuteResponse.notices:type_name -> query.PgDiagnostic
+	53, // 40: multipoolerservice.CopyBidiExecuteResponse.error_diagnostic:type_name -> query.PgDiagnostic
+	42, // 41: multipoolerservice.StreamReplicationInit.target:type_name -> query.Target
+	43, // 42: multipoolerservice.StreamReplicationInit.caller_id:type_name -> mtrpc.CallerID
 	0,  // 43: multipoolerservice.StreamReplicationInit.mode:type_name -> multipoolerservice.ReplicationMode
-	51, // 44: multipoolerservice.StreamReplicationInit.user_auth:type_name -> query.UserAuth
+	54, // 44: multipoolerservice.StreamReplicationInit.user_auth:type_name -> query.UserAuth
 	21, // 45: multipoolerservice.StreamReplicationRequest.init:type_name -> multipoolerservice.StreamReplicationInit
-	50, // 46: multipoolerservice.StreamReplicationError.diagnostic:type_name -> query.PgDiagnostic
+	53, // 46: multipoolerservice.StreamReplicationError.diagnostic:type_name -> query.PgDiagnostic
 	23, // 47: multipoolerservice.StreamReplicationResponse.ready:type_name -> multipoolerservice.StreamReplicationReady
 	24, // 48: multipoolerservice.StreamReplicationResponse.error:type_name -> multipoolerservice.StreamReplicationError
-	39, // 49: multipoolerservice.ConcludeTransactionRequest.target:type_name -> query.Target
-	40, // 50: multipoolerservice.ConcludeTransactionRequest.caller_id:type_name -> mtrpc.CallerID
-	41, // 51: multipoolerservice.ConcludeTransactionRequest.options:type_name -> query.ExecuteOptions
+	42, // 49: multipoolerservice.ConcludeTransactionRequest.target:type_name -> query.Target
+	43, // 50: multipoolerservice.ConcludeTransactionRequest.caller_id:type_name -> mtrpc.CallerID
+	44, // 51: multipoolerservice.ConcludeTransactionRequest.options:type_name -> query.ExecuteOptions
 	2,  // 52: multipoolerservice.ConcludeTransactionRequest.conclusion:type_name -> multipoolerservice.TransactionConclusion
 	27, // 53: multipoolerservice.ConcludeTransactionRequest.rollback_session_settings:type_name -> multipoolerservice.SessionSettingsSnapshot
-	38, // 54: multipoolerservice.SessionSettingsSnapshot.vars:type_name -> multipoolerservice.SessionSettingsSnapshot.VarsEntry
-	42, // 55: multipoolerservice.ConcludeTransactionResponse.result:type_name -> query.QueryResult
-	43, // 56: multipoolerservice.ConcludeTransactionResponse.reserved_state:type_name -> query.ReservedState
-	39, // 57: multipoolerservice.DiscardTempTablesRequest.target:type_name -> query.Target
-	40, // 58: multipoolerservice.DiscardTempTablesRequest.caller_id:type_name -> mtrpc.CallerID
-	41, // 59: multipoolerservice.DiscardTempTablesRequest.options:type_name -> query.ExecuteOptions
-	42, // 60: multipoolerservice.DiscardTempTablesResponse.result:type_name -> query.QueryResult
-	43, // 61: multipoolerservice.DiscardTempTablesResponse.reserved_state:type_name -> query.ReservedState
-	39, // 62: multipoolerservice.ReleaseReservedConnectionRequest.target:type_name -> query.Target
-	40, // 63: multipoolerservice.ReleaseReservedConnectionRequest.caller_id:type_name -> mtrpc.CallerID
-	41, // 64: multipoolerservice.ReleaseReservedConnectionRequest.options:type_name -> query.ExecuteOptions
-	43, // 65: multipoolerservice.ReleaseReservedConnectionResponse.reserved_state:type_name -> query.ReservedState
-	52, // 66: multipoolerservice.StreamPoolerHealthResponse.pooler_id:type_name -> clustermetadata.ID
-	53, // 67: multipoolerservice.StreamPoolerHealthResponse.serving_status:type_name -> clustermetadata.PoolerServingStatus
-	54, // 68: multipoolerservice.StreamPoolerHealthResponse.routing_state:type_name -> clustermetadata.RoutingState
-	55, // 69: multipoolerservice.StreamPoolerHealthResponse.recommended_staleness_timeout:type_name -> google.protobuf.Duration
-	39, // 70: multipoolerservice.NotificationStreamRequest.target:type_name -> query.Target
-	56, // 71: multipoolerservice.NotificationStreamResponse.notification:type_name -> query.PgNotification
-	6,  // 72: multipoolerservice.MultipoolerService.ExecuteQuery:input_type -> multipoolerservice.ExecuteQueryRequest
-	8,  // 73: multipoolerservice.MultipoolerService.StreamExecute:input_type -> multipoolerservice.StreamExecuteRequest
-	10, // 74: multipoolerservice.MultipoolerService.ExecuteStream:input_type -> multipoolerservice.ExecuteStreamRequest
-	12, // 75: multipoolerservice.MultipoolerService.PortalStreamExecute:input_type -> multipoolerservice.PortalStreamExecuteRequest
-	15, // 76: multipoolerservice.MultipoolerService.Describe:input_type -> multipoolerservice.DescribeRequest
-	17, // 77: multipoolerservice.MultipoolerService.GetAuthCredentials:input_type -> multipoolerservice.GetAuthCredentialsRequest
-	19, // 78: multipoolerservice.MultipoolerService.CopyBidiExecute:input_type -> multipoolerservice.CopyBidiExecuteRequest
-	22, // 79: multipoolerservice.MultipoolerService.StreamReplication:input_type -> multipoolerservice.StreamReplicationRequest
-	26, // 80: multipoolerservice.MultipoolerService.ConcludeTransaction:input_type -> multipoolerservice.ConcludeTransactionRequest
-	29, // 81: multipoolerservice.MultipoolerService.DiscardTempTables:input_type -> multipoolerservice.DiscardTempTablesRequest
-	31, // 82: multipoolerservice.MultipoolerService.ReleaseReservedConnection:input_type -> multipoolerservice.ReleaseReservedConnectionRequest
-	33, // 83: multipoolerservice.MultipoolerService.StreamPoolerHealth:input_type -> multipoolerservice.StreamPoolerHealthRequest
-	35, // 84: multipoolerservice.MultipoolerService.NotificationStream:input_type -> multipoolerservice.NotificationStreamRequest
-	7,  // 85: multipoolerservice.MultipoolerService.ExecuteQuery:output_type -> multipoolerservice.ExecuteQueryResponse
-	9,  // 86: multipoolerservice.MultipoolerService.StreamExecute:output_type -> multipoolerservice.StreamExecuteResponse
-	11, // 87: multipoolerservice.MultipoolerService.ExecuteStream:output_type -> multipoolerservice.ExecuteStreamResponse
-	14, // 88: multipoolerservice.MultipoolerService.PortalStreamExecute:output_type -> multipoolerservice.PortalStreamExecuteResponse
-	16, // 89: multipoolerservice.MultipoolerService.Describe:output_type -> multipoolerservice.DescribeResponse
-	18, // 90: multipoolerservice.MultipoolerService.GetAuthCredentials:output_type -> multipoolerservice.GetAuthCredentialsResponse
-	20, // 91: multipoolerservice.MultipoolerService.CopyBidiExecute:output_type -> multipoolerservice.CopyBidiExecuteResponse
-	25, // 92: multipoolerservice.MultipoolerService.StreamReplication:output_type -> multipoolerservice.StreamReplicationResponse
-	28, // 93: multipoolerservice.MultipoolerService.ConcludeTransaction:output_type -> multipoolerservice.ConcludeTransactionResponse
-	30, // 94: multipoolerservice.MultipoolerService.DiscardTempTables:output_type -> multipoolerservice.DiscardTempTablesResponse
-	32, // 95: multipoolerservice.MultipoolerService.ReleaseReservedConnection:output_type -> multipoolerservice.ReleaseReservedConnectionResponse
-	34, // 96: multipoolerservice.MultipoolerService.StreamPoolerHealth:output_type -> multipoolerservice.StreamPoolerHealthResponse
-	36, // 97: multipoolerservice.MultipoolerService.NotificationStream:output_type -> multipoolerservice.NotificationStreamResponse
-	85, // [85:98] is the sub-list for method output_type
-	72, // [72:85] is the sub-list for method input_type
-	72, // [72:72] is the sub-list for extension type_name
-	72, // [72:72] is the sub-list for extension extendee
-	0,  // [0:72] is the sub-list for field type_name
+	41, // 54: multipoolerservice.SessionSettingsSnapshot.vars:type_name -> multipoolerservice.SessionSettingsSnapshot.VarsEntry
+	45, // 55: multipoolerservice.ConcludeTransactionResponse.result:type_name -> query.QueryResult
+	46, // 56: multipoolerservice.ConcludeTransactionResponse.reserved_state:type_name -> query.ReservedState
+	42, // 57: multipoolerservice.DiscardTempTablesRequest.target:type_name -> query.Target
+	43, // 58: multipoolerservice.DiscardTempTablesRequest.caller_id:type_name -> mtrpc.CallerID
+	44, // 59: multipoolerservice.DiscardTempTablesRequest.options:type_name -> query.ExecuteOptions
+	45, // 60: multipoolerservice.DiscardTempTablesResponse.result:type_name -> query.QueryResult
+	46, // 61: multipoolerservice.DiscardTempTablesResponse.reserved_state:type_name -> query.ReservedState
+	42, // 62: multipoolerservice.ReleaseReservedConnectionRequest.target:type_name -> query.Target
+	43, // 63: multipoolerservice.ReleaseReservedConnectionRequest.caller_id:type_name -> mtrpc.CallerID
+	44, // 64: multipoolerservice.ReleaseReservedConnectionRequest.options:type_name -> query.ExecuteOptions
+	46, // 65: multipoolerservice.ReleaseReservedConnectionResponse.reserved_state:type_name -> query.ReservedState
+	55, // 66: multipoolerservice.StreamPoolerHealthResponse.pooler_id:type_name -> clustermetadata.ID
+	56, // 67: multipoolerservice.StreamPoolerHealthResponse.serving_status:type_name -> clustermetadata.PoolerServingStatus
+	57, // 68: multipoolerservice.StreamPoolerHealthResponse.routing_state:type_name -> clustermetadata.RoutingState
+	58, // 69: multipoolerservice.StreamPoolerHealthResponse.recommended_staleness_timeout:type_name -> google.protobuf.Duration
+	35, // 70: multipoolerservice.GetBackingConnectionResponse.connection:type_name -> multipoolerservice.BackingConnection
+	42, // 71: multipoolerservice.NotificationStreamRequest.target:type_name -> query.Target
+	59, // 72: multipoolerservice.NotificationStreamResponse.notification:type_name -> query.PgNotification
+	6,  // 73: multipoolerservice.MultipoolerService.ExecuteQuery:input_type -> multipoolerservice.ExecuteQueryRequest
+	8,  // 74: multipoolerservice.MultipoolerService.StreamExecute:input_type -> multipoolerservice.StreamExecuteRequest
+	10, // 75: multipoolerservice.MultipoolerService.ExecuteStream:input_type -> multipoolerservice.ExecuteStreamRequest
+	12, // 76: multipoolerservice.MultipoolerService.PortalStreamExecute:input_type -> multipoolerservice.PortalStreamExecuteRequest
+	15, // 77: multipoolerservice.MultipoolerService.Describe:input_type -> multipoolerservice.DescribeRequest
+	17, // 78: multipoolerservice.MultipoolerService.GetAuthCredentials:input_type -> multipoolerservice.GetAuthCredentialsRequest
+	19, // 79: multipoolerservice.MultipoolerService.CopyBidiExecute:input_type -> multipoolerservice.CopyBidiExecuteRequest
+	22, // 80: multipoolerservice.MultipoolerService.StreamReplication:input_type -> multipoolerservice.StreamReplicationRequest
+	26, // 81: multipoolerservice.MultipoolerService.ConcludeTransaction:input_type -> multipoolerservice.ConcludeTransactionRequest
+	29, // 82: multipoolerservice.MultipoolerService.DiscardTempTables:input_type -> multipoolerservice.DiscardTempTablesRequest
+	31, // 83: multipoolerservice.MultipoolerService.ReleaseReservedConnection:input_type -> multipoolerservice.ReleaseReservedConnectionRequest
+	33, // 84: multipoolerservice.MultipoolerService.StreamPoolerHealth:input_type -> multipoolerservice.StreamPoolerHealthRequest
+	38, // 85: multipoolerservice.MultipoolerService.NotificationStream:input_type -> multipoolerservice.NotificationStreamRequest
+	36, // 86: multipoolerservice.MultipoolerService.GetBackingConnection:input_type -> multipoolerservice.GetBackingConnectionRequest
+	7,  // 87: multipoolerservice.MultipoolerService.ExecuteQuery:output_type -> multipoolerservice.ExecuteQueryResponse
+	9,  // 88: multipoolerservice.MultipoolerService.StreamExecute:output_type -> multipoolerservice.StreamExecuteResponse
+	11, // 89: multipoolerservice.MultipoolerService.ExecuteStream:output_type -> multipoolerservice.ExecuteStreamResponse
+	14, // 90: multipoolerservice.MultipoolerService.PortalStreamExecute:output_type -> multipoolerservice.PortalStreamExecuteResponse
+	16, // 91: multipoolerservice.MultipoolerService.Describe:output_type -> multipoolerservice.DescribeResponse
+	18, // 92: multipoolerservice.MultipoolerService.GetAuthCredentials:output_type -> multipoolerservice.GetAuthCredentialsResponse
+	20, // 93: multipoolerservice.MultipoolerService.CopyBidiExecute:output_type -> multipoolerservice.CopyBidiExecuteResponse
+	25, // 94: multipoolerservice.MultipoolerService.StreamReplication:output_type -> multipoolerservice.StreamReplicationResponse
+	28, // 95: multipoolerservice.MultipoolerService.ConcludeTransaction:output_type -> multipoolerservice.ConcludeTransactionResponse
+	30, // 96: multipoolerservice.MultipoolerService.DiscardTempTables:output_type -> multipoolerservice.DiscardTempTablesResponse
+	32, // 97: multipoolerservice.MultipoolerService.ReleaseReservedConnection:output_type -> multipoolerservice.ReleaseReservedConnectionResponse
+	34, // 98: multipoolerservice.MultipoolerService.StreamPoolerHealth:output_type -> multipoolerservice.StreamPoolerHealthResponse
+	39, // 99: multipoolerservice.MultipoolerService.NotificationStream:output_type -> multipoolerservice.NotificationStreamResponse
+	37, // 100: multipoolerservice.MultipoolerService.GetBackingConnection:output_type -> multipoolerservice.GetBackingConnectionResponse
+	87, // [87:101] is the sub-list for method output_type
+	73, // [73:87] is the sub-list for method input_type
+	73, // [73:73] is the sub-list for extension type_name
+	73, // [73:73] is the sub-list for extension extendee
+	0,  // [0:73] is the sub-list for field type_name
 }
 
 func init() { file_multipoolerservice_proto_init() }
@@ -3009,7 +3210,7 @@ func file_multipoolerservice_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_multipoolerservice_proto_rawDesc), len(file_multipoolerservice_proto_rawDesc)),
 			NumEnums:      6,
-			NumMessages:   33,
+			NumMessages:   36,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

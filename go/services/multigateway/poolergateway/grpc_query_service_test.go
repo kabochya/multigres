@@ -224,6 +224,10 @@ func (m *mockMultipoolerServiceClient) NotificationStream(ctx context.Context, o
 	return nil, nil
 }
 
+func (m *mockMultipoolerServiceClient) GetBackingConnection(ctx context.Context, in *multipoolerservice.GetBackingConnectionRequest, opts ...grpc.CallOption) (*multipoolerservice.GetBackingConnectionResponse, error) {
+	return nil, nil
+}
+
 func (m *mockMultipoolerServiceClient) DiscardTempTables(ctx context.Context, in *multipoolerservice.DiscardTempTablesRequest, opts ...grpc.CallOption) (*multipoolerservice.DiscardTempTablesResponse, error) {
 	return nil, nil
 }
