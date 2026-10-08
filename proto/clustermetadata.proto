@@ -236,6 +236,11 @@ message Multipooler {
   // treated as MANAGED so records written before this field existed keep their
   // current behavior.
   PoolerManagementMode management_mode = 14;
+
+  // process_incarnation identifies this process start. It changes on every
+  // restart, so a coordinator can tell an acknowledgment from the process it
+  // snapshotted apart from one by its restarted successor.
+  string process_incarnation = 15;
 }
 
 // PoolerManagementMode is independent of query-serving role and readiness.

@@ -1031,6 +1031,15 @@ export class Multipooler extends Message<Multipooler> {
    */
   managementMode = PoolerManagementMode.UNSPECIFIED;
 
+  /**
+   * process_incarnation identifies this process start. It changes on every
+   * restart, so a coordinator can tell an acknowledgment from the process it
+   * snapshotted apart from one by its restarted successor.
+   *
+   * @generated from field: string process_incarnation = 15;
+   */
+  processIncarnation = "";
+
   constructor(data?: PartialMessage<Multipooler>) {
     super();
     proto3.util.initPartial(data, this);
@@ -1051,6 +1060,7 @@ export class Multipooler extends Message<Multipooler> {
     { no: 12, name: "lifecycle_status", kind: "message", T: PoolerLifecycle },
     { no: 13, name: "routing_state", kind: "message", T: RoutingState },
     { no: 14, name: "management_mode", kind: "enum", T: proto3.getEnumType(PoolerManagementMode) },
+    { no: 15, name: "process_incarnation", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): Multipooler {
