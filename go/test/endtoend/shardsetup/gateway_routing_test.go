@@ -52,15 +52,25 @@ func makeVerifiersIdentical(t *testing.T, srcPort, dstPort int) {
 // pointer of the cluster's database, and returns its PostgreSQL port.
 func startRoutedGateway(t *testing.T, s *ShardSetup) int {
 	t.Helper()
+	return startRoutedGatewayNamed(t, s, "routed-gateway", "200ms")
+}
+
+// startRoutedGatewayNamed is startRoutedGateway with a name and a routing poll
+// interval. A long interval makes a gateway whose routing goes stale.
+func startRoutedGatewayNamed(t *testing.T, s *ShardSetup, name, pollInterval string, extraArgs ...string) int {
+	t.Helper()
 	pgPort, httpPort, grpcPort := utils.GetFreePort(t), utils.GetFreePort(t), utils.GetFreePort(t)
-	gw := s.CreateMultigatewayInstance(t, "routed-gateway", pgPort, httpPort, grpcPort)
+	gw := s.CreateMultigatewayInstance(t, name, pgPort, httpPort, grpcPort)
 	gw.ExtraArgs = []string{
-		"--routing-poll-database=" + s.Database, "--routing-poll-interval=200ms",
+		"--routing-poll-database=" + s.Database, "--routing-poll-interval=" + pollInterval,
 		"--buffer-enabled", "--buffer-window", "30s", "--buffer-size", "1000",
 		"--buffer-max-failover-duration", "60s", "--buffer-min-time-between-failovers", "0s",
 		"--buffer-drain-concurrency", "5",
 	}
+	gw.ExtraArgs = append(gw.ExtraArgs, extraArgs...)
 	require.NoError(t, gw.Start(s.Context(), t))
+	// Only the most recent gateway is tracked by the setup; stop each one.
+	t.Cleanup(func() { gw.TerminateGracefully(t.Logf, 10*time.Second) })
 	return pgPort
 }
 
