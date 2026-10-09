@@ -98,7 +98,7 @@ type Pool struct {
 	// failed: the connection is closed and released, but its backend may still be
 	// running what it was last sent.
 	unterminatedMu  sync.Mutex
-	unterminated    map[uint32]struct{}
+	unterminated    map[uint32]time.Time
 	timeoutCount    atomic.Int64
 	txCommitCount   atomic.Int64
 	txRollbackCount atomic.Int64
@@ -317,13 +317,23 @@ func (p *Pool) Get(connID int64) (*Conn, bool) {
 	return rc, true
 }
 
+// unterminatedBackendTTL bounds how long a backend that could not be terminated
+// is remembered.
+const unterminatedBackendTTL = 10 * time.Minute
+
 // UnterminatedBackends returns the pids of backends whose termination failed and
 // that have not been confirmed gone since.
 func (p *Pool) UnterminatedBackends() []uint32 {
 	p.unterminatedMu.Lock()
 	defer p.unterminatedMu.Unlock()
 	pids := make([]uint32, 0, len(p.unterminated))
-	for pid := range p.unterminated {
+	for pid, since := range p.unterminated {
+		// A pid can be reused once its backend exits, so a record is not kept
+		// forever: after this long it is more likely a stranger than the backend.
+		if time.Since(since) > unterminatedBackendTTL {
+			delete(p.unterminated, pid)
+			continue
+		}
 		pids = append(pids, pid)
 	}
 	return pids
@@ -353,9 +363,9 @@ func (p *Pool) KillConnection(ctx context.Context, connID int64) error {
 	if err := rc.Kill(ctx); err != nil {
 		p.unterminatedMu.Lock()
 		if p.unterminated == nil {
-			p.unterminated = map[uint32]struct{}{}
+			p.unterminated = map[uint32]time.Time{}
 		}
-		p.unterminated[rc.ProcessID()] = struct{}{}
+		p.unterminated[rc.ProcessID()] = time.Now()
 		p.unterminatedMu.Unlock()
 		p.logger.WarnContext(ctx, "failed to kill connection",
 			"conn_id", connID,
