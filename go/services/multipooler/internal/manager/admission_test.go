@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,6 +31,7 @@ import (
 	multipoolerservicepb "github.com/multigres/multigres/go/pb/multipoolerservice"
 	"github.com/multigres/multigres/go/services/multipooler/internal/poolerserver"
 	"github.com/multigres/multigres/go/services/multipooler/internal/servingstate"
+	"github.com/multigres/multigres/go/tools/testpoll"
 )
 
 const (
@@ -375,4 +377,77 @@ func TestParseAdmissionState(t *testing.T) {
 	}
 	_, err := parseAdmissionState("OPEN")
 	require.Error(t, err)
+}
+
+// TestManagedPoolerReadsAdmissionOnlyAfterItIsRegistered: the coordinator fences
+// the poolers it finds in topology, so a managed pooler that read UNFENCED and
+// opened before it was listed could stay open past a committed fence.
+func TestManagedPoolerReadsAdmissionOnlyAfterItIsRegistered(t *testing.T) {
+	h := newAdmissionHarness(t, false)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go h.pm.runAdmission(ctx)
+
+	h.pm.signalAdmission()
+	testpoll.Never(t, func() bool { return h.reads.Load() > 0 || h.gate.ApplicationOpen() }, 300*time.Millisecond, 20*time.Millisecond,
+		"an unregistered managed pooler must not read or open")
+
+	h.pm.record.registered.Store(true)
+	h.pm.signalAdmission()
+	require.Eventually(t, h.gate.ApplicationOpen, 5*time.Second, 20*time.Millisecond)
+}
+
+// TestAdmissionLoopRedecidesAfterTheGateWasClosedBehindIt: a decision recorded for
+// an earlier generation is not a decision, whatever happened to cause the close.
+func TestAdmissionLoopRedecidesAfterTheGateWasClosedBehindIt(t *testing.T) {
+	h := newAdmissionHarness(t, true)
+	_, err := h.pm.enforceAdmission(t.Context(), multipoolerservicepb.AdmissionState_ADMISSION_STATE_UNSPECIFIED, "")
+	require.NoError(t, err)
+	require.True(t, h.gate.ApplicationOpen())
+
+	// A close that did not go through the lifecycle sink leaves the recorded
+	// decision pointing at a generation that no longer exists.
+	h.gate.CloseApplication()
+	require.False(t, h.gate.ApplicationOpen())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go h.pm.runAdmission(ctx)
+	h.pm.signalAdmission()
+	require.Eventually(t, h.gate.ApplicationOpen, 5*time.Second, 20*time.Millisecond)
+}
+
+// TestOpeningAndAConcurrentLifecycleChangeNeverLeaveAStaleDecisionOpen: whatever
+// the interleaving, an open gate always has a decision recorded for its current
+// generation, so the loop can tell it needs another read when it is closed.
+func TestOpeningAndAConcurrentLifecycleChangeNeverLeaveAStaleDecisionOpen(t *testing.T) {
+	h := newAdmissionHarness(t, true)
+	lifecycle := admissionLifecycle{h.pm}
+	for i := range 300 {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, _ = h.pm.enforceAdmission(t.Context(), multipoolerservicepb.AdmissionState_ADMISSION_STATE_UNSPECIFIED, "")
+		}()
+		go func() {
+			defer wg.Done()
+			role := servingstate.RoutingRolePrimary
+			if i%2 == 1 {
+				role = servingstate.RoutingRoleReplica
+			}
+			_ = lifecycle.OnStateChange(t.Context(), servingstate.State{Routing: servingstate.RoutingState{Role: role}, ServingStatus: clustermetadatapb.PoolerServingStatus_SERVING})
+		}()
+		wg.Wait()
+
+		h.pm.admission.mu.Lock()
+		applied := h.pm.admission.applied
+		h.pm.admission.mu.Unlock()
+		if h.gate.ApplicationOpen() {
+			require.NotNil(t, applied, "iteration %d: the gate is open with no decision recorded", i)
+			require.Equal(t, h.gate.AdmissionGeneration(), applied.generation, "iteration %d: the gate is open on a stale decision", i)
+		}
+		// Reset to the closed, undecided state for the next round.
+		_ = lifecycle.OnStateChange(t.Context(), servingstate.State{Routing: servingstate.RoutingState{Role: servingstate.RoutingRoleUnknown}, ServingStatus: clustermetadatapb.PoolerServingStatus_DISABLED})
+	}
 }

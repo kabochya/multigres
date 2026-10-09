@@ -91,9 +91,12 @@ type Pool struct {
 	cancel context.CancelFunc
 
 	// Metrics
-	reserveCount    atomic.Int64
-	releaseCount    atomic.Int64
-	killCount       atomic.Int64
+	reserveCount atomic.Int64
+	releaseCount atomic.Int64
+	killCount    atomic.Int64
+	// killFailures counts kills whose pg_terminate_backend did not succeed, so the
+	// backend may still be running what the connection last sent it.
+	killFailures    atomic.Int64
 	timeoutCount    atomic.Int64
 	txCommitCount   atomic.Int64
 	txRollbackCount atomic.Int64
@@ -312,6 +315,10 @@ func (p *Pool) Get(connID int64) (*Conn, bool) {
 	return rc, true
 }
 
+// KillFailures returns how many kills did not succeed. The connection is still
+// closed and released, but its backend may keep running its last statement.
+func (p *Pool) KillFailures() int64 { return p.killFailures.Load() }
+
 // KillConnection kills a reserved connection by ID.
 func (p *Pool) KillConnection(ctx context.Context, connID int64) error {
 	p.mu.Lock()
@@ -325,6 +332,7 @@ func (p *Pool) KillConnection(ctx context.Context, connID int64) error {
 
 	// Kill the backend process.
 	if err := rc.Kill(ctx); err != nil {
+		p.killFailures.Add(1)
 		p.logger.WarnContext(ctx, "failed to kill connection",
 			"conn_id", connID,
 			"error", err)

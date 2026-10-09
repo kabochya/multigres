@@ -16,6 +16,7 @@ package poolerserver
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -193,4 +194,44 @@ func TestFenceNeverAcknowledgesWhileWorkRemains(t *testing.T) {
 	_, err = s.FenceApplication(t.Context(), 30*time.Millisecond)
 	require.ErrorContains(t, err, "still in flight")
 	require.False(t, s.ApplicationOpen())
+}
+
+// failingKillPoolManager is a pool manager whose terminations fail.
+type failingKillPoolManager struct {
+	*drainMockPoolManager
+	failures atomic.Int64
+}
+
+func (m *failingKillPoolManager) ReservedKillFailures() int64 { return m.failures.Load() }
+
+// TestFenceFailsWhenAReservedConnectionCouldNotBeTerminated: a connection whose
+// backend was not terminated may still be running a statement, so the fence must
+// not be acknowledged even though the connection is gone from the pool.
+func TestFenceFailsWhenAReservedConnectionCouldNotBeTerminated(t *testing.T) {
+	s := newGatedTestServer(t)
+	base := newDrainMockPoolManager()
+	pm := &failingKillPoolManager{drainMockPoolManager: base}
+	base.reservedAdd(1)
+	base.closeReservedCount = 1
+	base.onCloseReserved = func() {
+		pm.failures.Add(1) // the terminate failed, but the connection was released
+		base.reservedAdd(-1)
+	}
+	s.poolManager = pm
+
+	_, err := s.FenceApplication(t.Context(), 50*time.Millisecond)
+	require.ErrorContains(t, err, "could not terminate")
+	require.False(t, s.ApplicationOpen())
+}
+
+// TestBeginRequestSkipsAccountingWithoutAdmissionControl: only a controlled pooler
+// ever waits for requests, so the rest pay nothing for the permit.
+func TestBeginRequestSkipsAccountingWithoutAdmissionControl(t *testing.T) {
+	s := newStartRequestTestServer()
+	s.servingStatus = clustermetadatapb.PoolerServingStatus_SERVING
+	release, err := s.BeginRequest(nil, RequestSingleQuery)
+	require.NoError(t, err)
+	require.Zero(t, s.activeRequests)
+	release()
+	require.Nil(t, s.requestsChanged, "a completion nobody waits for allocates no channel")
 }
