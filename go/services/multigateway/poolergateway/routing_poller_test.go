@@ -140,3 +140,18 @@ func TestRoutingPollerWithoutADefaultPrimaryReadsNothing(t *testing.T) {
 	_, known := routing.Current()
 	assert.False(t, known)
 }
+
+// TestColdPollerRetriesQuicklyWhateverTheInterval: a gateway that has not read the
+// routing yet cannot serve, so its retry must not wait out a long steady-state
+// interval.
+func TestColdPollerRetriesQuicklyWhateverTheInterval(t *testing.T) {
+	routing := NewAppRouting("postgres")
+	p := &RoutingPoller{routing: routing, interval: time.Minute}
+	assert.Equal(t, coldPollInterval, p.nextPollDelay())
+
+	routing.Update("migrateTG", 1)
+	assert.Equal(t, time.Minute, p.nextPollDelay(), "once routing is known the configured interval applies")
+
+	short := &RoutingPoller{routing: NewAppRouting("postgres"), interval: 100 * time.Millisecond}
+	assert.Equal(t, 100*time.Millisecond, short.nextPollDelay(), "an interval shorter than the cold one is kept")
+}

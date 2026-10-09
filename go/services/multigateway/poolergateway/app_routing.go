@@ -246,16 +246,26 @@ func (p *RoutingPoller) readFromDefaultPrimary(ctx context.Context) (*multipoole
 // Run polls until ctx is cancelled. A failed read keeps the last known routing;
 // before the first successful read the gateway fails closed.
 func (p *RoutingPoller) Run(ctx context.Context) {
-	ticker := time.NewTicker(p.interval)
-	defer ticker.Stop()
 	for {
 		p.PollOnce(ctx)
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-time.After(p.nextPollDelay()):
 		}
 	}
+}
+
+// coldPollInterval is how often a gateway that does not yet know the routing
+// retries, however long the steady-state interval is: until the first read it
+// cannot authenticate or serve application traffic.
+const coldPollInterval = 500 * time.Millisecond
+
+func (p *RoutingPoller) nextPollDelay() time.Duration {
+	if _, known := p.routing.Current(); !known && p.interval > coldPollInterval {
+		return coldPollInterval
+	}
+	return p.interval
 }
 
 // PollOnce performs one read and applies it.
