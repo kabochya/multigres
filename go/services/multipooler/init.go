@@ -30,6 +30,7 @@ import (
 
 	"github.com/multigres/multigres/go/common/backup"
 	"github.com/multigres/multigres/go/common/constants"
+	"github.com/multigres/multigres/go/common/rpcclient"
 	"github.com/multigres/multigres/go/common/servenv"
 	"github.com/multigres/multigres/go/common/topoclient"
 	"github.com/multigres/multigres/go/services/multipooler/grpcmanagerservice"
@@ -140,6 +141,10 @@ type Multipooler struct {
 	telemetry  *telemetry.Telemetry
 	// connPoolConfig holds connection pool configuration (manager created inside MultipoolerManager)
 	connPoolConfig *connpoolmanager.Config
+	// defaultPrimaryConn configures the gRPC transport an unmanaged pooler uses
+	// to reach the default primary pooler (the existing multipooler gRPC TLS
+	// flags). Nil in single-process mode, which never runs unmanaged.
+	defaultPrimaryConn *rpcclient.ConnConfig
 
 	ts            topoclient.Store
 	poolerManager *manager.MultipoolerManager
@@ -397,6 +402,8 @@ func (mp *Multipooler) RegisterFlags(flags *pflag.FlagSet) {
 // registerProcessFlags registers the flags of the process-level pieces the
 // multipooler owns when it runs as its own process.
 func (mp *Multipooler) registerProcessFlags(flags *pflag.FlagSet) {
+	mp.defaultPrimaryConn = rpcclient.NewConnConfig(mp.reg)
+	mp.defaultPrimaryConn.RegisterFlags(flags)
 	mp.grpcServer.RegisterFlags(flags)
 	mp.senv.RegisterFlags(flags)
 	mp.topoConfig.RegisterFlags(flags)
@@ -528,11 +535,28 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 		cipherKey backup.CipherKeys
 	)
 	if unmanaged {
-		// PROTOTYPE STUB: resolved from the environment until the metadata stub
-		// can serve the named row.
-		backing, err = resolveBackingConnectionStub(mp.backingConnection.Get())
+		if mp.tableGroup.Get() == "" || mp.shard.Get() == "" {
+			return errors.New("table group and shard are required")
+		}
+		// Register as DISABLED/UNMANAGED, find the default primary and fetch
+		// the named connection before anything can serve.
+		transport, err := mp.defaultPrimaryConn.TransportCredentials(logger)
 		if err != nil {
-			return fmt.Errorf("resolve backing connection: %w", err)
+			return fmt.Errorf("default primary transport: %w", err)
+		}
+		initial := topoclient.NewMultipooler(serviceID, cell, mp.senv.GetHostname())
+		initial.ManagementMode = mode
+		initial.ShardKey = &clustermetadatapb.ShardKey{
+			Database:   mp.database.Get(),
+			TableGroup: mp.tableGroup.Get(),
+			Shard:      mp.shard.Get(),
+		}
+		initial.PortMap["grpc"] = int32(mp.grpcServer.Port())
+		initial.PortMap["http"] = int32(mp.senv.GetHTTPPort())
+		initial.ServingStatus = clustermetadatapb.PoolerServingStatus_DISABLED
+		backing, err = bootstrapBackingConnection(startCtx, mp.ts, initial, mp.backingConnection.Get(), transport, logger)
+		if err != nil {
+			return err
 		}
 		mp.connPoolConfig.SetBackingCredentials(backing.User, backing.Password, backing.SSLMode, backing.SSLRootCert, backing.SSLNegotiation)
 	} else {
@@ -620,7 +644,12 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 		// No local data or pooler directory exists for an external postgres.
 		multipooler.PoolerDir = ""
 		multipooler.PgDataDir = ""
-		externalBackend = &manager.ExternalBackend{Host: backing.Host, Port: backing.Port, Database: backing.Database}
+		externalBackend = &manager.ExternalBackend{
+			Host:                     backing.Host,
+			Port:                     backing.Port,
+			Database:                 backing.Database,
+			ExpectedSystemIdentifier: backing.ExpectedSystemIdentifier,
+		}
 	}
 
 	minAttempts := mp.postgresUnrecoverableMinAttempts.Get()

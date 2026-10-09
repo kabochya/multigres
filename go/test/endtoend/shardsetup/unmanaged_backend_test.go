@@ -25,11 +25,16 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/multigres/multigres/go/common/protometadata"
 	clustermetadatapb "github.com/multigres/multigres/go/pb/clustermetadata"
 	multipoolermanagerdata "github.com/multigres/multigres/go/pb/multipoolermanagerdata"
+	multipoolerservicepb "github.com/multigres/multigres/go/pb/multipoolerservice"
 	"github.com/multigres/multigres/go/test/utils"
 	"github.com/multigres/multigres/go/tools/executil"
+	"github.com/multigres/multigres/go/tools/testpoll"
 )
 
 const externalPostgresPassword = "external-test-password"
@@ -72,8 +77,9 @@ func externalDSN(port int) string {
 }
 
 // startTestProcessEnv runs a binary with extra environment variables for the
-// lifetime of the test and returns a function that stops it early.
-func startTestProcessEnv(t *testing.T, env []string, binary string, args ...string) func() {
+// lifetime of the test. It returns a function that stops the process early and a
+// channel that closes when the process has exited.
+func startTestProcessEnv(t *testing.T, env []string, binary string, args ...string) (func(), <-chan struct{}) {
 	t.Helper()
 	logPath := filepath.Join(t.TempDir(), binary+".log")
 	logFile, err := os.Create(logPath)
@@ -83,7 +89,11 @@ func startTestProcessEnv(t *testing.T, env []string, binary string, args ...stri
 	cmd.SetStderr(logFile)
 	cmd.SetEnv(append(utils.BaseTestEnv(), env...))
 	require.NoError(t, cmd.Start())
-	go func() { _ = cmd.Wait() }()
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
 	stopped := false
 	stop := func() {
 		if stopped {
@@ -102,14 +112,83 @@ func startTestProcessEnv(t *testing.T, env []string, binary string, args ...stri
 			t.Logf("%s log:\n%s", binary, data)
 		}
 	})
-	return stop
+	return stop, exited
+}
+
+// externalSystemIdentifier reads the external database's system identifier.
+func externalSystemIdentifier(t *testing.T, port int) string {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, externalDSN(port))
+	require.NoError(t, err)
+	defer conn.Close(ctx)
+	var sysID string
+	require.NoError(t, conn.QueryRow(ctx, "SELECT system_identifier::text FROM pg_control_system()").Scan(&sysID))
+	return sysID
+}
+
+// seedBackingConnection inserts a connection row on the managed default
+// primary, creating the prototype tables first.
+func seedBackingConnection(t *testing.T, s *ShardSetup, name, url, expectedSystemIdentifier string) {
+	t.Helper()
+	ctx := t.Context()
+	conn, err := pgx.Connect(ctx, fmt.Sprintf("host=127.0.0.1 port=%d user=postgres password=%s dbname=postgres sslmode=disable",
+		s.PrimaryPgctld(t).PgPort, TestPostgresPassword))
+	require.NoError(t, err)
+	defer conn.Close(context.Background())
+	require.NoError(t, protometadata.EnsureSchema(ctx, func(ctx context.Context, sql string) error {
+		_, err := conn.Exec(ctx, sql)
+		return err
+	}))
+	_, err = conn.Exec(ctx, "INSERT INTO multigres.proto_connections (name, dsn, expected_system_identifier) VALUES ($1, $2, $3)",
+		name, url, expectedSystemIdentifier)
+	require.NoError(t, err)
+}
+
+// unmanagedPooler is a running unmanaged multipooler process.
+type unmanagedPooler struct {
+	name     string
+	grpcPort int
+	stop     func()
+	exited   <-chan struct{}
+}
+
+func startUnmanagedPooler(t *testing.T, s *ShardSetup, name, database, connection string) *unmanagedPooler {
+	t.Helper()
+	grpcPort := utils.GetFreePort(t)
+	stop, exited := startTestProcessEnv(t, nil, "multipooler",
+		"--backing-connection="+connection,
+		"--database="+database, "--table-group=migrateTG", "--shard=0-inf",
+		"--cell="+s.CellName, "--service-id="+name, "--hostname=localhost",
+		"--grpc-port="+strconv.Itoa(grpcPort), "--http-port="+strconv.Itoa(utils.GetFreePort(t)),
+		"--service-map=grpc-pooler,grpc-poolermanager,grpc-consensus",
+		"--topo-global-server-addresses="+s.EtcdClientAddr, "--topo-global-root=/multigres/global",
+	)
+	return &unmanagedPooler{name: name, grpcPort: grpcPort, stop: stop, exited: exited}
+}
+
+// firstHealth reads one message from the pooler's health stream.
+func (p *unmanagedPooler) firstHealth(ctx context.Context) (*multipoolerservicepb.StreamPoolerHealthResponse, error) {
+	conn, err := grpc.NewClient(fmt.Sprintf("127.0.0.1:%d", p.grpcPort), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	stream, err := multipoolerservicepb.NewMultipoolerServiceClient(conn).StreamPoolerHealth(ctx, &multipoolerservicepb.StreamPoolerHealthRequest{})
+	if err != nil {
+		return nil, err
+	}
+	return stream.Recv()
 }
 
 // TestUnmanagedPoolerServesExternalPostgres starts an unmanaged pooler against
-// a plain external PostgreSQL next to a managed cohort and checks the W1
-// contract: it registers as UNMANAGED, serves queries through the existing pool
-// path, leaves no multigres objects on the external database, rejects
-// management RPCs, and leaves the external PostgreSQL running when it stops.
+// a plain external PostgreSQL next to a managed cohort. It bootstraps only from
+// --backing-connection plus the connection row on the default primary, serves
+// queries, registers as UNMANAGED, leaves no multigres objects on the external
+// database, rejects management RPCs, and leaves the external PostgreSQL running
+// when it stops.
 func TestUnmanagedPoolerServesExternalPostgres(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires built binaries, etcd and PostgreSQL")
@@ -117,26 +196,15 @@ func TestUnmanagedPoolerServesExternalPostgres(t *testing.T) {
 	ctx := t.Context()
 	s := getSharedSetup(t)
 	extPort := startExternalPostgres(t)
+	seedBackingConnection(t, s, "w2-serves", externalDSN(extPort), externalSystemIdentifier(t, extPort))
 
-	grpcPort := utils.GetFreePort(t)
-	const name = "unmanaged-w1"
-	stop := startTestProcessEnv(t,
-		[]string{"MULTIPOOLER_PROTOTYPE_BACKING_URL=" + externalDSN(extPort)},
-		"multipooler",
-		"--backing-connection=src",
-		"--database=postgres", "--table-group=migrateTG", "--shard=0-inf",
-		"--cell="+s.CellName, "--service-id="+name, "--hostname=localhost",
-		"--grpc-port="+strconv.Itoa(grpcPort), "--http-port="+strconv.Itoa(utils.GetFreePort(t)),
-		"--service-map=grpc-pooler,grpc-poolermanager,grpc-consensus",
-		"--topo-global-server-addresses="+s.EtcdClientAddr, "--topo-global-root=/multigres/global",
-	)
+	const name = "unmanaged-serves"
+	p := startUnmanagedPooler(t, s, name, "postgres", "w2-serves")
 
-	client, err := NewMultipoolerClient(grpcPort)
+	client, err := NewMultipoolerClient(p.grpcPort)
 	require.NoError(t, err)
 	defer client.Close()
 
-	// The pooler reports itself serving once it is up. Until the admission
-	// work lands it opens unconditionally.
 	require.Eventually(t, func() bool {
 		readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
@@ -149,19 +217,23 @@ func TestUnmanagedPoolerServesExternalPostgres(t *testing.T) {
 	require.Len(t, res.Rows, 1)
 	require.Equal(t, strconv.Itoa(extPort), string(res.Rows[0].Values[0]), "query must reach the external database")
 
-	// Registered as UNMANAGED in topology.
+	health, err := p.firstHealth(ctx)
+	require.NoError(t, err)
+	require.True(t, health.GetBackendReady())
+	require.Equal(t, clustermetadatapb.PoolerServingStatus_SERVING, health.GetServingStatus())
+
 	id := &clustermetadatapb.ID{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: s.CellName, Name: name}
 	require.Eventually(t, func() bool {
 		rec, err := s.TopoServer.GetMultipooler(ctx, id)
-		return err == nil && rec.ManagementMode == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
+		return err == nil && rec.ManagementMode == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED &&
+			rec.ServingStatus == clustermetadatapb.PoolerServingStatus_SERVING
 	}, 30*time.Second, 200*time.Millisecond)
 
 	// Management and consensus RPCs are rejected explicitly.
 	_, err = client.Manager.Status(ctx, &multipoolermanagerdata.StatusRequest{})
 	require.ErrorContains(t, err, "not supported on an unmanaged pooler")
 
-	// Nothing was created on the external database: no multigres schema, no
-	// sidecar heartbeat table.
+	// Nothing was created on the external database.
 	ext, err := pgx.Connect(ctx, externalDSN(extPort))
 	require.NoError(t, err)
 	defer ext.Close(context.Background())
@@ -169,10 +241,68 @@ func TestUnmanagedPoolerServesExternalPostgres(t *testing.T) {
 	require.NoError(t, ext.QueryRow(ctx, "SELECT count(*) FROM pg_namespace WHERE nspname = 'multigres'").Scan(&schemas))
 	require.Zero(t, schemas, "unmanaged pooler must not create multigres objects on the external database")
 
-	// The managed cohort never saw it: its primary is unchanged.
-	require.NotNil(t, s.GetPrimary(t))
-
-	// Stopping the pooler leaves the external PostgreSQL running.
-	stop()
+	p.stop()
 	require.NoError(t, ext.Ping(ctx), "external PostgreSQL must keep running after the pooler stops")
+}
+
+// TestUnmanagedPoolerRefusesIdentityMismatch points the connection row at an
+// endpoint that is reachable and writable but is not the database the row names.
+// The pooler must come up and stay closed.
+func TestUnmanagedPoolerRefusesIdentityMismatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires built binaries, etcd and PostgreSQL")
+	}
+	ctx := t.Context()
+	s := getSharedSetup(t)
+	extPort := startExternalPostgres(t)
+	seedBackingConnection(t, s, "w2-mismatch", externalDSN(extPort), "1234567890")
+
+	p := startUnmanagedPooler(t, s, "unmanaged-mismatch", "postgres", "w2-mismatch")
+
+	// The process is up and reports a closed, not-ready backend.
+	require.Eventually(t, func() bool {
+		health, err := p.firstHealth(ctx)
+		return err == nil && health.GetServingStatus() == clustermetadatapb.PoolerServingStatus_DISABLED && !health.GetBackendReady()
+	}, 60*time.Second, 200*time.Millisecond, "pooler should start closed")
+
+	// And it never opens.
+	testpoll.Never(t, func() bool {
+		health, err := p.firstHealth(ctx)
+		return err == nil && (health.GetBackendReady() || health.GetServingStatus() == clustermetadatapb.PoolerServingStatus_SERVING)
+	}, 5*time.Second, 250*time.Millisecond)
+
+	client, err := NewMultipoolerClient(p.grpcPort)
+	require.NoError(t, err)
+	defer client.Close()
+	_, err = client.Pooler.ExecuteQuery(ctx, "SELECT 1", 1)
+	require.Error(t, err, "a pooler that fails identity validation must reject queries")
+}
+
+// TestUnmanagedPoolerStaysClosedWithoutDefaultPrimary starts a pooler for a
+// database that has no default primary. Bootstrap cannot read its connection, so
+// the process gives up without ever serving, leaving only a DISABLED topology
+// entry.
+func TestUnmanagedPoolerStaysClosedWithoutDefaultPrimary(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires built binaries, etcd and PostgreSQL")
+	}
+	ctx := t.Context()
+	s := getSharedSetup(t)
+	extPort := startExternalPostgres(t)
+	seedBackingConnection(t, s, "w2-nodp", externalDSN(extPort), externalSystemIdentifier(t, extPort))
+
+	const name = "unmanaged-nodp"
+	p := startUnmanagedPooler(t, s, name, "nodb", "w2-nodp")
+
+	select {
+	case <-p.exited:
+	case <-time.After(90 * time.Second):
+		t.Fatal("pooler without a default primary should give up and exit")
+	}
+
+	id := &clustermetadatapb.ID{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: s.CellName, Name: name}
+	rec, err := s.TopoServer.GetMultipooler(ctx, id)
+	require.NoError(t, err, "it registers before reading metadata")
+	require.Equal(t, clustermetadatapb.PoolerServingStatus_DISABLED, rec.ServingStatus)
+	require.Equal(t, clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED, rec.ManagementMode)
 }
