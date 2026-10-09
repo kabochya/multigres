@@ -18,20 +18,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"sync"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/multigres/multigres/go/common/constants"
 	"github.com/multigres/multigres/go/common/metadataclient"
 	"github.com/multigres/multigres/go/common/mterrors"
 	clustermetadatapb "github.com/multigres/multigres/go/pb/clustermetadata"
 	mtrpcpb "github.com/multigres/multigres/go/pb/mtrpc"
 	multipoolerservicepb "github.com/multigres/multigres/go/pb/multipoolerservice"
-	"github.com/multigres/multigres/go/services/multipooler/internal/executor"
 	"github.com/multigres/multigres/go/services/multipooler/internal/poolerserver"
 	"github.com/multigres/multigres/go/services/multipooler/internal/servingstate"
 )
@@ -392,10 +390,16 @@ func (pm *MultipoolerManager) readTablegroupServing(ctx context.Context) (*multi
 	return row, err
 }
 
+// servingStore returns the durable store of serving state on this pooler, which
+// must be the default primary.
+//
+// PROTOTYPE STUB: the prototype metadata tables.
+func (pm *MultipoolerManager) servingStore() servingStore {
+	return sqlServingStore{query: pm.adminQueryArgs}
+}
+
 // GetServingState returns the authoritative routing and admission metadata. Only
 // the default primary serves it.
-//
-// PROTOTYPE STUB: reads the prototype metadata tables.
 func (pm *MultipoolerManager) GetServingState(ctx context.Context, req *multipoolerservicepb.GetServingStateRequest) (*multipoolerservicepb.GetServingStateResponse, error) {
 	if err := pm.requireDefaultPrimary(req.GetDatabase()); err != nil {
 		return nil, err
@@ -403,50 +407,66 @@ func (pm *MultipoolerManager) GetServingState(ctx context.Context, req *multipoo
 	if err := pm.ensureMetadataSchema(ctx); err != nil {
 		return nil, mterrors.Wrap(err, "metadata unavailable")
 	}
+	store := pm.servingStore()
 	resp := &multipoolerservicepb.GetServingStateResponse{}
 	for _, name := range req.GetTablegroups() {
-		result, err := pm.adminQueryArgs(ctx,
-			"SELECT COALESCE(connection, ''), admission_state, request_id, extract(epoch FROM updated_at)::text FROM multigres.proto_tablegroup_serving WHERE database = $1 AND tablegroup = $2",
-			req.GetDatabase(), name)
-		if err != nil {
-			return nil, mterrors.Wrap(err, "read tablegroup serving state")
-		}
-		if len(result.Rows) == 0 {
-			return nil, mterrors.Errorf(mtrpcpb.Code_NOT_FOUND, "tablegroup %q has no serving row", name)
-		}
-		var connection, state, requestID, epoch string
-		if err := executor.ScanSingleRow(result, &connection, &state, &requestID, &epoch); err != nil {
-			return nil, errors.Join(errors.New("decode tablegroup serving state"), err)
-		}
-		admissionState, err := parseAdmissionState(state)
+		row, err := store.GetRow(ctx, req.GetDatabase(), name)
 		if err != nil {
 			return nil, err
 		}
-		row := &multipoolerservicepb.TablegroupServingState{
-			Tablegroup:        name,
-			BackingConnection: connection,
-			AdmissionState:    admissionState,
-			RequestId:         requestID,
-		}
-		if secs, err := strconv.ParseFloat(epoch, 64); err == nil {
-			row.UpdatedAt = timestamppb.New(time.Unix(0, int64(secs*float64(time.Second))))
-		}
-		resp.Tablegroups = append(resp.Tablegroups, row)
+		resp.Tablegroups = append(resp.Tablegroups, row.proto(name))
 	}
-
-	result, err := pm.adminQueryArgs(ctx, "SELECT app_tablegroup, version FROM multigres.proto_routing WHERE database = $1", req.GetDatabase())
+	app, version, _, err := store.GetRouting(ctx, req.GetDatabase())
 	if err != nil {
-		return nil, mterrors.Wrap(err, "read routing")
+		return nil, err
 	}
-	if len(result.Rows) > 0 {
-		var app string
-		var version int64
-		if err := executor.ScanSingleRow(result, &app, &version); err != nil {
-			return nil, errors.Join(errors.New("decode routing"), err)
-		}
-		resp.AppTablegroup, resp.RoutingVersion = app, version
-	}
+	resp.AppTablegroup, resp.RoutingVersion = app, version
 	return resp, nil
+}
+
+func (pm *MultipoolerManager) newAdmissionCoordinator() *admissionCoordinator {
+	transport := pm.config.DefaultPrimaryTransport
+	if transport == nil {
+		transport = grpc.WithTransportCredentials(insecure.NewCredentials())
+	}
+	database := pm.record.ShardKey().GetDatabase()
+	return &admissionCoordinator{
+		store:     pm.servingStore(),
+		members:   topologyMembership{ts: pm.config.TopoClient},
+		refresher: grpcRefresher{transport: transport},
+		logger:    pm.logger,
+		isLeader:  func() error { return pm.requireDefaultPrimary(database) },
+	}
+}
+
+// UpdatePoolerAdmission fences or unfences a tablegroup. Only the default primary
+// serves it.
+func (pm *MultipoolerManager) UpdatePoolerAdmission(ctx context.Context, req *multipoolerservicepb.UpdatePoolerAdmissionRequest) (*multipoolerservicepb.UpdatePoolerAdmissionResponse, error) {
+	if err := pm.requireDefaultPrimary(req.GetDatabase()); err != nil {
+		return nil, err
+	}
+	if req.GetTablegroup() == constants.DefaultTableGroup {
+		return nil, mterrors.New(mtrpcpb.Code_INVALID_ARGUMENT, "the default tablegroup holds cluster metadata and cannot be fenced")
+	}
+	if pm.config == nil || pm.config.TopoClient == nil {
+		return nil, mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "pooler discovery unavailable")
+	}
+	if err := pm.ensureMetadataSchema(ctx); err != nil {
+		return nil, mterrors.Wrap(err, "metadata unavailable")
+	}
+	return pm.newAdmissionCoordinator().UpdatePoolerAdmission(ctx, req)
+}
+
+// UpdateMigrationRouting moves application traffic between two fenced
+// tablegroups. Only the default primary serves it.
+func (pm *MultipoolerManager) UpdateMigrationRouting(ctx context.Context, req *multipoolerservicepb.UpdateMigrationRoutingRequest) (*multipoolerservicepb.UpdateMigrationRoutingResponse, error) {
+	if err := pm.requireDefaultPrimary(req.GetDatabase()); err != nil {
+		return nil, err
+	}
+	if err := pm.ensureMetadataSchema(ctx); err != nil {
+		return nil, mterrors.Wrap(err, "metadata unavailable")
+	}
+	return pm.newAdmissionCoordinator().UpdateMigrationRouting(ctx, req)
 }
 
 func parseAdmissionState(s string) (multipoolerservicepb.AdmissionState, error) {

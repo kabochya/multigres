@@ -47,6 +47,8 @@ var Statements = []string{
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (database, tablegroup)
 )`,
+	// Recent superseded request ids, so a delayed retry is recognized.
+	`ALTER TABLE multigres.proto_tablegroup_serving ADD COLUMN IF NOT EXISTS request_history TEXT[] NOT NULL DEFAULT '{}'`,
 	// Whole-database application tablegroup pointer that gateways poll.
 	`CREATE TABLE IF NOT EXISTS multigres.proto_routing (
   database TEXT PRIMARY KEY,
