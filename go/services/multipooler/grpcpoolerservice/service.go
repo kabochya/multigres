@@ -115,9 +115,11 @@ func (s *poolerService) StreamExecute(req *multipoolerpb.StreamExecuteRequest, s
 	// StreamExecute is the only query handler that can create a new reservation
 	// (ReservationOptions reasons with no ReservedConnectionId). Classify it so a
 	// graceful drain keeps serving single queries while rejecting new transactions.
-	if err := s.pooler.StartRequest(req.Target, admissionKind(req.Options.GetReservedConnectionId(), req.GetReservationOptions().GetReasons() != 0)); err != nil {
-		return mterrors.ToGRPC(err)
+	release, admissionErr := s.pooler.BeginRequest(req.Target, admissionKind(req.Options.GetReservedConnectionId(), req.GetReservationOptions().GetReasons() != 0))
+	if admissionErr != nil {
+		return mterrors.ToGRPC(admissionErr)
 	}
+	defer release()
 
 	// Validate reservation reasons at the gRPC trust boundary.
 	if reasons := req.GetReservationOptions().GetReasons(); reasons != 0 {
@@ -238,9 +240,11 @@ func (s *poolerService) streamExecuteTo(
 func (s *poolerService) ExecuteQuery(ctx context.Context, req *multipoolerpb.ExecuteQueryRequest) (*multipoolerpb.ExecuteQueryResponse, error) {
 	annotateCaller(ctx, req.GetCallerId())
 	// No ReservationOptions: an existing reserved connection, otherwise a single query.
-	if err := s.pooler.StartRequest(req.Target, admissionKind(req.Options.GetReservedConnectionId(), false)); err != nil {
-		return nil, mterrors.ToGRPC(err)
+	release, admissionErr := s.pooler.BeginRequest(req.Target, admissionKind(req.Options.GetReservedConnectionId(), false))
+	if admissionErr != nil {
+		return nil, mterrors.ToGRPC(admissionErr)
 	}
+	defer release()
 
 	// Get the executor from the pooler
 	executor, err := s.pooler.Executor()
@@ -368,9 +372,11 @@ func (s *poolerService) GetAuthCredentials(ctx context.Context, req *multipooler
 func (s *poolerService) Describe(ctx context.Context, req *multipoolerpb.DescribeRequest) (*multipoolerpb.DescribeResponse, error) {
 	annotateCaller(ctx, req.GetCallerId())
 	// No ReservationOptions: an existing reserved connection, otherwise a single query.
-	if err := s.pooler.StartRequest(req.Target, admissionKind(req.Options.GetReservedConnectionId(), false)); err != nil {
-		return nil, mterrors.ToGRPC(err)
+	release, admissionErr := s.pooler.BeginRequest(req.Target, admissionKind(req.Options.GetReservedConnectionId(), false))
+	if admissionErr != nil {
+		return nil, mterrors.ToGRPC(admissionErr)
 	}
+	defer release()
 
 	// Get the executor from the pooler
 	executor, err := s.pooler.Executor()
@@ -405,9 +411,11 @@ func (s *poolerService) PortalStreamExecute(req *multipoolerpb.PortalStreamExecu
 	// or is already on a reserved connection — this mirrors the executor's own
 	// reserve decision. Only a fetch-all portal with no reasons runs on a pooled
 	// connection as a single query and may be served during stage 1.
-	if err := s.pooler.StartRequest(req.Target, admissionKind(req.Options.GetReservedConnectionId(), portalReserves(req.Options, req.GetReservationOptions()))); err != nil {
-		return mterrors.ToGRPC(err)
+	release, admissionErr := s.pooler.BeginRequest(req.Target, admissionKind(req.Options.GetReservedConnectionId(), portalReserves(req.Options, req.GetReservationOptions())))
+	if admissionErr != nil {
+		return mterrors.ToGRPC(admissionErr)
 	}
+	defer release()
 
 	// Validate reservation reasons at the gRPC trust boundary (mirrors StreamExecute).
 	if reasons := req.GetReservationOptions().GetReasons(); reasons != 0 {
@@ -549,9 +557,11 @@ func (s *poolerService) CopyBidiExecute(stream multipoolerpb.MultipoolerService_
 	// reservation reasons in the request can be 0 for an autocommit COPY that
 	// still reserves). So a COPY without an existing reserved connection is always
 	// a new reservation, never a single query.
-	if err := s.pooler.StartRequest(req.Target, admissionKind(req.Options.GetReservedConnectionId(), true)); err != nil {
-		return mterrors.ToGRPC(err)
+	release, admissionErr := s.pooler.BeginRequest(req.Target, admissionKind(req.Options.GetReservedConnectionId(), true))
+	if admissionErr != nil {
+		return mterrors.ToGRPC(admissionErr)
 	}
+	defer release()
 
 	// Get the executor from the pooler
 	exec, err := s.pooler.Executor()
@@ -884,9 +894,11 @@ func (s *poolerService) copyBidiExecuteToStdout(
 func (s *poolerService) ConcludeTransaction(ctx context.Context, req *multipoolerpb.ConcludeTransactionRequest) (*multipoolerpb.ConcludeTransactionResponse, error) {
 	annotateCaller(ctx, req.GetCallerId())
 	// Always on an existing reserved connection — admitted regardless of drain.
-	if err := s.pooler.StartRequest(req.Target, poolerserver.RequestExistingReserved); err != nil {
-		return nil, mterrors.ToGRPC(err)
+	release, admissionErr := s.pooler.BeginRequest(req.Target, poolerserver.RequestExistingReserved)
+	if admissionErr != nil {
+		return nil, mterrors.ToGRPC(admissionErr)
 	}
+	defer release()
 
 	// Get the executor from the pooler
 	executor, err := s.pooler.Executor()
@@ -948,9 +960,11 @@ func withReservedStateDetail(grpcErr error, state *query.ReservedState) error {
 func (s *poolerService) DiscardTempTables(ctx context.Context, req *multipoolerpb.DiscardTempTablesRequest) (*multipoolerpb.DiscardTempTablesResponse, error) {
 	annotateCaller(ctx, req.GetCallerId())
 	// Always on an existing reserved connection — admitted regardless of drain.
-	if err := s.pooler.StartRequest(req.Target, poolerserver.RequestExistingReserved); err != nil {
-		return nil, mterrors.ToGRPC(err)
+	release, admissionErr := s.pooler.BeginRequest(req.Target, poolerserver.RequestExistingReserved)
+	if admissionErr != nil {
+		return nil, mterrors.ToGRPC(admissionErr)
 	}
+	defer release()
 
 	// Get the executor from the pooler
 	executor, err := s.pooler.Executor()
@@ -973,9 +987,11 @@ func (s *poolerService) DiscardTempTables(ctx context.Context, req *multipoolerp
 func (s *poolerService) ReleaseReservedConnection(ctx context.Context, req *multipoolerpb.ReleaseReservedConnectionRequest) (*multipoolerpb.ReleaseReservedConnectionResponse, error) {
 	annotateCaller(ctx, req.GetCallerId())
 	// Always on an existing reserved connection — admitted regardless of drain.
-	if err := s.pooler.StartRequest(req.Target, poolerserver.RequestExistingReserved); err != nil {
-		return nil, mterrors.ToGRPC(err)
+	release, admissionErr := s.pooler.BeginRequest(req.Target, poolerserver.RequestExistingReserved)
+	if admissionErr != nil {
+		return nil, mterrors.ToGRPC(admissionErr)
 	}
+	defer release()
 
 	executor, err := s.pooler.Executor()
 	if err != nil {

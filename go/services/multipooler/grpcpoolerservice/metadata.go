@@ -34,3 +34,31 @@ func (s *poolerService) GetBackingConnection(ctx context.Context, req *multipool
 	}
 	return resp, nil
 }
+
+// GetServingState returns the authoritative routing and admission metadata. Only
+// the default primary serves it.
+func (s *poolerService) GetServingState(ctx context.Context, req *multipoolerpb.GetServingStateRequest) (*multipoolerpb.GetServingStateResponse, error) {
+	p, err := s.pooler.MetadataProvider()
+	if err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
+	resp, err := p.GetServingState(ctx, req)
+	if err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
+	return resp, nil
+}
+
+// RefreshAdmission re-reads and applies this pooler's application admission. It
+// bypasses the application gate by construction: it is not a query-path request.
+func (s *poolerService) RefreshAdmission(ctx context.Context, req *multipoolerpb.RefreshAdmissionRequest) (*multipoolerpb.RefreshAdmissionResponse, error) {
+	p, err := s.pooler.AdmissionProvider()
+	if err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
+	resp, err := p.RefreshAdmission(ctx, req)
+	if err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
+	return resp, nil
+}

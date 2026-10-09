@@ -78,6 +78,22 @@ type QueryPoolerServer struct {
 	// before force-closing reserved connections. Configured via --connpool-drain-grace-period.
 	gracePeriod time.Duration
 
+	// Application admission gate; see application_gate.go. Guarded by mu.
+	//
+	// applicationBlocked closes the gate to new application work, independent of
+	// serving status and backend health: only the admission actuator may reopen
+	// it. admissionControlled is set once, before any work, on poolers whose
+	// application admission is decided by the persisted admission state; it makes
+	// every role or serving-status change close the gate until that state is
+	// re-read. admissionGeneration orders closes against opens so a read begun
+	// before a change cannot open the gate afterwards. activeRequests counts
+	// admitted requests that have not finished.
+	applicationBlocked  bool
+	admissionControlled bool
+	admissionGeneration uint64
+	activeRequests      int
+	requestsChanged     chan struct{}
+
 	// stateChanged is closed and re-created on every state transition.
 	// AwaitStateChange blocks on this channel to be notified when the
 	// pooler's type and serving status are updated.
@@ -191,6 +207,14 @@ func (s *QueryPoolerServer) ReplicationMetrics() *replication.Metrics {
 func (s *QueryPoolerServer) OnStateChange(ctx context.Context, state servingstate.State) error {
 	routingRole := state.Routing.Role
 	servingStatus := state.ServingStatus
+	s.mu.Lock()
+	if s.admissionControlled && (s.routingRole != routingRole || s.servingStatus != servingStatus) {
+		// A role or serving change invalidates the admission decision. Close
+		// synchronously, before the new state is visible to any request.
+		s.applicationBlocked = true
+		s.admissionGeneration++
+	}
+	s.mu.Unlock()
 	if s.executor != nil {
 		s.executor.SetBackendVpidTrackingWritable(routingRole.Writable())
 	}
@@ -303,7 +327,14 @@ func (s *QueryPoolerServer) setDrainPhase(p drainPhase) {
 func (s *QueryPoolerServer) StartRequest(target *query.Target, kind RequestKind) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.startRequestLocked(target, kind, false /* gated */)
+}
 
+// startRequestLocked is the admission decision. gated selects whether the
+// application admission gate applies: application query work is gated, while
+// control and metadata requests (for example credential lookups) are not.
+// Caller must hold s.mu.
+func (s *QueryPoolerServer) startRequestLocked(target *query.Target, kind RequestKind, gated bool) error {
 	existingReserved := kind == RequestExistingReserved
 	if err := s.checkTargetLocked(target, existingReserved); err != nil {
 		return err
@@ -319,6 +350,12 @@ func (s *QueryPoolerServer) StartRequest(target *query.Target, kind RequestKind)
 	// neither buffered nor retryable for a transaction that no longer exists.
 	if existingReserved {
 		return nil
+	}
+
+	// A closed application gate rejects new application work with the same
+	// bufferable error as a drain, so gateways hold the request and retry.
+	if gated && s.applicationBlocked {
+		return mterrors.MTF01.New()
 	}
 
 	switch s.drainPhase {
