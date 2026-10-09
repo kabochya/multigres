@@ -3495,8 +3495,10 @@ type RefreshAdmissionResponse struct {
 	PoolerId *clustermetadata.ID `protobuf:"bytes,1,opt,name=pooler_id,json=poolerId,proto3" json:"pooler_id,omitempty"`
 	// process_incarnation identifies the responding process.
 	ProcessIncarnation string `protobuf:"bytes,2,opt,name=process_incarnation,json=processIncarnation,proto3" json:"process_incarnation,omitempty"`
-	// applied_state is the state the pooler now enforces. For FENCING it is only
-	// returned once the gate is closed and no application work remains.
+	// applied_state is the settled state the pooler now enforces: FENCED once the
+	// gate is closed and no application work remains (the answer to a FENCING or
+	// FENCED request), UNFENCED once it admits application work (the answer to an
+	// UNFENCING or UNFENCED request).
 	AppliedState AdmissionState `protobuf:"varint,3,opt,name=applied_state,json=appliedState,proto3,enum=multipoolerservice.AdmissionState" json:"applied_state,omitempty"`
 	// request_id echoes the request the pooler applied.
 	RequestId     string `protobuf:"bytes,4,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`

@@ -141,6 +141,11 @@ func (s *Server) GetServingState(_ context.Context, req *multipoolerservicepb.Ge
 	defer s.mu.Unlock()
 	d, ok := s.databases[req.GetDatabase()]
 	if !ok {
+		// Like the real default primary, a database with no routing row reads as
+		// an empty pointer at version 0; asking for its tablegroups is NOT_FOUND.
+		if len(req.GetTablegroups()) == 0 {
+			return &multipoolerservicepb.GetServingStateResponse{}, nil
+		}
 		return nil, status.Error(codes.NotFound, "database has no serving state")
 	}
 	resp := &multipoolerservicepb.GetServingStateResponse{AppTablegroup: d.app, RoutingVersion: d.routingVer}

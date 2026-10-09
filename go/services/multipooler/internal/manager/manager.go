@@ -123,10 +123,13 @@ type MultipoolerManager struct {
 	// metadataSchema tracks whether the prototype metadata tables are known to
 	// exist; PROTOTYPE STUB (see proto_metadata.go).
 	metadataSchema metadataSchemaReady
-	topoLoaded     bool
-	ctx            context.Context
-	cancel         context.CancelFunc
-	loadTimeout    time.Duration
+
+	// admission is the local application admission state; see admission.go.
+	admission   admissionRuntime
+	topoLoaded  bool
+	ctx         context.Context
+	cancel      context.CancelFunc
+	loadTimeout time.Duration
 
 	// shutdownCtx is cancelled at the end of GracefulShutdown to signal
 	// long-lived subscribers (currently the health-stream gRPC handlers via
@@ -462,6 +465,14 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 		if err != nil {
 			cancel()
 			return nil, err
+		}
+	}
+
+	// A controlled pooler opens only after it has read its admission state, so its
+	// application gate is closed from the moment the query server exists.
+	if unmanaged || config.AdmissionControl {
+		if gate, ok := pm.qsc.(poolerserver.ApplicationGate); ok {
+			gate.EnableAdmissionControl()
 		}
 	}
 

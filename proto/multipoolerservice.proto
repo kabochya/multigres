@@ -933,8 +933,10 @@ message RefreshAdmissionResponse {
   // process_incarnation identifies the responding process.
   string process_incarnation = 2;
 
-  // applied_state is the state the pooler now enforces. For FENCING it is only
-  // returned once the gate is closed and no application work remains.
+  // applied_state is the settled state the pooler now enforces: FENCED once the
+  // gate is closed and no application work remains (the answer to a FENCING or
+  // FENCED request), UNFENCED once it admits application work (the answer to an
+  // UNFENCING or UNFENCED request).
   AdmissionState applied_state = 3;
 
   // request_id echoes the request the pooler applied.
