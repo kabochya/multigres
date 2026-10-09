@@ -78,6 +78,12 @@ func (s *memStore) CompareAndSet(_ context.Context, _, tg string, prev multipool
 	if r == nil || r.state != prev || r.requestID != prevID {
 		return false, nil
 	}
+	if r.requestID != nextID {
+		r.history = append(r.history, r.requestID)
+		if len(r.history) > requestHistoryLimit {
+			r.history = r.history[len(r.history)-requestHistoryLimit:]
+		}
+	}
 	r.state, r.requestID, r.updatedAt = next, nextID, time.Now()
 	if s.uncertainNext {
 		s.uncertainNext = false
@@ -308,6 +314,30 @@ func TestCoordinatorPoolerThatAcknowledgedThenVanishedStillCounts(t *testing.T) 
 	require.NoError(t, err)
 }
 
+// TestCoordinatorLateJoinerThatVanishesStaysRequired: a pooler first seen in the
+// closing snapshot is required from then on, even if the next enumeration no
+// longer lists it, so it cannot slip out unacknowledged.
+func TestCoordinatorLateJoinerThatVanishesStaysRequired(t *testing.T) {
+	h := newCoordHarness(t)
+	h.members.onSnapshot = func(call int) {
+		switch call {
+		case 2: // the closing snapshot of the first round lists a new pooler
+			h.members.set(ref("ext-1", "i1"), ref("ext-2", "i1"), ref("ext-3", "i1"))
+		case 3: // and the next enumeration no longer does
+			h.members.set(ref("ext-1", "i1"), ref("ext-2", "i1"))
+		}
+	}
+	h.refresh.behave = func(p poolerRef, req *multipoolerservicepb.RefreshAdmissionRequest, _ int) (*multipoolerservicepb.RefreshAdmissionResponse, error) {
+		if p.name() == "ext-3" {
+			return nil, errors.New("connection refused")
+		}
+		return honestAck(p, req), nil
+	}
+	_, err := h.fence("fence-1")
+	require.Error(t, err)
+	require.Equal(t, fencingState, h.row(t, "migrateTG").state)
+}
+
 func TestCoordinatorPoolerJoiningMidOperationIsIncluded(t *testing.T) {
 	h := newCoordHarness(t)
 	joined := ref("ext-3", "i1")
@@ -371,8 +401,65 @@ func TestCoordinatorSameRequestAfterCompletionIsIdempotent(t *testing.T) {
 	resp, err := h.fence("fence-1")
 	require.NoError(t, err)
 	require.Equal(t, fencedState, resp.State.AdmissionState)
-	require.Equal(t, calls, h.refresh.callsTo("ext-1"), "a repeat asks no one")
+	require.Greater(t, h.refresh.callsTo("ext-1"), calls, "a repeat asks the poolers again")
 	require.Equal(t, updated, h.row(t, "migrateTG").updatedAt, "a repeat rewrites nothing")
+	require.Len(t, resp.Acks, 2)
+}
+
+// TestCoordinatorRepeatOfACompletedOperationVerifiesThePoolers: the repeat is a
+// safety net, so it fails when a pooler no longer holds the state.
+func TestCoordinatorRepeatOfACompletedOperationVerifiesThePoolers(t *testing.T) {
+	h := newCoordHarness(t)
+	_, err := h.fence("fence-1")
+	require.NoError(t, err)
+	h.refresh.behave = func(p poolerRef, req *multipoolerservicepb.RefreshAdmissionRequest, _ int) (*multipoolerservicepb.RefreshAdmissionResponse, error) {
+		if p.name() == "ext-2" {
+			return nil, errors.New("pooler unreachable")
+		}
+		return honestAck(p, req), nil
+	}
+	_, err = h.fence("fence-1")
+	require.Error(t, err)
+	require.Equal(t, fencedState, h.row(t, "migrateTG").state)
+}
+
+// TestCoordinatorDelayedRetryOfASupersededRequestIsRejected: a retry of fence F
+// that arrives after F and the unfence U that followed must not re-fence the
+// serving tablegroup or displace U's request id.
+func TestCoordinatorDelayedRetryOfASupersededRequestIsRejected(t *testing.T) {
+	h := newCoordHarness(t)
+	_, err := h.fence("fence-1")
+	require.NoError(t, err)
+	_, err = h.unfence("unfence-1", "fence-1")
+	require.NoError(t, err)
+
+	_, err = h.fence("fence-1")
+	require.Equal(t, mtrpcpb.Code_FAILED_PRECONDITION, mterrors.Code(err), "%v", err)
+	require.Equal(t, unfencedState, h.row(t, "migrateTG").state)
+	require.Equal(t, "unfence-1", h.row(t, "migrateTG").requestID)
+}
+
+// TestCoordinatorSameRequestRacingItselfSucceedsOnBothCalls: two calls with one
+// request id both fan out; the one that loses the final compare-and-set sees the
+// operation already committed and reports success.
+func TestCoordinatorSameRequestRacingItselfSucceedsOnBothCalls(t *testing.T) {
+	h := newCoordHarness(t)
+	_, err := h.fence("fence-1")
+	require.NoError(t, err)
+	// The row is already FENCED under the same id by the time this call commits.
+	row := h.row(t, "migrateTG")
+	require.Equal(t, fencedState, row.state)
+	h.store.mu.Lock()
+	h.store.rows["migrateTG"].state = fencingState // as the loser saw it when it started
+	h.store.mu.Unlock()
+	h.store.beforeCAS = func() {
+		h.store.mu.Lock()
+		h.store.rows["migrateTG"].state = fencedState // the winner commits first
+		h.store.mu.Unlock()
+	}
+	resp, err := h.fence("fence-1")
+	require.NoError(t, err)
+	require.Equal(t, fencedState, resp.State.AdmissionState)
 }
 
 func TestCoordinatorDelayedUnfenceCannotOverrideNewerFence(t *testing.T) {

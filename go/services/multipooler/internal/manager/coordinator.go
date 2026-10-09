@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -59,6 +60,10 @@ type servingRow struct {
 	state      multipoolerservicepb.AdmissionState
 	requestID  string
 	updatedAt  time.Time
+	// history holds the most recent request ids this row has moved on from,
+	// oldest first, so a delayed retry of an operation that has long since been
+	// superseded is recognized rather than applied again.
+	history []string
 }
 
 func (r *servingRow) proto(tablegroup string) *multipoolerservicepb.TablegroupServingState {
@@ -159,6 +164,13 @@ func planAdmission(row *servingRow, req *multipoolerservicepb.UpdatePoolerAdmiss
 		transitional, terminal = unfencing, unfenced
 	}
 
+	// A retry of an operation that was superseded: applying it again would undo
+	// whatever came after it.
+	if row.requestID != req.GetRequestId() && slices.Contains(row.history, req.GetRequestId()) {
+		return 0, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
+			"request %q already ran and was superseded by %q; use a new request_id", req.GetRequestId(), row.requestID)
+	}
+
 	// A retry of this very operation: finished, or resume the fan-out.
 	if row.requestID == req.GetRequestId() {
 		switch row.state {
@@ -227,8 +239,14 @@ func (c *admissionCoordinator) UpdatePoolerAdmission(ctx context.Context, req *m
 
 	switch plan {
 	case planDone:
-		// Idempotent success. Report the acknowledgments only a fresh run knows.
-		return &multipoolerservicepb.UpdatePoolerAdmissionResponse{State: row.proto(tg)}, nil
+		// Already committed under this request id. Nothing is rewritten, but the
+		// poolers are asked again: a caller that retries a completed operation is
+		// checking that it holds, and a pooler that missed it must not be skipped.
+		acks, err := c.fanOut(ctx, db, tg, target, req.GetRequestId())
+		if err != nil {
+			return nil, err
+		}
+		return &multipoolerservicepb.UpdatePoolerAdmissionResponse{State: row.proto(tg), Acks: acks}, nil
 	case planStart:
 		if err := c.isLeader(); err != nil {
 			return nil, err
@@ -256,13 +274,17 @@ func (c *admissionCoordinator) UpdatePoolerAdmission(ctx context.Context, req *m
 	if err != nil {
 		return nil, mterrors.Wrap(err, "persist admission state; outcome uncertain, re-read with GetServingState")
 	}
-	if !ok {
-		// Another request superseded this one while it was fanning out.
-		return nil, mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "request was superseded by a newer admission decision")
-	}
 	final, err := c.store.GetRow(ctx, db, tg)
 	if err != nil {
 		return nil, err
+	}
+	if !ok {
+		// A concurrent call with the same request id may have committed first.
+		if final.requestID == req.GetRequestId() && final.state == target {
+			return &multipoolerservicepb.UpdatePoolerAdmissionResponse{State: final.proto(tg), Acks: acks}, nil
+		}
+		// Another request superseded this one while it was fanning out.
+		return nil, mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "request was superseded by a newer admission decision")
 	}
 	return &multipoolerservicepb.UpdatePoolerAdmissionResponse{State: final.proto(tg), Acks: acks}, nil
 }
@@ -329,6 +351,8 @@ func (c *admissionCoordinator) fanOut(ctx context.Context, db, tg string, transi
 		for _, p := range fresh {
 			freshKeys[p.key()] = true
 			if _, done := acked[p.key()]; !done {
+				// Required from now on, even if it is gone by the next round.
+				required[p.key()] = p
 				stable = false
 			}
 		}

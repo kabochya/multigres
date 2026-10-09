@@ -16,6 +16,7 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -50,6 +51,9 @@ func stateText(s multipoolerservicepb.AdmissionState) string {
 	return strings.TrimPrefix(s.String(), "ADMISSION_STATE_")
 }
 
+// requestHistoryLimit is how many superseded request ids a row remembers.
+const requestHistoryLimit = 32
+
 // sqlServingStore keeps serving state in the prototype tables on the default
 // primary, through the admin pool.
 type sqlServingStore struct {
@@ -58,7 +62,7 @@ type sqlServingStore struct {
 
 func (s sqlServingStore) GetRow(ctx context.Context, database, tablegroup string) (*servingRow, error) {
 	result, err := s.query(ctx,
-		"SELECT COALESCE(connection, ''), admission_state, request_id, extract(epoch FROM updated_at)::text FROM multigres.proto_tablegroup_serving WHERE database = $1 AND tablegroup = $2",
+		"SELECT COALESCE(connection, ''), admission_state, request_id, extract(epoch FROM updated_at)::text, to_json(request_history)::text FROM multigres.proto_tablegroup_serving WHERE database = $1 AND tablegroup = $2",
 		database, tablegroup)
 	if err != nil {
 		return nil, mterrors.Wrap(err, "read tablegroup serving state")
@@ -66,8 +70,8 @@ func (s sqlServingStore) GetRow(ctx context.Context, database, tablegroup string
 	if len(result.Rows) == 0 {
 		return nil, mterrors.Errorf(mtrpcpb.Code_NOT_FOUND, "tablegroup %q has no serving row", tablegroup)
 	}
-	var connection, state, requestID, epoch string
-	if err := executor.ScanSingleRow(result, &connection, &state, &requestID, &epoch); err != nil {
+	var connection, state, requestID, epoch, history string
+	if err := executor.ScanSingleRow(result, &connection, &state, &requestID, &epoch, &history); err != nil {
 		return nil, errors.Join(errors.New("decode tablegroup serving state"), err)
 	}
 	admissionState, err := parseAdmissionState(state)
@@ -75,6 +79,9 @@ func (s sqlServingStore) GetRow(ctx context.Context, database, tablegroup string
 		return nil, err
 	}
 	row := &servingRow{connection: connection, state: admissionState, requestID: requestID}
+	if err := json.Unmarshal([]byte(history), &row.history); err != nil {
+		return nil, errors.Join(errors.New("decode request history"), err)
+	}
 	if secs, err := strconv.ParseFloat(epoch, 64); err == nil {
 		row.updatedAt = time.Unix(0, int64(secs*float64(time.Second)))
 	}
@@ -83,9 +90,12 @@ func (s sqlServingStore) GetRow(ctx context.Context, database, tablegroup string
 
 func (s sqlServingStore) CompareAndSet(ctx context.Context, database, tablegroup string, prevState multipoolerservicepb.AdmissionState, prevRequestID string, nextState multipoolerservicepb.AdmissionState, nextRequestID string) (bool, error) {
 	result, err := s.query(ctx, `UPDATE multigres.proto_tablegroup_serving
-SET admission_state = $5, request_id = $6, updated_at = now()
+SET admission_state = $5, request_id = $6, updated_at = now(),
+  request_history = CASE WHEN request_id <> $6
+    THEN (array_append(request_history, request_id))[greatest(1, cardinality(request_history) - $7::int + 1):]
+    ELSE request_history END
 WHERE database = $1 AND tablegroup = $2 AND admission_state = $3 AND request_id = $4
-RETURNING 1`, database, tablegroup, stateText(prevState), prevRequestID, stateText(nextState), nextRequestID)
+RETURNING 1`, database, tablegroup, stateText(prevState), prevRequestID, stateText(nextState), nextRequestID, requestHistoryLimit-1)
 	if err != nil {
 		return false, err
 	}
