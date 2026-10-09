@@ -18,6 +18,8 @@ package manager
 import (
 	"time"
 
+	"google.golang.org/grpc"
+
 	"github.com/multigres/multigres/go/common/backup"
 	"github.com/multigres/multigres/go/common/topoclient"
 	"github.com/multigres/multigres/go/services/multipooler/internal/connpoolmanager"
@@ -82,6 +84,26 @@ type Config struct {
 	// fixed consensus status naming this pooler as leader, and the postgres
 	// monitor starts postgres as a primary rather than a standby.
 	StaticLeader bool
+
+	// AdmissionControl makes application admission follow the persisted admission
+	// state of the pooler's tablegroup: the pooler starts closed and opens only
+	// after it has read an UNFENCED state from the default primary. Unmanaged
+	// poolers are always admission controlled.
+	AdmissionControl bool
+
+	// AdmissionDrainTimeout bounds how long a fence waits for application work to
+	// finish before it terminates what remains. Zero selects the default.
+	AdmissionDrainTimeout time.Duration
+
+	// BackingConnectionName is the backing connection an unmanaged pooler fronts.
+	// Empty for managed poolers. It must equal the tablegroup's backing
+	// connection for the pooler to apply that tablegroup's admission state.
+	BackingConnectionName string
+
+	// DefaultPrimaryTransport is the gRPC transport used to reach the default
+	// primary pooler for admission reads. Nil means insecure, which matches the
+	// existing internal gRPC default.
+	DefaultPrimaryTransport grpc.DialOption
 
 	// ExternalBackend is the external PostgreSQL an unmanaged pooler fronts.
 	// Nil for managed poolers. It is the resolved form of --backing-connection.

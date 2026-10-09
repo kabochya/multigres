@@ -90,6 +90,11 @@ func validateUnrecoverableMinAttempts(n int) error {
 
 // Multipooler represents the main multipooler instance with all configuration and state
 type Multipooler struct {
+	// admissionControl makes a managed pooler's application admission follow the
+	// persisted admission state of its tablegroup. Unmanaged poolers always do.
+	admissionControl viperutil.Value[bool]
+	// admissionDrainTimeout bounds how long a fence waits for application work.
+	admissionDrainTimeout viperutil.Value[time.Duration]
 	// backingConnection names the connection an unmanaged pooler fronts. Setting
 	// it makes the pooler unmanaged (see managementModeFor).
 	backingConnection   viperutil.Value[string]
@@ -225,6 +230,16 @@ func NewMultipooler(telemetry *telemetry.Telemetry, opts ...Option) *Multipooler
 			Dynamic:  false,
 			EnvVars:  []string{"MT_SERVICE_ID"},
 		}),
+		admissionControl: viperutil.Configure(reg, "admission-control", viperutil.Options[bool]{
+			Default:  false,
+			FlagName: "admission-control",
+			Dynamic:  false,
+		}),
+		admissionDrainTimeout: viperutil.Configure(reg, "admission-drain-timeout", viperutil.Options[time.Duration]{
+			Default:  30 * time.Second,
+			FlagName: "admission-drain-timeout",
+			Dynamic:  false,
+		}),
 		backingConnection: viperutil.Configure(reg, "backing-connection", viperutil.Options[string]{
 			Default:  "",
 			FlagName: "backing-connection",
@@ -348,6 +363,8 @@ func (mp *Multipooler) consensusEnabled() bool {
 
 // RegisterFlags registers all multipooler flags with the given FlagSet
 func (mp *Multipooler) RegisterFlags(flags *pflag.FlagSet) {
+	flags.Bool("admission-control", mp.admissionControl.Default(), "start closed and open application admission only after reading an UNFENCED admission state for this tablegroup from the default primary; unmanaged poolers always do (prototype)")
+	flags.Duration("admission-drain-timeout", mp.admissionDrainTimeout.Default(), "how long a fence waits for in-flight application work before terminating what remains")
 	flags.String("backing-connection", mp.backingConnection.Default(), "Name of the connection of an external postgres to front. Setting it makes this an unmanaged pooler: no pgctld, backups or consensus")
 	flags.String("pgctld-addr", mp.pgctldAddr.Default(), "Address of pgctld gRPC service")
 	flags.String("cell", mp.cell.Default(), "cell to use")
@@ -373,6 +390,8 @@ func (mp *Multipooler) RegisterFlags(flags *pflag.FlagSet) {
 
 	viperutil.BindFlags(
 		flags,
+		mp.admissionControl,
+		mp.admissionDrainTimeout,
 		mp.backingConnection,
 		mp.pgctldAddr,
 		mp.cell,
@@ -550,6 +569,13 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context) error {
 	}
 	unmanaged := mode == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
 
+	// Transport to the default primary pooler, used to fetch a backing connection
+	// at bootstrap and to read admission state afterwards.
+	defaultPrimaryTransport, err := mp.defaultPrimaryConn.TransportCredentials(logger)
+	if err != nil {
+		return fmt.Errorf("default primary transport: %w", err)
+	}
+
 	// An unmanaged pooler takes its endpoint and credentials from the named
 	// backing connection; a managed one takes the admin password from its own
 	// configuration and manages backup keys.
@@ -569,10 +595,6 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context) error {
 		}
 		// Register as DISABLED/UNMANAGED, find the default primary and fetch
 		// the named connection before anything can serve.
-		transport, err := mp.defaultPrimaryConn.TransportCredentials(logger)
-		if err != nil {
-			return fmt.Errorf("default primary transport: %w", err)
-		}
 		initial := topoclient.NewMultipooler(serviceID, cell, mp.senv.GetHostname())
 		initial.ManagementMode = mode
 		initial.ShardKey = &clustermetadatapb.ShardKey{
@@ -583,7 +605,7 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context) error {
 		initial.PortMap["grpc"] = int32(mp.grpcServer.Port())
 		initial.PortMap["http"] = int32(mp.senv.GetHTTPPort())
 		initial.ServingStatus = clustermetadatapb.PoolerServingStatus_DISABLED
-		backing, err = bootstrapBackingConnection(startCtx, mp.ts, initial, mp.backingConnection.Get(), transport, logger)
+		backing, err = bootstrapBackingConnection(startCtx, mp.ts, initial, mp.backingConnection.Get(), defaultPrimaryTransport, logger)
 		if err != nil {
 			return err
 		}
@@ -714,7 +736,11 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context) error {
 
 		StaticLeader: mp.staticLeader,
 
-		ExternalBackend: externalBackend,
+		AdmissionControl:        mp.admissionControl.Get(),
+		AdmissionDrainTimeout:   mp.admissionDrainTimeout.Get(),
+		BackingConnectionName:   mp.backingConnection.Get(),
+		DefaultPrimaryTransport: defaultPrimaryTransport,
+		ExternalBackend:         externalBackend,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create multipooler: %w", err)
@@ -722,6 +748,8 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context) error {
 
 	// Start the MultipoolerManager
 	poolerManager.Start(mp.senv)
+	// A controlled pooler opens only once it has read its admission state.
+	poolerManager.StartAdmission()
 	// Launch the background backup-health poller (service-level concern, kept
 	// out of manager.Start so RPC unit tests don't run background DB queries).
 	poolerManager.StartBackupHealth()

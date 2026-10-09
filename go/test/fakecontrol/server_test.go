@@ -206,7 +206,11 @@ func TestGetServingStateReadsRoutingOnlyWhenNoTablegroupsRequested(t *testing.T)
 
 	_, err = s.GetServingState(t.Context(), &multipoolerservicepb.GetServingStateRequest{Database: "db", Tablegroups: []string{"nope"}})
 	require.Equal(t, codes.NotFound, code(err))
-	_, err = s.GetServingState(t.Context(), &multipoolerservicepb.GetServingStateRequest{Database: "other"})
+	empty, err := s.GetServingState(t.Context(), &multipoolerservicepb.GetServingStateRequest{Database: "other"})
+	require.NoError(t, err)
+	require.Empty(t, empty.AppTablegroup)
+	require.Zero(t, empty.RoutingVersion)
+	_, err = s.GetServingState(t.Context(), &multipoolerservicepb.GetServingStateRequest{Database: "other", Tablegroups: []string{"x"}})
 	require.Equal(t, codes.NotFound, code(err))
 }
 

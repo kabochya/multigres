@@ -29,6 +29,24 @@ import (
 // tables.
 type MetadataProvider interface {
 	GetBackingConnection(ctx context.Context, req *multipoolerservicepb.GetBackingConnectionRequest) (*multipoolerservicepb.GetBackingConnectionResponse, error)
+	GetServingState(ctx context.Context, req *multipoolerservicepb.GetServingStateRequest) (*multipoolerservicepb.GetServingStateResponse, error)
+}
+
+// AdmissionProvider re-reads and applies a pooler's application admission. Like
+// the metadata calls it is independent of application query admission: a closed
+// gate must never block the call that reopens or confirms it.
+type AdmissionProvider interface {
+	RefreshAdmission(ctx context.Context, req *multipoolerservicepb.RefreshAdmissionRequest) (*multipoolerservicepb.RefreshAdmissionResponse, error)
+}
+
+// AdmissionProvider returns the manager's admission service, or an error when
+// the health provider does not implement one.
+func (s *QueryPoolerServer) AdmissionProvider() (AdmissionProvider, error) {
+	p, ok := s.healthProvider.(AdmissionProvider)
+	if !ok {
+		return nil, errors.New("admission control is unavailable")
+	}
+	return p, nil
 }
 
 // MetadataProvider returns the manager's metadata service, or an error when the

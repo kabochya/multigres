@@ -285,6 +285,9 @@ type drainMockPoolManager struct {
 
 	closeReservedCount int
 	closeReservedCalls int
+	// onCloseReserved, when set, runs when the reserved connections are closed,
+	// letting a test model the closed connections returning to the pool.
+	onCloseReserved func()
 }
 
 func newDrainMockPoolManager() *drainMockPoolManager {
@@ -357,7 +360,11 @@ func (m *drainMockPoolManager) WaitForReservedDrain(ctx context.Context) error {
 func (m *drainMockPoolManager) CloseReservedConnections(ctx context.Context) int {
 	m.mu.Lock()
 	m.closeReservedCalls++
+	hook := m.onCloseReserved
 	m.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return m.closeReservedCount
 }
 
