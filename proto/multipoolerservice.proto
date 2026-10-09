@@ -711,6 +711,13 @@ message StreamPoolerHealthResponse {
   // pooler (whose readiness is reported through serving_status and
   // routing_state).
   bool backend_ready = 7;
+
+  // admission_closed is true while an admission-controlled pooler's application
+  // gate is closed: it is serving and healthy but refuses application queries
+  // (fenced, or not yet decided). Gateways exclude such a pooler from selection
+  // and buffer until one admits again. False means open, and is the value for
+  // every pooler without admission control.
+  bool admission_closed = 8;
 }
 
 // BackingConnection is the configuration of an external PostgreSQL.

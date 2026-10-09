@@ -322,6 +322,11 @@ func (lb *loadBalancer) notifyLeaderServingFromSummary(summary *shardSummary, co
 	if health == nil || !health.isServing() {
 		return
 	}
+	// A leader that is not admitting application queries has not recovered: do
+	// not release requests toward it.
+	if health.AdmissionClosed {
+		return
+	}
 	// The pooler's own broadcast must advertise role PRIMARY — it is the elected
 	// routing primary and it is attesting to that itself. Role PRIMARY implies
 	// writability (a pooler advertises PRIMARY only once it is the writable routing
@@ -357,6 +362,12 @@ func (lb *loadBalancer) getConnection(target *query.Target) (*poolerConnection, 
 	sk := target.GetShardKey()
 	key := shardKeyOf(sk)
 
+	// A shard served by unmanaged poolers has no leader: any admitting pooler
+	// backed by the external database serves it.
+	if conn, handled, err := lb.unmanagedConnection(target); handled {
+		return conn, err
+	}
+
 	// Look up the shard summary under lb.mu, release it, then read the elected
 	// leader id via the summary's own lock.
 	lb.mu.Lock()
@@ -387,6 +398,13 @@ func (lb *loadBalancer) getConnection(target *query.Target) (*poolerConnection, 
 		if !ok || conn == nil {
 			return nil, newNoWritablePrimaryError(
 				"leader %s known but not connected for database=%s, tablegroup=%s, shard=%s",
+				leaderID, sk.GetDatabase(), sk.GetTableGroup(), sk.GetShard())
+		}
+		// A leader whose application gate is closed (fenced) cannot take the
+		// request: hold it until a pooler admits again rather than bouncing off it.
+		if h := conn.Health(); h != nil && h.AdmissionClosed {
+			return nil, newNoWritablePrimaryError(
+				"leader %s is not admitting application queries for database=%s, tablegroup=%s, shard=%s",
 				leaderID, sk.GetDatabase(), sk.GetTableGroup(), sk.GetShard())
 		}
 		return conn, nil
@@ -613,6 +631,13 @@ func (lb *loadBalancer) onPoolerHealthUpdate(conn *poolerConnection) {
 	// errors (UNAVAILABLE is actionFail, not buffered).
 	rs := health.RoutingState
 	live := health.LastError == nil
+	if live && lb.isUnmanaged(conn) && health.isServing() && !health.AdmissionClosed {
+		// An unmanaged shard has no leader to wait for: it has recovered as soon
+		// as one of its poolers admits again, so release what is buffered for it.
+		if lb.onLeaderServing != nil {
+			lb.onLeaderServing(summary.shardKey)
+		}
+	}
 	// An unmanaged pooler has no consensus leader: its PRIMARY role only says
 	// the external postgres is writable, so it never becomes the shard's routing
 	// primary.
@@ -694,10 +719,59 @@ func (lb *loadBalancer) matchesReplicaTarget(conn *poolerConnection, target *que
 	}
 	// Unmanaged poolers have no replica role; they are selected by backing
 	// connection, not as followers of a leader.
-	if conn.PoolerInfo().GetManagementMode() == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED {
+	if lb.isUnmanaged(conn) {
+		return false
+	}
+	// A replica whose application gate is closed refuses queries.
+	if h := conn.Health(); h != nil && h.AdmissionClosed {
 		return false
 	}
 	return !lb.claimsPrimary(conn)
+}
+
+// isUnmanaged reports whether conn fronts an external postgres.
+func (lb *loadBalancer) isUnmanaged(conn *poolerConnection) bool {
+	return conn != nil && conn.PoolerInfo().GetManagementMode() == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
+}
+
+// unmanagedConnection selects a pooler for a shard served by unmanaged poolers.
+// handled is false when the shard has none, and the normal leader-based routing
+// applies. An unmanaged shard has no leader: every eligible pooler is backed by
+// the same external database, so any of them serves any mode. A pooler is
+// eligible when its health stream is live, it reports SERVING, and its
+// application gate is open. When none is eligible the error is the same
+// bufferable one a missing leader returns, so requests wait for a pooler to
+// admit again instead of failing.
+func (lb *loadBalancer) unmanagedConnection(target *query.Target) (conn *poolerConnection, handled bool, err error) {
+	if lb.cache == nil {
+		return nil, false, nil
+	}
+	var members, eligible []*poolerConnection
+	for _, entry := range lb.cache.All() {
+		c := entry.Rider
+		if c == nil || !lb.isUnmanaged(c) || !matchesShardTarget(c, target) {
+			continue
+		}
+		members = append(members, c)
+		if h := c.Health(); h != nil && h.LastError == nil && h.isServing() && !h.AdmissionClosed {
+			eligible = append(eligible, c)
+		}
+	}
+	if len(members) == 0 {
+		return nil, false, nil
+	}
+	sk := target.GetShardKey()
+	if len(eligible) == 0 {
+		return nil, true, newNoWritablePrimaryError(
+			"no unmanaged pooler is admitting application queries for database=%s, tablegroup=%s, shard=%s",
+			sk.GetDatabase(), sk.GetTableGroup(), sk.GetShard())
+	}
+	// Local cell first, randomized, like replica selection (an external backend
+	// reports no replication lag).
+	if selected := lb.selectReplicaConnection(eligible); selected != nil {
+		return selected, true, nil
+	}
+	return eligible[0], true, nil
 }
 
 // claimsPrimary reports whether conn currently claims to be a routing primary

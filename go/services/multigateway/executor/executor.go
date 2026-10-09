@@ -76,6 +76,15 @@ func (e *Executor) InvalidatePlanCache() {
 	e.planCache.Invalidate()
 }
 
+// SetApplicationTableGroup changes the tablegroup application queries are
+// planned against and discards every cached plan, which embed the previous one.
+// Work already running keeps the target it started with; new statements, and
+// retries of buffered ones, use the new tablegroup.
+func (e *Executor) SetApplicationTableGroup(tableGroup string) {
+	e.planner.SetDefaultTableGroup(tableGroup)
+	e.planCache.Invalidate()
+}
+
 // NewExecutor creates a new executor instance.
 // The IExecute parameter provides the execution backend (typically ScatterConn).
 // planCacheMemory controls the maximum memory in bytes for the plan cache (0 disables caching).
@@ -429,7 +438,7 @@ func (e *Executor) PrepareInTransaction(
 	queryStr string,
 	paramTypes []uint32,
 ) error {
-	return e.exec.StreamExecute(ctx, conn, DefaultTableGroup, constants.DefaultShard, "", &query.ExecuteSqlPreparedStatement{
+	return e.exec.StreamExecute(ctx, conn, e.planner.GetDefaultTableGroup(), constants.DefaultShard, "", &query.ExecuteSqlPreparedStatement{
 		PreparedStatement: &query.PreparedStatement{
 			Query:        queryStr,
 			ParamTypes:   paramTypes,

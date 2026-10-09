@@ -19,6 +19,7 @@ package planner
 import (
 	"log/slog"
 	"strings"
+	"sync/atomic"
 
 	"github.com/multigres/multigres/go/common/constants"
 	"github.com/multigres/multigres/go/common/mterrors"
@@ -30,9 +31,10 @@ import (
 
 // Planner is responsible for creating query execution plans.
 type Planner struct {
-	// defaultTableGroup is the tablegroup to use when routing queries.
-	// For Phase 1, all queries are routed to this tablegroup.
-	defaultTableGroup string
+	// appTableGroup is the tablegroup application queries are routed to. It is
+	// read at plan time and may be swapped at runtime when application routing
+	// moves (see SetDefaultTableGroup); cached plans must be invalidated then.
+	appTableGroup atomic.Pointer[string]
 
 	logger *slog.Logger
 
@@ -54,11 +56,12 @@ type Planner struct {
 
 // NewPlanner creates a new query planner.
 func NewPlanner(defaultTableGroup string, logger *slog.Logger, txnMetrics *engine.TransactionMetrics) *Planner {
-	return &Planner{
-		defaultTableGroup: defaultTableGroup,
-		logger:            logger,
-		txnMetrics:        txnMetrics,
+	p := &Planner{
+		logger:     logger,
+		txnMetrics: txnMetrics,
 	}
+	p.appTableGroup.Store(&defaultTableGroup)
+	return p
 }
 
 // SetSlotBasedReplicationEnabled wires the dynamic getter that gates
@@ -179,7 +182,7 @@ func (p *Planner) Plan(
 		"query", sql,
 		"user", conn.User(),
 		"database", conn.Database(),
-		"default_tablegroup", p.defaultTableGroup,
+		"default_tablegroup", p.tableGroup(),
 		"statement_type", stmt.NodeTag())
 
 	// unsafeConnection is the per-connection opt-out. It suppresses the
@@ -482,7 +485,7 @@ func checkTempSchemaQualifiedCreate(stmt ast.Stmt) error {
 // persists across queries on the same session.
 func (p *Planner) planTempTableCreation(sql string, conn *server.Conn) (*engine.Plan, error) {
 	p.logger.Debug("planning temp table creation", "sql", sql)
-	plan := engine.NewPlan(sql, engine.NewRoute(p.defaultTableGroup, constants.DefaultShard, sql, nil))
+	plan := engine.NewPlan(sql, engine.NewRoute(p.tableGroup(), constants.DefaultShard, sql, nil))
 	// The temp-table reservation is a static property of the plan: it routes as
 	// a plain Route, but ExecInfo.TempTable tells the executor to reserve a
 	// connection with ReasonTempTable.
@@ -499,7 +502,7 @@ func (p *Planner) planTempTableCreation(sql string, conn *server.Conn) (*engine.
 func (p *Planner) planHoldCursorDeclare(sql string, stmt *ast.DeclareCursorStmt) (*engine.Plan, error) {
 	p.logger.Debug("planning DECLARE WITH HOLD cursor",
 		"cursor", stmt.PortalName, "sql", sql)
-	route := engine.NewHoldCursorRoute(p.defaultTableGroup, constants.DefaultShard, sql, stmt.PortalName)
+	route := engine.NewHoldCursorRoute(p.tableGroup(), constants.DefaultShard, sql, stmt.PortalName)
 	plan := engine.NewPlan(sql, route)
 	// The cursor name to pin is known at plan time, so it rides on the cached
 	// plan's ExecInfo; HoldCursorRoute forwards it to the reservation.
@@ -517,9 +520,9 @@ func (p *Planner) planClosePortalStmt(sql string, stmt *ast.ClosePortalStmt) (*e
 	p.logger.Debug("planning CLOSE cursor", "cursor", stmt.PortalName, "sql", sql)
 	var route *engine.CloseCursorRoute
 	if stmt.PortalName == "" {
-		route = engine.NewCloseAllCursorRoute(p.defaultTableGroup, constants.DefaultShard, sql)
+		route = engine.NewCloseAllCursorRoute(p.tableGroup(), constants.DefaultShard, sql)
 	} else {
-		route = engine.NewCloseCursorRoute(p.defaultTableGroup, constants.DefaultShard, sql, stmt.PortalName)
+		route = engine.NewCloseCursorRoute(p.tableGroup(), constants.DefaultShard, sql, stmt.PortalName)
 	}
 	plan := engine.NewPlan(sql, route)
 	plan.Type = engine.PlanTypeCloseCursorRoute
@@ -541,7 +544,7 @@ func (p *Planner) planDefault(sql string, stmt ast.Stmt, conn *server.Conn, opts
 
 	p.logger.Debug("created default route plan",
 		"plan", plan.String(),
-		"tablegroup", p.defaultTableGroup)
+		"tablegroup", p.tableGroup())
 	return plan, nil
 }
 
@@ -586,9 +589,9 @@ func (p *Planner) routePrimitive(sql string, stmt ast.Stmt, opts PlanOptions) (e
 		return nil, err
 	}
 	if !rewrote {
-		return engine.NewRoute(p.defaultTableGroup, constants.DefaultShard, sql, stmt), nil
+		return engine.NewRoute(p.tableGroup(), constants.DefaultShard, sql, stmt), nil
 	}
-	route := engine.NewRoute(p.defaultTableGroup, constants.DefaultShard, routeAST.SqlString(), routeAST)
+	route := engine.NewRoute(p.tableGroup(), constants.DefaultShard, routeAST.SqlString(), routeAST)
 	if len(reads) > 0 {
 		return engine.NewGatewayManagedValueRoute(route, nil, reads), nil
 	}
@@ -621,13 +624,13 @@ func execInfoFromOpts(opts PlanOptions) engine.PlanExecInfo {
 // SetDefaultTableGroup updates the default tablegroup for routing.
 // This allows dynamic configuration changes.
 func (p *Planner) SetDefaultTableGroup(tableGroup string) {
-	p.defaultTableGroup = tableGroup
+	p.appTableGroup.Store(&tableGroup)
 	p.logger.Info("default tablegroup updated", "tablegroup", tableGroup)
 }
 
 // GetDefaultTableGroup returns the current default tablegroup.
 func (p *Planner) GetDefaultTableGroup() string {
-	return p.defaultTableGroup
+	return p.tableGroup()
 }
 
 // planType returns the observability label for a plan. Temp-table and
@@ -697,5 +700,10 @@ func (p *Planner) planUnlistenStmt(sql string, stmt *ast.UnlistenStmt) (*engine.
 
 // planNotifyStmt routes NOTIFY to the default table group as a regular query.
 func (p *Planner) planNotifyStmt(sql string) (*engine.Plan, error) {
-	return engine.NewPlan(sql, engine.NewRoute(p.defaultTableGroup, constants.DefaultShard, sql, nil)), nil
+	return engine.NewPlan(sql, engine.NewRoute(p.tableGroup(), constants.DefaultShard, sql, nil)), nil
+}
+
+// tableGroup returns the tablegroup application queries are routed to.
+func (p *Planner) tableGroup() string {
+	return *p.appTableGroup.Load()
 }

@@ -185,9 +185,12 @@ func TestAdmissionBackendUnavailableNeverOpens(t *testing.T) {
 
 func TestRefreshFenceThenUnfence(t *testing.T) {
 	h := newAdmissionHarness(t, true)
+	closed := func() bool { return h.pm.healthStreamer.getState().AdmissionClosed }
+	require.True(t, closed(), "gateways are told a controlled pooler starts closed")
 	_, err := h.pm.enforceAdmission(t.Context(), multipoolerservicepb.AdmissionState_ADMISSION_STATE_UNSPECIFIED, "")
 	require.NoError(t, err)
 	require.True(t, h.gate.ApplicationOpen())
+	require.False(t, closed(), "and that it opened")
 
 	// The coordinator persists FENCING, then asks the pooler to refresh.
 	h.setRow(fencingState, "fence-1", "src")
@@ -196,6 +199,7 @@ func TestRefreshFenceThenUnfence(t *testing.T) {
 	require.Equal(t, fencedState, resp.AppliedState, "a fence is acknowledged as FENCED")
 	require.Equal(t, "fence-1", resp.RequestId)
 	require.False(t, h.gate.ApplicationOpen())
+	require.True(t, closed(), "gateways are told the pooler is fenced")
 	require.Equal(t, h.pm.record.Snapshot().GetId().GetName(), resp.PoolerId.GetName())
 
 	// A repeat of the same refresh is acknowledged without another read.
@@ -211,6 +215,7 @@ func TestRefreshFenceThenUnfence(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, unfencedState, resp.AppliedState)
 	require.True(t, h.gate.ApplicationOpen())
+	require.False(t, closed())
 }
 
 func TestRefreshExpectationIsNeverPermission(t *testing.T) {
@@ -309,6 +314,7 @@ func TestLifecycleChangeWithdrawsAdmission(t *testing.T) {
 	down.ServingStatus = clustermetadatapb.PoolerServingStatus_DISABLED
 	require.NoError(t, lifecycle.OnStateChange(t.Context(), down))
 	require.False(t, h.gate.ApplicationOpen())
+	require.True(t, h.pm.healthStreamer.getState().AdmissionClosed, "a lifecycle change tells gateways immediately")
 	require.NoError(t, lifecycle.OnStateChange(t.Context(), state))
 	require.False(t, h.gate.ApplicationOpen(), "recovery of the backend alone never reopens admission")
 

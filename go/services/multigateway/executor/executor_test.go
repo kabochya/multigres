@@ -48,6 +48,7 @@ type mockExec struct {
 	streamExecuteCalls              atomic.Int32
 	portalStreamExecuteCalls        atomic.Int32
 	lastStreamExecuteSQL            atomic.Value // string
+	lastStreamExecuteTableGroup     atomic.Value // string
 	lastExecuteSQLPreparedStatement atomic.Pointer[querypb.ExecuteSqlPreparedStatement]
 	lastPortalStreamExecuteQS       atomic.Value // string
 
@@ -60,13 +61,14 @@ type mockExec struct {
 }
 
 func (m *mockExec) StreamExecute(
-	_ context.Context, _ *server.Conn, _, _ string, sql string,
+	_ context.Context, _ *server.Conn, tableGroup, _ string, sql string,
 	preparedStatement *querypb.ExecuteSqlPreparedStatement,
 	_ *handler.MultigatewayConnectionState,
 	_ engine.PlanExecInfo,
 	_ bool,
 	callback func(context.Context, *sqltypes.Result) error,
 ) error {
+	m.lastStreamExecuteTableGroup.Store(tableGroup)
 	m.streamExecuteCalls.Add(1)
 	m.lastStreamExecuteSQL.Store(sql)
 	m.lastExecuteSQLPreparedStatement.Store(preparedStatement)
@@ -804,4 +806,33 @@ func TestStreamReplication_PropagatesError(t *testing.T) {
 
 	require.ErrorIs(t, err, wantErr)
 	assert.Nil(t, stream)
+}
+
+// TestSetApplicationTableGroupReplansCachedStatements: when application routing
+// moves, a statement already in the plan cache must be planned again against the
+// new tablegroup rather than served from the old plan.
+func TestSetApplicationTableGroupReplansCachedStatements(t *testing.T) {
+	mock := &mockExec{}
+	exec := newTestExecutor(mock)
+	defer exec.planCache.Close()
+	ctx := context.Background()
+	conn := testConn()
+	const sql = "SELECT * FROM users WHERE id = 42"
+
+	_, err := exec.StreamExecute(ctx, conn, nil, sql, parseOne(t, sql), noopCallback)
+	require.NoError(t, err)
+	assert.Equal(t, DefaultTableGroup, mock.lastStreamExecuteTableGroup.Load())
+	// The same statement again is served from the cache, still for the same group.
+	_, err = exec.StreamExecute(ctx, conn, nil, sql, parseOne(t, sql), noopCallback)
+	require.NoError(t, err)
+	assert.Equal(t, DefaultTableGroup, mock.lastStreamExecuteTableGroup.Load())
+
+	exec.SetApplicationTableGroup("destTG")
+	_, err = exec.StreamExecute(ctx, conn, nil, sql, parseOne(t, sql), noopCallback)
+	require.NoError(t, err)
+	assert.Equal(t, "destTG", mock.lastStreamExecuteTableGroup.Load(), "the cached plan must not outlive the routing change")
+
+	// Describe, Parse-in-transaction and replication follow it as well.
+	require.NoError(t, exec.PrepareInTransaction(ctx, conn, handler.NewMultigatewayConnectionState(), "SELECT $1", []uint32{23}))
+	assert.Equal(t, "destTG", mock.lastStreamExecuteTableGroup.Load())
 }
