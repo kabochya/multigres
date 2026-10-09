@@ -1158,9 +1158,9 @@ func TestPool_UnterminatedBackendsAreRememberedUntilForgotten(t *testing.T) {
 	require.Empty(t, p.UnterminatedBackends())
 
 	p.unterminatedMu.Lock()
-	p.unterminated = map[uint32]struct{}{11: {}, 12: {}}
+	p.unterminated = map[uint32]time.Time{11: time.Now(), 12: time.Now(), 13: time.Now().Add(-2 * unterminatedBackendTTL)}
 	p.unterminatedMu.Unlock()
-	require.ElementsMatch(t, []uint32{11, 12}, p.UnterminatedBackends())
+	require.ElementsMatch(t, []uint32{11, 12}, p.UnterminatedBackends(), "an old record is dropped, since its pid may be reused")
 
 	p.ForgetBackends([]uint32{11, 99})
 	require.Equal(t, []uint32{12}, p.UnterminatedBackends())
