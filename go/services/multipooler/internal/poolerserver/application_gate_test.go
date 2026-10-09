@@ -196,32 +196,53 @@ func TestFenceNeverAcknowledgesWhileWorkRemains(t *testing.T) {
 	require.False(t, s.ApplicationOpen())
 }
 
-// failingKillPoolManager is a pool manager whose terminations fail.
-type failingKillPoolManager struct {
+// pendingTerminationPoolManager is a pool manager that remembers backends it
+// failed to terminate.
+type pendingTerminationPoolManager struct {
 	*drainMockPoolManager
-	failures atomic.Int64
+	pending atomic.Int64
 }
 
-func (m *failingKillPoolManager) ReservedKillFailures() int64 { return m.failures.Load() }
+func (m *pendingTerminationPoolManager) PendingTerminations(context.Context) (int, error) {
+	return int(m.pending.Load()), nil
+}
 
-// TestFenceFailsWhenAReservedConnectionCouldNotBeTerminated: a connection whose
-// backend was not terminated may still be running a statement, so the fence must
-// not be acknowledged even though the connection is gone from the pool.
-func TestFenceFailsWhenAReservedConnectionCouldNotBeTerminated(t *testing.T) {
+func shortFinalWait(t *testing.T) {
+	t.Helper()
+	old := forceFinalWait
+	forceFinalWait = 300 * time.Millisecond
+	t.Cleanup(func() { forceFinalWait = old })
+}
+
+// TestFenceFailsWhileABackendItCouldNotTerminateIsStillRunning: a connection whose
+// backend was not terminated may still be executing a statement, so the fence must
+// not be acknowledged even though the connection is gone from the pool, and a later
+// fence must not forget it.
+func TestFenceFailsWhileABackendItCouldNotTerminateIsStillRunning(t *testing.T) {
+	shortFinalWait(t)
 	s := newGatedTestServer(t)
 	base := newDrainMockPoolManager()
-	pm := &failingKillPoolManager{drainMockPoolManager: base}
+	pm := &pendingTerminationPoolManager{drainMockPoolManager: base}
 	base.reservedAdd(1)
 	base.closeReservedCount = 1
 	base.onCloseReserved = func() {
-		pm.failures.Add(1) // the terminate failed, but the connection was released
+		pm.pending.Store(1) // the terminate failed, but the connection was released
 		base.reservedAdd(-1)
 	}
 	s.poolManager = pm
 
 	_, err := s.FenceApplication(t.Context(), 50*time.Millisecond)
-	require.ErrorContains(t, err, "could not terminate")
+	require.ErrorContains(t, err, "could not be terminated")
 	require.False(t, s.ApplicationOpen())
+
+	// Nothing is left in the pool now, yet the backend still runs.
+	_, err = s.FenceApplication(t.Context(), 50*time.Millisecond)
+	require.ErrorContains(t, err, "could not be terminated", "a retry must not forget the backend")
+
+	// Once the backend is gone the fence completes.
+	pm.pending.Store(0)
+	_, err = s.FenceApplication(t.Context(), 50*time.Millisecond)
+	require.NoError(t, err)
 }
 
 // TestBeginRequestSkipsAccountingWithoutAdmissionControl: only a controlled pooler

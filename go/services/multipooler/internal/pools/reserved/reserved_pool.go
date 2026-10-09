@@ -94,9 +94,11 @@ type Pool struct {
 	reserveCount atomic.Int64
 	releaseCount atomic.Int64
 	killCount    atomic.Int64
-	// killFailures counts kills whose pg_terminate_backend did not succeed, so the
-	// backend may still be running what the connection last sent it.
-	killFailures    atomic.Int64
+	// unterminated holds the backend pids of connections whose pg_terminate_backend
+	// failed: the connection is closed and released, but its backend may still be
+	// running what it was last sent.
+	unterminatedMu  sync.Mutex
+	unterminated    map[uint32]struct{}
 	timeoutCount    atomic.Int64
 	txCommitCount   atomic.Int64
 	txRollbackCount atomic.Int64
@@ -315,9 +317,26 @@ func (p *Pool) Get(connID int64) (*Conn, bool) {
 	return rc, true
 }
 
-// KillFailures returns how many kills did not succeed. The connection is still
-// closed and released, but its backend may keep running its last statement.
-func (p *Pool) KillFailures() int64 { return p.killFailures.Load() }
+// UnterminatedBackends returns the pids of backends whose termination failed and
+// that have not been confirmed gone since.
+func (p *Pool) UnterminatedBackends() []uint32 {
+	p.unterminatedMu.Lock()
+	defer p.unterminatedMu.Unlock()
+	pids := make([]uint32, 0, len(p.unterminated))
+	for pid := range p.unterminated {
+		pids = append(pids, pid)
+	}
+	return pids
+}
+
+// ForgetBackends drops pids that are confirmed gone from the unterminated set.
+func (p *Pool) ForgetBackends(pids []uint32) {
+	p.unterminatedMu.Lock()
+	defer p.unterminatedMu.Unlock()
+	for _, pid := range pids {
+		delete(p.unterminated, pid)
+	}
+}
 
 // KillConnection kills a reserved connection by ID.
 func (p *Pool) KillConnection(ctx context.Context, connID int64) error {
@@ -332,7 +351,12 @@ func (p *Pool) KillConnection(ctx context.Context, connID int64) error {
 
 	// Kill the backend process.
 	if err := rc.Kill(ctx); err != nil {
-		p.killFailures.Add(1)
+		p.unterminatedMu.Lock()
+		if p.unterminated == nil {
+			p.unterminated = map[uint32]struct{}{}
+		}
+		p.unterminated[rc.ProcessID()] = struct{}{}
+		p.unterminatedMu.Unlock()
 		p.logger.WarnContext(ctx, "failed to kill connection",
 			"conn_id", connID,
 			"error", err)

@@ -52,10 +52,10 @@ type ApplicationGate interface {
 	FenceApplication(ctx context.Context, drainTimeout time.Duration) (terminated int, err error)
 }
 
-// reservedKillReporter is implemented by pool managers that can report failed
-// backend terminations.
-type reservedKillReporter interface {
-	ReservedKillFailures() int64
+// backendTerminationChecker is implemented by pool managers that remember
+// backends they failed to terminate.
+type backendTerminationChecker interface {
+	PendingTerminations(ctx context.Context) (int, error)
 }
 
 var _ ApplicationGate = (*QueryPoolerServer)(nil)
@@ -167,27 +167,19 @@ func (s *QueryPoolerServer) FenceApplication(ctx context.Context, drainTimeout t
 	}
 	err := s.awaitIdle(drainCtx)
 	if err == nil {
-		return 0, nil
+		// Idle, but backends that an earlier fence failed to terminate may still
+		// be running.
+		termCtx, cancel := context.WithTimeout(ctx, forceFinalWait)
+		defer cancel()
+		return 0, s.awaitTerminations(termCtx)
 	}
 	if ctx.Err() != nil {
 		return 0, ctx.Err()
 	}
 
 	terminated := 0
-	var failuresBefore int64
-	reporter, _ := s.poolManager.(reservedKillReporter)
-	if reporter != nil {
-		failuresBefore = reporter.ReservedKillFailures()
-	}
 	if s.poolManager != nil {
 		terminated = s.poolManager.CloseReservedConnections(ctx)
-	}
-	// A kill that failed leaves its backend free to finish the statement it was
-	// running, after this fence would have been acknowledged. Fail, stay closed.
-	if reporter != nil {
-		if failed := reporter.ReservedKillFailures() - failuresBefore; failed > 0 {
-			return terminated, fmt.Errorf("could not terminate %d reserved connection(s) at the fence deadline; the fence cannot be acknowledged", failed)
-		}
 	}
 	if s.logger != nil {
 		s.logger.WarnContext(ctx, "application fence deadline passed, terminated remaining work",
@@ -198,7 +190,35 @@ func (s *QueryPoolerServer) FenceApplication(ctx context.Context, drainTimeout t
 	if err := s.awaitIdle(finalCtx); err != nil {
 		return terminated, fmt.Errorf("application work still in flight after terminating reserved connections: %w", err)
 	}
+	if err := s.awaitTerminations(finalCtx); err != nil {
+		return terminated, err
+	}
 	return terminated, nil
+}
+
+// awaitTerminations waits until every backend whose termination failed earlier
+// is gone from the server. Closing a connection whose backend is still executing
+// a statement does not stop the statement, so such a backend could commit after
+// the fence was acknowledged; a fence that cannot rule that out fails.
+func (s *QueryPoolerServer) awaitTerminations(ctx context.Context) error {
+	checker, ok := s.poolManager.(backendTerminationChecker)
+	if !ok {
+		return nil
+	}
+	for {
+		pending, err := checker.PendingTerminations(ctx)
+		if err != nil {
+			return fmt.Errorf("check backends that could not be terminated: %w", err)
+		}
+		if pending == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%d backend(s) that could not be terminated are still running; the fence cannot be acknowledged", pending)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 // awaitIdle waits until no admitted request is in flight and every borrowed
