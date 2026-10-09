@@ -334,14 +334,15 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 
 	// MVP validation: fail fast if tablegroup/shard are not the MVP defaults.
 	// Unmanaged poolers serve a non-default tablegroup and never touch the
-	// multischema tables, so the MVP restriction does not apply to them.
+	// multischema tables, so the MVP restriction does not apply to them, nor to
+	// a managed pooler that was explicitly allowed a non-default tablegroup.
 	// An unmanaged pooler fronts an external database, never the default cohort that
 	// holds cluster metadata: it would take over the whole shard as far as
 	// gateways and the orchestrator are concerned.
 	if unmanaged && multipooler.GetShardKey().GetTableGroup() == constants.DefaultTableGroup {
 		return nil, mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "an unmanaged pooler cannot serve the default tablegroup")
 	}
-	if !unmanaged {
+	if !unmanaged && !config.AllowNonDefaultTableGroup {
 		if err := constants.ValidateMVPTableGroupAndShard(multipooler.GetShardKey().GetTableGroup(), multipooler.GetShardKey().GetShard()); err != nil {
 			return nil, mterrors.Wrap(err, "MVP validation failed")
 		}
@@ -587,6 +588,13 @@ func (pm *MultipoolerManager) RejectIfUnmanaged(operation string) error {
 		return nil
 	}
 	return mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION, "%s is not supported on an unmanaged pooler", operation)
+}
+
+// servesNonDefaultTableGroup reports whether this managed pooler leads a cohort
+// other than the default one. Such a cohort has no global multischema tables.
+func (pm *MultipoolerManager) servesNonDefaultTableGroup() bool {
+	return pm.config != nil && pm.config.AllowNonDefaultTableGroup &&
+		pm.record.ShardKey().GetTableGroup() != constants.DefaultTableGroup
 }
 
 // IsUnmanaged reports whether this pooler fronts an external PostgreSQL. The
@@ -1162,6 +1170,15 @@ func (pm *MultipoolerManager) loadShardConfigFromGlobalTopo() {
 		if err != nil {
 			pm.setStateError(fmt.Errorf("invalid backup_location: %w", err))
 			return
+		}
+
+		// A cohort of another tablegroup keeps its backups in its own repository.
+		if pm.servesNonDefaultTableGroup() {
+			backupConfig, err = backupConfig.ForTableGroup(pm.record.ShardKey().GetTableGroup())
+			if err != nil {
+				pm.setStateError(fmt.Errorf("invalid backup_location for tablegroup: %w", err))
+				return
+			}
 		}
 
 		// Verify we can compute the full backup path

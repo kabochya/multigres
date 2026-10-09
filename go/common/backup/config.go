@@ -20,6 +20,9 @@ import (
 	"os"
 	"strings"
 
+	"google.golang.org/protobuf/proto"
+
+	"github.com/multigres/multigres/go/common/constants"
 	"github.com/multigres/multigres/go/common/safepath"
 	clustermetadatapb "github.com/multigres/multigres/go/pb/clustermetadata"
 	s3tools "github.com/multigres/multigres/go/tools/s3"
@@ -41,6 +44,42 @@ func NewConfig(loc *clustermetadatapb.BackupLocation) (*Config, error) {
 	}
 
 	return &Config{proto: loc}, nil
+}
+
+// ForTableGroup returns the configuration a cohort of the given tablegroup
+// uses. The default tablegroup keeps the location as is, so existing clusters
+// are unaffected. Any other tablegroup gets its own repository beneath the
+// location (a "tablegroups/<name>" path component, or key-prefix component on
+// S3): a database has one backup location, and two cohorts must never share a
+// pgBackRest repository or stanza.
+func (c *Config) ForTableGroup(tableGroup string) (*Config, error) {
+	if tableGroup == "" {
+		return nil, errors.New("table group cannot be empty")
+	}
+	if strings.ContainsAny(tableGroup, `/\`) || tableGroup == "." || tableGroup == ".." {
+		return nil, fmt.Errorf("table group %q is not a valid path component", tableGroup)
+	}
+	if tableGroup == constants.DefaultTableGroup {
+		return c, nil
+	}
+	scoped := proto.Clone(c.proto).(*clustermetadatapb.BackupLocation)
+	switch loc := scoped.Location.(type) {
+	case *clustermetadatapb.BackupLocation_Filesystem:
+		path, err := safepath.Join(loc.Filesystem.Path, "tablegroups", tableGroup)
+		if err != nil {
+			return nil, err
+		}
+		loc.Filesystem.Path = path
+	case *clustermetadatapb.BackupLocation_S3:
+		prefix := "tablegroups/" + tableGroup
+		if loc.S3.KeyPrefix != "" {
+			prefix = strings.TrimSuffix(loc.S3.KeyPrefix, "/") + "/" + prefix
+		}
+		loc.S3.KeyPrefix = prefix
+	default:
+		return nil, errors.New("unknown backup location type")
+	}
+	return &Config{proto: scoped}, nil
 }
 
 // Type returns the backup location type for logging/metrics

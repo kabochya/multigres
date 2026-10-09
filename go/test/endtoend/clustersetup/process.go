@@ -28,6 +28,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/multigres/multigres/go/common/constants"
 	clustermetadatapb "github.com/multigres/multigres/go/pb/clustermetadata"
 	"github.com/multigres/multigres/go/pb/pgctldservice"
 	"github.com/multigres/multigres/go/provisioner/local"
@@ -51,6 +52,12 @@ type ProcessInstance struct {
 	Process     *executil.Cmd
 	Binary      string
 	Environment []string
+
+	// TableGroup and Shard are the tablegroup and shard a multipooler serves.
+	// They default to the default tablegroup and shard 0-inf. Any other
+	// tablegroup also passes --allow-non-default-tablegroup.
+	TableGroup string
+	Shard      string
 
 	// Multiorch-specific fields
 	HttpPort                           int      // HTTP port (used by pgctld and multiorch for health endpoints)
@@ -159,12 +166,19 @@ func (p *ProcessInstance) logLevelOrDefault() string {
 // it before Start, which passes an explicitly empty --socket-file to force a
 // TCP dial (an omitted flag would derive the socket path from --pooler-dir).
 func (p *ProcessInstance) multipoolerArgs() []string {
+	tableGroup, shard := p.TableGroup, p.Shard
+	if tableGroup == "" {
+		tableGroup = constants.DefaultTableGroup
+	}
+	if shard == "" {
+		shard = constants.DefaultShard
+	}
 	args := []string{
 		"--grpc-port", strconv.Itoa(p.GrpcPort),
 		"--http-port", strconv.Itoa(p.HttpPort),
 		"--database", "postgres", // Required parameter
-		"--table-group", "default", // Required parameter (MVP only supports "default")
-		"--shard", "0-inf", // Required parameter (MVP only supports "0-inf")
+		"--table-group", tableGroup,
+		"--shard", shard,
 		"--pgctld-addr", p.PgctldAddr,
 		"--pooler-dir", p.PoolerDir, // Use the same pooler dir as pgctld
 		"--pg-port", strconv.Itoa(p.PgPort),
@@ -181,6 +195,9 @@ func (p *ProcessInstance) multipoolerArgs() []string {
 		// shutdown total deadline; without this the hook is cut off mid-flight
 		// on SIGTERM.
 		"--onterm-timeout", "80s",
+	}
+	if tableGroup != constants.DefaultTableGroup {
+		args = append(args, "--allow-non-default-tablegroup")
 	}
 	// Always pass the flag: explicit-empty forces TCP, while omitting it
 	// would let the multipooler derive the socket path from --pooler-dir.

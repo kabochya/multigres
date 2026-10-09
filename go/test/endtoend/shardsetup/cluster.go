@@ -54,6 +54,16 @@ type ShardSetup struct {
 	TopoServer     topoclient.Store
 	CellName       string
 
+	// Database, TableGroup and Shard identify the cohort this setup runs.
+	Database   string
+	TableGroup string
+	Shard      string
+
+	// sharesInfra is set on a setup created with WithParentCluster. It runs
+	// against its parent's etcd and topology server, which it must neither stop
+	// nor close.
+	sharesInfra bool
+
 	// Context for all processes started by this ShardSetup.
 	// Cancelled when Cleanup() is called to gracefully terminate all processes.
 	runningCtx context.Context
@@ -502,7 +512,7 @@ func (s *ShardSetup) Cleanup(testsFailed bool) {
 	}
 
 	// Close topology server (can do this immediately since context cancellation is async)
-	if s.TopoServer != nil {
+	if s.TopoServer != nil && !s.sharesInfra {
 		s.TopoServer.Close()
 	}
 

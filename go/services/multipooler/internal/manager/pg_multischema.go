@@ -72,6 +72,15 @@ func (pm *MultipoolerManager) createSidecarSchema(ctx context.Context, policy *c
 		return err
 	}
 
+	// The global multischema tables live only on the default cohort. A cohort of
+	// another tablegroup has its own postgres and no use for them.
+	if pm.servesNonDefaultTableGroup() {
+		pm.logger.InfoContext(ctx, "skipping multischema global tables for non-default tablegroup",
+			"tablegroup", pm.record.ShardKey().GetTableGroup())
+		pm.logger.InfoContext(ctx, "successfully created multigres sidecar schema")
+		return nil
+	}
+
 	// Create multischema global tables for the default tablegroup
 	pm.logger.InfoContext(ctx, "creating multischema global tables for default tablegroup")
 
@@ -103,6 +112,11 @@ func (pm *MultipoolerManager) createSidecarSchema(ctx context.Context, policy *c
 func (pm *MultipoolerManager) initializeMultischemaData(ctx context.Context) error {
 	tableGroup := pm.record.ShardKey().GetTableGroup()
 	shard := pm.record.ShardKey().GetShard()
+
+	// A non-default cohort holds no multischema global data.
+	if pm.servesNonDefaultTableGroup() {
+		return nil
+	}
 
 	// MVP validation: only default tablegroup with shard 0-inf is supported
 	// This is an extra guardrail. Multipoolers shouldn't start unless they

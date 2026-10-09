@@ -70,6 +70,8 @@ type SetupConfig struct {
 	Database                           string
 	TableGroup                         string
 	Shard                              string
+	Parent                             *ShardSetup // run as another cohort of Parent's cluster (shares its etcd, topology and database record)
+	NamePrefix                         string      // prefixes pooler and multiorch names so cohorts of one cluster do not collide
 	CellName                           string
 	DurabilityPolicy                   string   // Durability policy (e.g., "AT_LEAST_2")
 	SkipInitialization                 bool     // Start processes but don't initialize postgres (for bootstrap tests)
@@ -127,6 +129,42 @@ func WithMultiorchCount(count int) SetupOption {
 func WithDatabase(db string) SetupOption {
 	return func(c *SetupConfig) {
 		c.Database = db
+	}
+}
+
+// WithTableGroup sets the tablegroup this cohort serves. Any tablegroup other
+// than "default" also makes the multipoolers pass --allow-non-default-tablegroup.
+func WithTableGroup(tableGroup string) SetupOption {
+	return func(c *SetupConfig) {
+		c.TableGroup = tableGroup
+	}
+}
+
+// WithShard sets the shard this cohort serves.
+func WithShard(shard string) SetupOption {
+	return func(c *SetupConfig) {
+		c.Shard = shard
+	}
+}
+
+// WithParentCluster makes this setup another cohort of parent's cluster. It
+// reuses the parent's etcd, topology server, cell, database record and backup
+// location instead of starting its own, so the two cohorts coexist in one
+// topology the way two tablegroups of one database do. Cleanup of this setup
+// leaves the parent's infrastructure running. Use it together with
+// WithTableGroup and WithNamePrefix.
+func WithParentCluster(parent *ShardSetup) SetupOption {
+	return func(c *SetupConfig) {
+		c.Parent = parent
+	}
+}
+
+// WithNamePrefix prefixes the names of this setup's multipoolers and multiorchs
+// (for example "dest" gives "dest-pooler-1"). Cohorts that share one topology
+// need distinct names.
+func WithNamePrefix(prefix string) SetupOption {
+	return func(c *SetupConfig) {
+		c.NamePrefix = prefix
 	}
 }
 
@@ -389,16 +427,27 @@ func WithPgInitdbExtraConfFiles(paths ...string) SetupOption {
 
 // multipoolerName returns the name for a multipooler instance by index.
 // Uses generic names like "pooler-1", "pooler-2" since multiorch decides which becomes primary.
-func multipoolerName(index int) string {
-	return fmt.Sprintf("pooler-%d", index+1)
+func multipoolerName(prefix string, index int) string {
+	if prefix != "" {
+		prefix += "-"
+	}
+	return fmt.Sprintf("%spooler-%d", prefix, index+1)
 }
 
 // multiorchName returns the name for a multiorch instance by index.
-func multiorchName(index int) string {
+func multiorchName(prefix string, index int) string {
 	if index == 0 {
-		return "multiorch"
+		return withPrefix(prefix, "multiorch")
 	}
-	return fmt.Sprintf("multiorch%d", index)
+	return withPrefix(prefix, fmt.Sprintf("multiorch%d", index))
+}
+
+// withPrefix prepends a cohort prefix to a process name.
+func withPrefix(prefix, name string) string {
+	if prefix == "" {
+		return name
+	}
+	return prefix + "-" + name
 }
 
 // NewIsolated creates a new isolated ShardSetup for a single test and returns a cleanup function.
@@ -489,22 +538,35 @@ func New(t *testing.T, opts ...SetupOption) *ShardSetup {
 	// Derive from context.Background() rather than the span context to avoid premature cancellation.
 	runningCtx, cancel := context.WithCancel(context.Background())
 
-	// Start etcd for topology
-	t.Logf("Starting etcd for topology...")
+	// Start etcd for topology, or reuse the parent cluster's.
+	var (
+		etcdClientAddr string
+		etcdCmd        *executil.Cmd
+		ts             topoclient.Store
+		err            error
+	)
+	if config.Parent != nil {
+		etcdClientAddr, ts = config.Parent.EtcdClientAddr, config.Parent.TopoServer
+		config.CellName = config.Parent.CellName
+		config.Database = config.Parent.Database
+		t.Logf("Reusing parent cluster etcd at %s", etcdClientAddr)
+	} else {
+		t.Logf("Starting etcd for topology...")
 
-	etcdDataDir := filepath.Join(tempDir, "etcd_data")
-	if err := os.MkdirAll(etcdDataDir, 0o755); err != nil {
-		cancel()
-		t.Fatalf("failed to create etcd data directory: %v", err)
-	}
-	etcdClientAddr, etcdCmd, err := clustersetup.StartEtcd(runningCtx, t, etcdDataDir)
-	if err != nil {
-		cancel()
-		t.Fatalf("failed to start etcd: %v", err)
-	}
+		etcdDataDir := filepath.Join(tempDir, "etcd_data")
+		if err := os.MkdirAll(etcdDataDir, 0o755); err != nil {
+			cancel()
+			t.Fatalf("failed to create etcd data directory: %v", err)
+		}
+		etcdClientAddr, etcdCmd, err = clustersetup.StartEtcd(runningCtx, t, etcdDataDir)
+		if err != nil {
+			cancel()
+			t.Fatalf("failed to start etcd: %v", err)
+		}
 
-	// Create topology server and cell
-	ts := clustersetup.CreateTopologyCell(t, etcdClientAddr, config.CellName)
+		// Create topology server and cell
+		ts = clustersetup.CreateTopologyCell(t, etcdClientAddr, config.CellName)
+	}
 
 	// Create the database entry in topology with backup_location
 	var backupLocation *clustermetadatapb.BackupLocation
@@ -546,7 +608,11 @@ func New(t *testing.T, opts ...SetupOption) *ShardSetup {
 		t.Logf("Backup encryption required: cipher key file at %s", keyFilePath)
 	}
 
-	if err := clustersetup.CreateDatabaseRecord(ts, config.Database, backupLocation, config.DurabilityPolicy); err != nil {
+	if config.Parent != nil {
+		// The database record already exists; this cohort uses its backup
+		// location and durability policy.
+		backupLocation = config.Parent.BackupLocation
+	} else if err := clustersetup.CreateDatabaseRecord(ts, config.Database, backupLocation, config.DurabilityPolicy); err != nil {
 		cancel()
 		t.Fatalf("%v", err)
 	}
@@ -558,6 +624,10 @@ func New(t *testing.T, opts ...SetupOption) *ShardSetup {
 		EtcdCmd:            etcdCmd,
 		TopoServer:         ts,
 		CellName:           config.CellName,
+		Database:           config.Database,
+		TableGroup:         config.TableGroup,
+		Shard:              config.Shard,
+		sharesInfra:        config.Parent != nil,
 		runningCtx:         runningCtx,
 		cancel:             cancel,
 		Multipoolers:       make(map[string]*MultipoolerInstance),
@@ -577,13 +647,15 @@ func New(t *testing.T, opts ...SetupOption) *ShardSetup {
 	// Create all multipooler instances (but don't start yet)
 	var multipoolerInstances []*MultipoolerInstance
 	for i := 0; i < config.MultipoolerCount; i++ {
-		name := multipoolerName(i)
+		name := multipoolerName(config.NamePrefix, i)
 		grpcPort := utils.GetFreePort(t)
 		pgPort := utils.GetFreePort(t)
 		multipoolerPort := utils.GetFreePort(t)
 
 		inst := setup.CreateMultipoolerInstance(t, name, grpcPort, pgPort, multipoolerPort)
 		inst.Multipooler.ExtraArgs = append(inst.Multipooler.ExtraArgs, config.MultipoolerExtraArgs...)
+		inst.Multipooler.TableGroup = config.TableGroup
+		inst.Multipooler.Shard = config.Shard
 		if config.EnableMultipoolerPGTLS {
 			paths := setup.MultipoolerPGTLSCertPaths
 			// Live-include SSL config into the generated postgresql.conf.
@@ -733,7 +805,7 @@ func (s *ShardSetup) createMultiorchInstances(t *testing.T, config *SetupConfig)
 	}
 	watchTargets := []string{fmt.Sprintf("%s/%s/%s", config.Database, config.TableGroup, config.Shard)}
 	for i := 0; i < config.MultiorchCount; i++ {
-		name := multiorchName(i)
+		name := multiorchName(config.NamePrefix, i)
 		s.CreateMultiorchInstance(t, name, watchTargets, config)
 		t.Logf("Created multiorch '%s' (will start after replication is configured)", name)
 	}
@@ -992,9 +1064,9 @@ func (s *ShardSetup) WaitForHealthStreamsEstablished(t *testing.T, orchName stri
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		resp, err := client.GetShardStatus(ctx, &multiorchpb.ShardStatusRequest{
 			ShardKey: &clustermetadatapb.ShardKey{
-				Database:   "postgres",
-				TableGroup: "default",
-				Shard:      "0-inf",
+				Database:   s.Database,
+				TableGroup: s.TableGroup,
+				Shard:      s.Shard,
 			},
 		})
 		cancel()
@@ -1099,8 +1171,8 @@ func initializeWithMultiorch(ctx context.Context, t *testing.T, setup *ShardSetu
 	} else {
 		// Create a temporary multiorch for initialization
 		watchTargets := []string{fmt.Sprintf("%s/%s/%s", config.Database, config.TableGroup, config.Shard)}
-		mo, moCleanup = setup.CreateMultiorchInstance(t, "temp-multiorch", watchTargets, config)
-		moName = "temp-multiorch"
+		moName = withPrefix(config.NamePrefix, "temp-multiorch")
+		mo, moCleanup = setup.CreateMultiorchInstance(t, moName, watchTargets, config)
 		isTemporary = true
 		t.Logf("Created temporary multiorch for initialization")
 	}
@@ -1138,7 +1210,7 @@ func initializeWithMultiorch(ctx context.Context, t *testing.T, setup *ShardSetu
 
 	// Remove temporary multiorch from the map
 	if isTemporary {
-		delete(setup.MultiorchInstances, "temp-multiorch")
+		delete(setup.MultiorchInstances, moName)
 	}
 
 	// Save the current GUC values as the baseline "clean state".
@@ -1711,7 +1783,7 @@ func (s *ShardSetup) ReinitializeCluster(t *testing.T) {
 	// We keep:
 	//   - databases/<db>/Database         (preserves BackupLocation + DurabilityPolicy)
 	//   - cells/<cell>/Cell               (cell config multipoolers need to reconnect)
-	s.wipeTopologyForReinit(t, "postgres", constants.DefaultTableGroup)
+	s.wipeTopologyForReinit(t, s.Database, s.TableGroup)
 
 	t.Logf("ReinitializeCluster: restarting cluster...")
 
@@ -1748,9 +1820,9 @@ func (s *ShardSetup) ReinitializeCluster(t *testing.T) {
 
 	// 6. Bootstrap via temporary multiorch
 	config := &SetupConfig{
-		Database:   "postgres",
-		TableGroup: constants.DefaultTableGroup,
-		Shard:      constants.DefaultShard,
+		Database:   s.Database,
+		TableGroup: s.TableGroup,
+		Shard:      s.Shard,
 		CellName:   s.CellName,
 	}
 	initializeWithMultiorch(ctx, t, s, config)
@@ -2256,9 +2328,9 @@ func logMultiorchStatus(ctx context.Context, t *testing.T, setup *ShardSetup, la
 		// TODO: Handle multiple shards if needed
 		resp, err := client.GetShardStatus(ctx, &multiorchpb.ShardStatusRequest{
 			ShardKey: &clustermetadatapb.ShardKey{
-				Database:   "postgres",
-				TableGroup: constants.DefaultTableGroup, // "default" - must match multipooler registration
-				Shard:      constants.DefaultShard,      // "0-inf" - must match multipooler registration
+				Database:   setup.Database,
+				TableGroup: setup.TableGroup, // must match multipooler registration
+				Shard:      setup.Shard,      // must match multipooler registration
 			},
 		})
 		if err != nil {
