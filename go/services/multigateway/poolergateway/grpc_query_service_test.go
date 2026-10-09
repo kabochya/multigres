@@ -228,6 +228,22 @@ func (m *mockMultipoolerServiceClient) GetBackingConnection(ctx context.Context,
 	return nil, nil
 }
 
+func (m *mockMultipoolerServiceClient) GetServingState(ctx context.Context, in *multipoolerservice.GetServingStateRequest, opts ...grpc.CallOption) (*multipoolerservice.GetServingStateResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) UpdatePoolerAdmission(ctx context.Context, in *multipoolerservice.UpdatePoolerAdmissionRequest, opts ...grpc.CallOption) (*multipoolerservice.UpdatePoolerAdmissionResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) UpdateMigrationRouting(ctx context.Context, in *multipoolerservice.UpdateMigrationRoutingRequest, opts ...grpc.CallOption) (*multipoolerservice.UpdateMigrationRoutingResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) RefreshAdmission(ctx context.Context, in *multipoolerservice.RefreshAdmissionRequest, opts ...grpc.CallOption) (*multipoolerservice.RefreshAdmissionResponse, error) {
+	return nil, nil
+}
+
 func (m *mockMultipoolerServiceClient) DiscardTempTables(ctx context.Context, in *multipoolerservice.DiscardTempTablesRequest, opts ...grpc.CallOption) (*multipoolerservice.DiscardTempTablesResponse, error) {
 	return nil, nil
 }

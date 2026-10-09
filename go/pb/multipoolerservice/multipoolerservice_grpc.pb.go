@@ -50,6 +50,10 @@ const (
 	MultipoolerService_StreamPoolerHealth_FullMethodName        = "/multipoolerservice.MultipoolerService/StreamPoolerHealth"
 	MultipoolerService_NotificationStream_FullMethodName        = "/multipoolerservice.MultipoolerService/NotificationStream"
 	MultipoolerService_GetBackingConnection_FullMethodName      = "/multipoolerservice.MultipoolerService/GetBackingConnection"
+	MultipoolerService_GetServingState_FullMethodName           = "/multipoolerservice.MultipoolerService/GetServingState"
+	MultipoolerService_UpdatePoolerAdmission_FullMethodName     = "/multipoolerservice.MultipoolerService/UpdatePoolerAdmission"
+	MultipoolerService_UpdateMigrationRouting_FullMethodName    = "/multipoolerservice.MultipoolerService/UpdateMigrationRouting"
+	MultipoolerService_RefreshAdmission_FullMethodName          = "/multipoolerservice.MultipoolerService/RefreshAdmission"
 )
 
 // MultipoolerServiceClient is the client API for MultipoolerService service.
@@ -131,6 +135,22 @@ type MultipoolerServiceClient interface {
 	// PROTOTYPE STUB: the connection comes from a plaintext prototype table. The
 	// message shape and the transport authentication are placeholders.
 	GetBackingConnection(ctx context.Context, in *GetBackingConnectionRequest, opts ...grpc.CallOption) (*GetBackingConnectionResponse, error)
+	// GetServingState returns the authoritative routing and admission metadata.
+	// Use it for preflight and to reconcile an interrupted operation, including
+	// after the migration controller itself changes leader.
+	GetServingState(ctx context.Context, in *GetServingStateRequest, opts ...grpc.CallOption) (*GetServingStateResponse, error)
+	// UpdatePoolerAdmission closes (FENCED) or opens (UNFENCED) application query
+	// admission on every pooler of one tablegroup, and returns only once the
+	// change is complete on all of them.
+	UpdatePoolerAdmission(ctx context.Context, in *UpdatePoolerAdmissionRequest, opts ...grpc.CallOption) (*UpdatePoolerAdmissionResponse, error)
+	// UpdateMigrationRouting atomically moves the database's application traffic
+	// from one tablegroup to another. Both must already be FENCED.
+	UpdateMigrationRouting(ctx context.Context, in *UpdateMigrationRoutingRequest, opts ...grpc.CallOption) (*UpdateMigrationRoutingResponse, error)
+	// RefreshAdmission is called by the default primary on each pooler of a
+	// tablegroup while it runs UpdatePoolerAdmission. The pooler re-reads the
+	// authoritative state from the default primary and applies it. Migration
+	// controllers do not call this.
+	RefreshAdmission(ctx context.Context, in *RefreshAdmissionRequest, opts ...grpc.CallOption) (*RefreshAdmissionResponse, error)
 }
 
 type multipoolerServiceClient struct {
@@ -320,6 +340,46 @@ func (c *multipoolerServiceClient) GetBackingConnection(ctx context.Context, in 
 	return out, nil
 }
 
+func (c *multipoolerServiceClient) GetServingState(ctx context.Context, in *GetServingStateRequest, opts ...grpc.CallOption) (*GetServingStateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetServingStateResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_GetServingState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *multipoolerServiceClient) UpdatePoolerAdmission(ctx context.Context, in *UpdatePoolerAdmissionRequest, opts ...grpc.CallOption) (*UpdatePoolerAdmissionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdatePoolerAdmissionResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_UpdatePoolerAdmission_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *multipoolerServiceClient) UpdateMigrationRouting(ctx context.Context, in *UpdateMigrationRoutingRequest, opts ...grpc.CallOption) (*UpdateMigrationRoutingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateMigrationRoutingResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_UpdateMigrationRouting_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *multipoolerServiceClient) RefreshAdmission(ctx context.Context, in *RefreshAdmissionRequest, opts ...grpc.CallOption) (*RefreshAdmissionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RefreshAdmissionResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_RefreshAdmission_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MultipoolerServiceServer is the server API for MultipoolerService service.
 // All implementations must embed UnimplementedMultipoolerServiceServer
 // for forward compatibility.
@@ -399,6 +459,22 @@ type MultipoolerServiceServer interface {
 	// PROTOTYPE STUB: the connection comes from a plaintext prototype table. The
 	// message shape and the transport authentication are placeholders.
 	GetBackingConnection(context.Context, *GetBackingConnectionRequest) (*GetBackingConnectionResponse, error)
+	// GetServingState returns the authoritative routing and admission metadata.
+	// Use it for preflight and to reconcile an interrupted operation, including
+	// after the migration controller itself changes leader.
+	GetServingState(context.Context, *GetServingStateRequest) (*GetServingStateResponse, error)
+	// UpdatePoolerAdmission closes (FENCED) or opens (UNFENCED) application query
+	// admission on every pooler of one tablegroup, and returns only once the
+	// change is complete on all of them.
+	UpdatePoolerAdmission(context.Context, *UpdatePoolerAdmissionRequest) (*UpdatePoolerAdmissionResponse, error)
+	// UpdateMigrationRouting atomically moves the database's application traffic
+	// from one tablegroup to another. Both must already be FENCED.
+	UpdateMigrationRouting(context.Context, *UpdateMigrationRoutingRequest) (*UpdateMigrationRoutingResponse, error)
+	// RefreshAdmission is called by the default primary on each pooler of a
+	// tablegroup while it runs UpdatePoolerAdmission. The pooler re-reads the
+	// authoritative state from the default primary and applies it. Migration
+	// controllers do not call this.
+	RefreshAdmission(context.Context, *RefreshAdmissionRequest) (*RefreshAdmissionResponse, error)
 	mustEmbedUnimplementedMultipoolerServiceServer()
 }
 
@@ -450,6 +526,18 @@ func (UnimplementedMultipoolerServiceServer) NotificationStream(grpc.BidiStreami
 }
 func (UnimplementedMultipoolerServiceServer) GetBackingConnection(context.Context, *GetBackingConnectionRequest) (*GetBackingConnectionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetBackingConnection not implemented")
+}
+func (UnimplementedMultipoolerServiceServer) GetServingState(context.Context, *GetServingStateRequest) (*GetServingStateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetServingState not implemented")
+}
+func (UnimplementedMultipoolerServiceServer) UpdatePoolerAdmission(context.Context, *UpdatePoolerAdmissionRequest) (*UpdatePoolerAdmissionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdatePoolerAdmission not implemented")
+}
+func (UnimplementedMultipoolerServiceServer) UpdateMigrationRouting(context.Context, *UpdateMigrationRoutingRequest) (*UpdateMigrationRoutingResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateMigrationRouting not implemented")
+}
+func (UnimplementedMultipoolerServiceServer) RefreshAdmission(context.Context, *RefreshAdmissionRequest) (*RefreshAdmissionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RefreshAdmission not implemented")
 }
 func (UnimplementedMultipoolerServiceServer) mustEmbedUnimplementedMultipoolerServiceServer() {}
 func (UnimplementedMultipoolerServiceServer) testEmbeddedByValue()                            {}
@@ -659,6 +747,78 @@ func _MultipoolerService_GetBackingConnection_Handler(srv interface{}, ctx conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MultipoolerService_GetServingState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetServingStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MultipoolerServiceServer).GetServingState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MultipoolerService_GetServingState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MultipoolerServiceServer).GetServingState(ctx, req.(*GetServingStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MultipoolerService_UpdatePoolerAdmission_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdatePoolerAdmissionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MultipoolerServiceServer).UpdatePoolerAdmission(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MultipoolerService_UpdatePoolerAdmission_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MultipoolerServiceServer).UpdatePoolerAdmission(ctx, req.(*UpdatePoolerAdmissionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MultipoolerService_UpdateMigrationRouting_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateMigrationRoutingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MultipoolerServiceServer).UpdateMigrationRouting(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MultipoolerService_UpdateMigrationRouting_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MultipoolerServiceServer).UpdateMigrationRouting(ctx, req.(*UpdateMigrationRoutingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MultipoolerService_RefreshAdmission_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RefreshAdmissionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MultipoolerServiceServer).RefreshAdmission(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MultipoolerService_RefreshAdmission_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MultipoolerServiceServer).RefreshAdmission(ctx, req.(*RefreshAdmissionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MultipoolerService_ServiceDesc is the grpc.ServiceDesc for MultipoolerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -693,6 +853,22 @@ var MultipoolerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetBackingConnection",
 			Handler:    _MultipoolerService_GetBackingConnection_Handler,
+		},
+		{
+			MethodName: "GetServingState",
+			Handler:    _MultipoolerService_GetServingState_Handler,
+		},
+		{
+			MethodName: "UpdatePoolerAdmission",
+			Handler:    _MultipoolerService_UpdatePoolerAdmission_Handler,
+		},
+		{
+			MethodName: "UpdateMigrationRouting",
+			Handler:    _MultipoolerService_UpdateMigrationRouting_Handler,
+		},
+		{
+			MethodName: "RefreshAdmission",
+			Handler:    _MultipoolerService_RefreshAdmission_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

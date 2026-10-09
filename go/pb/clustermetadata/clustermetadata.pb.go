@@ -1264,8 +1264,12 @@ type Multipooler struct {
 	// treated as MANAGED so records written before this field existed keep their
 	// current behavior.
 	ManagementMode PoolerManagementMode `protobuf:"varint,14,opt,name=management_mode,json=managementMode,proto3,enum=clustermetadata.PoolerManagementMode" json:"management_mode,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// process_incarnation identifies this process start. It changes on every
+	// restart, so a coordinator can tell an acknowledgment from the process it
+	// snapshotted apart from one by its restarted successor.
+	ProcessIncarnation string `protobuf:"bytes,15,opt,name=process_incarnation,json=processIncarnation,proto3" json:"process_incarnation,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *Multipooler) Reset() {
@@ -1381,6 +1385,13 @@ func (x *Multipooler) GetManagementMode() PoolerManagementMode {
 		return x.ManagementMode
 	}
 	return PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNSPECIFIED
+}
+
+func (x *Multipooler) GetProcessIncarnation() string {
+	if x != nil {
+		return x.ProcessIncarnation
+	}
+	return ""
 }
 
 // Multigateway represents metadata about a running multigateway component instance in the cluster.
@@ -3111,7 +3122,7 @@ const file_clustermetadata_proto_rawDesc = "" +
 	"\rPoolerAddress\x12#\n" +
 	"\x02id\x18\x01 \x01(\v2\x13.clustermetadata.IDR\x02id\x12\x12\n" +
 	"\x04host\x18\x02 \x01(\tR\x04host\x12#\n" +
-	"\rpostgres_port\x18\x03 \x01(\x05R\fpostgresPort\"\xe2\x05\n" +
+	"\rpostgres_port\x18\x03 \x01(\x05R\fpostgresPort\"\x93\x06\n" +
 	"\vMultipooler\x12#\n" +
 	"\x02id\x18\x01 \x01(\v2\x13.clustermetadata.IDR\x02id\x126\n" +
 	"\tshard_key\x18\x02 \x01(\v2\x19.clustermetadata.ShardKeyR\bshardKey\x126\n" +
@@ -3126,7 +3137,8 @@ const file_clustermetadata_proto_rawDesc = "" +
 	"\vpg_data_dir\x18\v \x01(\tR\tpgDataDir\x12K\n" +
 	"\x10lifecycle_status\x18\f \x01(\v2 .clustermetadata.PoolerLifecycleR\x0flifecycleStatus\x12B\n" +
 	"\rrouting_state\x18\r \x01(\v2\x1d.clustermetadata.RoutingStateR\froutingState\x12N\n" +
-	"\x0fmanagement_mode\x18\x0e \x01(\x0e2%.clustermetadata.PoolerManagementModeR\x0emanagementMode\x1a:\n" +
+	"\x0fmanagement_mode\x18\x0e \x01(\x0e2%.clustermetadata.PoolerManagementModeR\x0emanagementMode\x12/\n" +
+	"\x13process_incarnation\x18\x0f \x01(\tR\x12processIncarnation\x1a:\n" +
 	"\fPortMapEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x05R\x05value:\x028\x01\"\xf1\x01\n" +

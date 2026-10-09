@@ -22,6 +22,7 @@ package multipoolerservice;
 
 import "clustermetadata.proto";
 import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
 import "google/rpc/status.proto";
 import "mtrpc.proto";
 import "query.proto";
@@ -116,6 +117,55 @@ service MultipoolerService {
   // PROTOTYPE STUB: the connection comes from a plaintext prototype table. The
   // message shape and the transport authentication are placeholders.
   rpc GetBackingConnection(GetBackingConnectionRequest) returns (GetBackingConnectionResponse);
+
+  // ---- Serving control (migration cutover) ----------------------------------
+  //
+  // The three RPCs below are the control-plane interface used by a migration
+  // controller to move application traffic between tablegroups. Each is served
+  // only by the default primary pooler of the database, which owns the routing
+  // and admission metadata; every other pooler answers FAILED_PRECONDITION and
+  // the caller must rediscover the default primary from topology.
+  //
+  // Application admission and routing are separate: a pooler's admission state
+  // says whether it may run application queries, the routing pointer says which
+  // tablegroup gateways send them to. A cutover is: fence both sides, move the
+  // routing pointer, unfence the destination.
+  //
+  // Error contract shared by the three RPCs:
+  //   INVALID_ARGUMENT     malformed request.
+  //   FAILED_PRECONDITION  not the default primary, or the requested transition
+  //                        is not allowed from the persisted state (including a
+  //                        request that lost to a newer one). Do not retry
+  //                        without reading GetServingState and deciding.
+  //   NOT_FOUND            the tablegroup has no serving row.
+  //   ABORTED              the operation started but could not complete (see
+  //                        UpdatePoolerAdmission). The persisted state says how
+  //                        far it got; retry with the same request_id.
+  //   UNAVAILABLE          transient; retry with the same request_id.
+  // A retry with the same request_id is always safe.
+  //
+  // PROTOTYPE STUB: the persisted state lives in the prototype metadata tables.
+  // Names and shapes may change.
+
+  // GetServingState returns the authoritative routing and admission metadata.
+  // Use it for preflight and to reconcile an interrupted operation, including
+  // after the migration controller itself changes leader.
+  rpc GetServingState(GetServingStateRequest) returns (GetServingStateResponse);
+
+  // UpdatePoolerAdmission closes (FENCED) or opens (UNFENCED) application query
+  // admission on every pooler of one tablegroup, and returns only once the
+  // change is complete on all of them.
+  rpc UpdatePoolerAdmission(UpdatePoolerAdmissionRequest) returns (UpdatePoolerAdmissionResponse);
+
+  // UpdateMigrationRouting atomically moves the database's application traffic
+  // from one tablegroup to another. Both must already be FENCED.
+  rpc UpdateMigrationRouting(UpdateMigrationRoutingRequest) returns (UpdateMigrationRoutingResponse);
+
+  // RefreshAdmission is called by the default primary on each pooler of a
+  // tablegroup while it runs UpdatePoolerAdmission. The pooler re-reads the
+  // authoritative state from the default primary and applies it. Migration
+  // controllers do not call this.
+  rpc RefreshAdmission(RefreshAdmissionRequest) returns (RefreshAdmissionResponse);
 }
 
 // ExecuteQueryRequest represents a request to execute a SQL query
@@ -716,4 +766,177 @@ message NotificationStreamRequest {
 message NotificationStreamResponse {
   query.PgNotification notification = 1;
   bool ready = 2;
+}
+
+// AdmissionState is the persisted application-admission state of a tablegroup.
+// UNFENCED and FENCED are settled; FENCING and UNFENCING mean an operation has
+// been decided but not yet confirmed on every pooler.
+enum AdmissionState {
+  ADMISSION_STATE_UNSPECIFIED = 0;
+  // Application queries are admitted.
+  ADMISSION_STATE_UNFENCED = 1;
+  // Closing was decided; not every pooler has confirmed it. Poolers that have
+  // confirmed stay closed. Nothing may be rerouted or reopened from here.
+  ADMISSION_STATE_FENCING = 2;
+  // Every pooler confirmed it is closed with no application work in flight.
+  ADMISSION_STATE_FENCED = 3;
+  // Opening was decided; not every pooler has confirmed it.
+  ADMISSION_STATE_UNFENCING = 4;
+}
+
+// TablegroupServingState is one tablegroup's persisted serving metadata.
+message TablegroupServingState {
+  // tablegroup is the tablegroup name.
+  string tablegroup = 1;
+
+  // backing_connection names the external connection that backs this
+  // tablegroup. Empty when it is served by its managed cohort.
+  string backing_connection = 2;
+
+  // admission_state is the persisted admission state. FENCING and UNFENCING are
+  // distinguishable from FENCED and UNFENCED: the former mean an operation is
+  // incomplete.
+  AdmissionState admission_state = 3;
+
+  // request_id is the id of the UpdatePoolerAdmission call that produced
+  // admission_state. Empty for a tablegroup never touched by one.
+  string request_id = 4;
+
+  // updated_at is when admission_state last changed.
+  google.protobuf.Timestamp updated_at = 5;
+}
+
+// GetServingStateRequest selects what to read.
+message GetServingStateRequest {
+  // database is the database to read.
+  string database = 1;
+
+  // tablegroups lists the tablegroups whose serving rows to return. Leave empty
+  // to read only the routing fields, which is what gateways poll.
+  repeated string tablegroups = 2;
+}
+
+// GetServingStateResponse is a consistent read from the default primary.
+message GetServingStateResponse {
+  // tablegroups holds one entry per requested tablegroup, in request order.
+  repeated TablegroupServingState tablegroups = 1;
+
+  // app_tablegroup is the tablegroup that currently receives the database's
+  // application traffic.
+  string app_tablegroup = 2;
+
+  // routing_version increases every time app_tablegroup changes. Pollers use it
+  // to detect a change cheaply.
+  int64 routing_version = 3;
+}
+
+// PoolerAdmissionAck is one pooler's confirmation of an admission change.
+message PoolerAdmissionAck {
+  // pooler_id identifies the pooler.
+  clustermetadata.ID pooler_id = 1;
+
+  // process_incarnation identifies the process that acknowledged. A pooler that
+  // restarts mid-operation has a new incarnation and its old acknowledgment does
+  // not count.
+  string process_incarnation = 2;
+
+  // applied_state is the state the pooler now enforces.
+  AdmissionState applied_state = 3;
+}
+
+// UpdatePoolerAdmissionRequest asks to fence or unfence one tablegroup.
+message UpdatePoolerAdmissionRequest {
+  // database is the database the tablegroup belongs to.
+  string database = 1;
+
+  // tablegroup is the tablegroup whose poolers change admission.
+  string tablegroup = 2;
+
+  // target is ADMISSION_STATE_FENCED or ADMISSION_STATE_UNFENCED. The transitional
+  // states are not valid targets.
+  AdmissionState target = 3;
+
+  // request_id identifies this operation. It must be unique per intended
+  // operation and stable across retries of it. It orders nothing by itself; see
+  // expected_request_id.
+  string request_id = 4;
+
+  // expected_request_id is a compare-and-swap guard on the persisted
+  // request_id. When set, the call fails FAILED_PRECONDITION unless the
+  // tablegroup's persisted request_id equals it. It is REQUIRED when target is
+  // UNFENCED and must be the request_id of the fence being undone, so a delayed
+  // unfence from an old coordinator can never override a newer fence. Optional
+  // for FENCED.
+  string expected_request_id = 5;
+
+  // timeout bounds how long the call waits for every pooler to confirm. Zero
+  // selects a server default.
+  google.protobuf.Duration timeout = 6;
+}
+
+// UpdatePoolerAdmissionResponse is returned only when the change is complete.
+message UpdatePoolerAdmissionResponse {
+  // state is the persisted state after the call: FENCED or UNFENCED.
+  TablegroupServingState state = 1;
+
+  // acks lists the confirmation from each pooler that was required.
+  repeated PoolerAdmissionAck acks = 2;
+}
+
+// UpdateMigrationRoutingRequest asks to move application traffic.
+message UpdateMigrationRoutingRequest {
+  // database is the database whose routing changes.
+  string database = 1;
+
+  // from_tablegroup must be the current app_tablegroup.
+  string from_tablegroup = 2;
+
+  // to_tablegroup becomes the app_tablegroup.
+  string to_tablegroup = 3;
+
+  // request_id identifies this operation and is stable across retries.
+  string request_id = 4;
+}
+
+// UpdateMigrationRoutingResponse reports the committed routing.
+message UpdateMigrationRoutingResponse {
+  // app_tablegroup is the tablegroup that now receives application traffic.
+  string app_tablegroup = 1;
+
+  // routing_version is the version after the change.
+  int64 routing_version = 2;
+}
+
+// RefreshAdmissionRequest tells a pooler to re-read and apply its admission.
+message RefreshAdmissionRequest {
+  // database is the database the tablegroup belongs to.
+  string database = 1;
+
+  // tablegroup is the tablegroup the pooler must be serving.
+  string tablegroup = 2;
+
+  // expected_state is the state the coordinator is driving to. It is an
+  // expectation, never permission: the pooler applies only what it reads from
+  // the default primary, and fails if that differs.
+  AdmissionState expected_state = 3;
+
+  // request_id is the request the coordinator is driving. The pooler fails if
+  // the persisted request_id differs.
+  string request_id = 4;
+}
+
+// RefreshAdmissionResponse is returned once the pooler enforces the state.
+message RefreshAdmissionResponse {
+  // pooler_id identifies the responding pooler.
+  clustermetadata.ID pooler_id = 1;
+
+  // process_incarnation identifies the responding process.
+  string process_incarnation = 2;
+
+  // applied_state is the state the pooler now enforces. For FENCING it is only
+  // returned once the gate is closed and no application work remains.
+  AdmissionState applied_state = 3;
+
+  // request_id echoes the request the pooler applied.
+  string request_id = 4;
 }
