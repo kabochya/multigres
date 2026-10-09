@@ -1032,3 +1032,28 @@ func TestLoadBalancer_DrainingPrimaryStaysRoutable(t *testing.T) {
 		"a cleanly-draining primary must stay routable so MTF01 buffering can engage")
 	assert.Equal(t, poolerID(primary), got.ID())
 }
+
+// TestLoadBalancer_UnmanagedPoolerIsNeverALeaderOrReplica verifies that an
+// unmanaged pooler reporting PRIMARY does not become the shard's routing
+// primary, and is not offered as a replica either. Unmanaged poolers are
+// selected by backing connection, not by consensus leadership.
+func TestLoadBalancer_UnmanagedPoolerIsNeverALeaderOrReplica(t *testing.T) {
+	lb := newTestLB(t, "zone1")
+
+	external := createTestMultipooler("external1", "zone1", "migrateTG", "0-inf", clustermetadatapb.PoolerType_PRIMARY)
+	external.ManagementMode = clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
+	addPoolerForTest(t, lb, external)
+
+	conn := connForTest(t, lb, external)
+	simulateHealthUpdate(conn, clustermetadatapb.PoolerServingStatus_SERVING,
+		external.Id, &clustermetadatapb.RuleNumber{CoordinatorTerm: 1})
+
+	assert.False(t, lb.claimsPrimary(conn), "an unmanaged pooler must not be recorded as a routing primary")
+
+	writable := protoutil.NewTarget(constants.DefaultPostgresDatabase, "migrateTG", "0-inf", query.Mode_MODE_WRITABLE)
+	_, err := lb.getConnection(writable)
+	require.Error(t, err, "no leader exists for a shard served only by unmanaged poolers")
+
+	replica := protoutil.NewTarget(constants.DefaultPostgresDatabase, "migrateTG", "0-inf", query.Mode_MODE_INCONSISTENT)
+	assert.False(t, lb.matchesReplicaTarget(conn, replica))
+}

@@ -304,6 +304,16 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 	if multipooler == nil {
 		return nil, mterrors.New(mtrpcpb.Code_INVALID_ARGUMENT, "multipooler is required")
 	}
+	// Fail before constructing any management clients for modes this manager
+	// does not understand.
+	switch multipooler.GetManagementMode() {
+	case clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNSPECIFIED,
+		clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_MANAGED,
+		clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED:
+	default:
+		return nil, mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "management mode is not supported by this manager")
+	}
+	unmanaged := multipooler.GetManagementMode() == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
 	if multipooler.GetShardKey().GetTableGroup() == "" {
 		return nil, mterrors.New(mtrpcpb.Code_INVALID_ARGUMENT, "TableGroup is required")
 	}
@@ -318,9 +328,19 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 		return nil, mterrors.Wrap(err, "invalid Multipooler.Id")
 	}
 
-	// MVP validation: fail fast if tablegroup/shard are not the MVP defaults
-	if err := constants.ValidateMVPTableGroupAndShard(multipooler.GetShardKey().GetTableGroup(), multipooler.GetShardKey().GetShard()); err != nil {
-		return nil, mterrors.Wrap(err, "MVP validation failed")
+	// MVP validation: fail fast if tablegroup/shard are not the MVP defaults.
+	// Unmanaged poolers serve a non-default tablegroup and never touch the
+	// multischema tables, so the MVP restriction does not apply to them.
+	// An unmanaged pooler fronts an external database, never the default cohort that
+	// holds cluster metadata: it would take over the whole shard as far as
+	// gateways and the orchestrator are concerned.
+	if unmanaged && multipooler.GetShardKey().GetTableGroup() == constants.DefaultTableGroup {
+		return nil, mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "an unmanaged pooler cannot serve the default tablegroup")
+	}
+	if !unmanaged {
+		if err := constants.ValidateMVPTableGroupAndShard(multipooler.GetShardKey().GetTableGroup(), multipooler.GetShardKey().GetShard()); err != nil {
+			return nil, mterrors.Wrap(err, "MVP validation failed")
+		}
 	}
 
 	record, err := newPoolerRecord(logger, config.TopoClient, multipooler)
@@ -332,7 +352,7 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 
 	// Create pgctld gRPC client
 	var pgctldClient pgctldpb.PgCtldClient
-	if config.PgctldAddr != "" {
+	if !unmanaged && config.PgctldAddr != "" {
 		conn, err := grpccommon.NewClient(config.PgctldAddr, grpccommon.WithDialOptions(grpc.WithTransportCredentials(insecure.NewCredentials())))
 		if err != nil {
 			logger.ErrorContext(ctx, "failed to create pgctld gRPC client", "error", err, "addr", config.PgctldAddr)
@@ -416,7 +436,9 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 	// the consensus-enabled path; a missing file means term=0 (new node), and
 	// only an actual read/parse error fails the constructor. A test may inject a
 	// pre-built ConsensusManager (e.g. with a fake rule store) instead.
-	if ov.consensusMgr != nil {
+	if unmanaged {
+		// External databases do not participate in consensus.
+	} else if ov.consensusMgr != nil {
 		pm.consensusMgr = ov.consensusMgr
 	} else {
 		pm.consensusMgr, err = consensus.NewConsensusManager(consensus.Deps{
@@ -441,12 +463,22 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 
 	// Create the serving state manager with the query service and health streamer as initial components.
 	// The ReplTracker is registered later when heartbeat is started.
-	pm.stateManager = NewStateManager(logger, pm.record, pm.consensusMgr.CachedConsensusStatus, pm.qsc, pm.healthStreamer)
+	consensusStatus := func() *clustermetadatapb.ConsensusStatus { return nil }
+	if pm.consensusMgr != nil {
+		consensusStatus = pm.consensusMgr.CachedConsensusStatus
+	}
+	pm.stateManager = NewStateManager(logger, pm.record, consensusStatus, pm.qsc, pm.healthStreamer)
 	if stateAwareConnPoolMgr, ok := connPoolMgr.(StateAware); ok {
 		if err := registerAndSyncStateAware(ctx, pm.stateManager, stateAwareConnPoolMgr); err != nil {
 			cancel()
 			return nil, fmt.Errorf("failed to sync connection pool metrics state: %w", err)
 		}
+	}
+
+	// An unmanaged pooler has no backup engine: backups belong to whoever owns
+	// the external PostgreSQL.
+	if unmanaged {
+		return pm, nil
 	}
 
 	// Construct the pgBackRest engine. It owns all pgBackRest interaction and its
@@ -536,6 +568,23 @@ func (pm *MultipoolerManager) Open(ctx context.Context) {
 	pm.openLocked(ctx, clustermetadatapb.PoolerServingStatus_SERVING)
 }
 
+// RejectIfUnmanaged returns a FAILED_PRECONDITION error when this pooler fronts
+// an external PostgreSQL. Management and consensus RPCs call it first so an
+// unmanaged instance refuses lifecycle actions (backup, restore, promotion,
+// replication changes) explicitly rather than failing somewhere deeper.
+func (pm *MultipoolerManager) RejectIfUnmanaged(operation string) error {
+	if !pm.IsUnmanaged() {
+		return nil
+	}
+	return mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION, "%s is not supported on an unmanaged pooler", operation)
+}
+
+// IsUnmanaged reports whether this pooler fronts an external PostgreSQL. The
+// mode is immutable for the lifetime of the process.
+func (pm *MultipoolerManager) IsUnmanaged() bool {
+	return pm.record.desired.Load().GetManagementMode() == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
+}
+
 // openLocked is the shared implementation of Open and Pause's resume. It
 // brings up connections and background goroutines, then transitions to the
 // caller-supplied target serving status. Open uses SERVING; resume passes
@@ -555,7 +604,11 @@ func (pm *MultipoolerManager) openLocked(ctx context.Context, targetServingStatu
 	pm.openConnectionsLocked()
 	pm.logger.InfoContext(pm.ctx, "MultipoolerManager opened database connection") //nolint:sloglint // message intentionally starts with an operation name or proper noun
 
-	pm.startPostgresMonitorPollerLocked()
+	// The postgres monitor repairs, restarts and rewinds a managed postgres. An
+	// external endpoint is never repaired by us.
+	if !pm.IsUnmanaged() {
+		pm.startPostgresMonitorPollerLocked()
+	}
 
 	pm.isOpen = true
 
@@ -765,6 +818,16 @@ func (pm *MultipoolerManager) openConnectionsLocked() {
 		if connConfig.SocketFile == "" {
 			connConfig.Host = pm.record.Hostname()
 		}
+		// An unmanaged pooler dials the external endpoint over TCP; pgctld's
+		// socket and the pooler's own hostname are irrelevant to it.
+		if pm.config.ExternalBackend != nil {
+			connConfig.SocketFile = ""
+			connConfig.Host = pm.config.ExternalBackend.Host
+			connConfig.Port = pm.config.ExternalBackend.Port
+			if pm.config.ExternalBackend.Database != "" {
+				connConfig.Database = pm.config.ExternalBackend.Database
+			}
+		}
 		// Apply libpq-style TLS settings on the multipooler → postgres leg.
 		// TLS is honored only on TCP dials; Unix-socket connections always run
 		// plaintext, matching libpq behavior.
@@ -804,6 +867,13 @@ func (pm *MultipoolerManager) openConnectionsLocked() {
 		}
 		pm.connPoolMgr.Open(pm.ctx, connConfig)
 		pm.logger.Info("connection pool manager opened")
+	}
+
+	// An unmanaged pooler must not create sidecar schema, heartbeat rows or any
+	// other object on the external database, and it has no replication or
+	// logical-slot machinery to poll.
+	if pm.IsUnmanaged() {
+		return
 	}
 
 	// Create sidecar schema and start heartbeat before opening query service controller
@@ -927,6 +997,9 @@ func (pm *MultipoolerManager) shardKey() *clustermetadatapb.ShardKey {
 // BackupStatusSnapshot returns a consistent snapshot of the backup-health
 // tracker for the status page.
 func (pm *MultipoolerManager) BackupStatusSnapshot() backupengine.Snapshot {
+	if pm.backup == nil {
+		return backupengine.Snapshot{}
+	}
 	return pm.backup.Health().Snapshot()
 }
 
@@ -1704,8 +1777,16 @@ func (pm *MultipoolerManager) Start(senv *servenv.ServEnv) {
 		pm.GracefulShutdown(pm.ctx)
 	})
 
-	// Start loading multipooler record from topology asynchronously
-	go pm.loadShardConfigFromGlobalTopo()
+	// Start loading multipooler record from topology asynchronously. The load
+	// only resolves the backup location, which an unmanaged pooler does not use.
+	if pm.IsUnmanaged() {
+		pm.mu.Lock()
+		pm.topoLoaded = true
+		pm.mu.Unlock()
+		pm.checkAndSetReady()
+	} else {
+		go pm.loadShardConfigFromGlobalTopo()
+	}
 
 	senv.OnRunE(func() error {
 		// Block until manager is ready or error before registering gRPC services
@@ -1751,6 +1832,9 @@ func (pm *MultipoolerManager) Start(senv *servenv.ServEnv) {
 // double wire-up cannot leak a duplicate poller goroutine (openLocked owns
 // relaunch from here on).
 func (pm *MultipoolerManager) StartBackupHealth() {
+	if pm.IsUnmanaged() {
+		return
+	}
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	if pm.backupHealthEnabled {
