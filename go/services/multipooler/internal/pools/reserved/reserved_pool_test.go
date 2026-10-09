@@ -1152,3 +1152,16 @@ func TestPool_NewConnAfterCloseReturnsErrPoolClosed(t *testing.T) {
 	_, err := pool.NewConn(context.Background(), nil)
 	require.ErrorIs(t, err, connpool.ErrPoolClosed, "must be retryable by the manager's closed-pool path")
 }
+
+func TestPool_UnterminatedBackendsAreRememberedUntilForgotten(t *testing.T) {
+	p := &Pool{}
+	require.Empty(t, p.UnterminatedBackends())
+
+	p.unterminatedMu.Lock()
+	p.unterminated = map[uint32]struct{}{11: {}, 12: {}}
+	p.unterminatedMu.Unlock()
+	require.ElementsMatch(t, []uint32{11, 12}, p.UnterminatedBackends())
+
+	p.ForgetBackends([]uint32{11, 99})
+	require.Equal(t, []uint32{12}, p.UnterminatedBackends())
+}

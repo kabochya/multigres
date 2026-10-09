@@ -339,9 +339,12 @@ func (p *UserPool) CloseReservedConnections(ctx context.Context) int {
 	return p.reservedPool.KillAll(ctx)
 }
 
-// ReservedKillFailures returns how many reserved-connection kills did not
-// succeed.
-func (p *UserPool) ReservedKillFailures() int64 { return p.reservedPool.KillFailures() }
+// UnterminatedBackends returns the backends of reserved connections whose
+// termination failed and that are not yet confirmed gone.
+func (p *UserPool) UnterminatedBackends() []uint32 { return p.reservedPool.UnterminatedBackends() }
+
+// ForgetBackends drops backends confirmed gone.
+func (p *UserPool) ForgetBackends(pids []uint32) { p.reservedPool.ForgetBackends(pids) }
 
 // Close closes both regular and reserved pools.
 func (p *UserPool) Close() {

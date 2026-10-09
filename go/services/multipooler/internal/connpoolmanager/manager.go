@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"maps"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -1117,18 +1118,63 @@ func (m *Manager) CloseReservedConnections(ctx context.Context) int {
 	return total
 }
 
-// ReservedKillFailures returns how many reserved-connection kills did not
-// succeed across all user pools.
-func (m *Manager) ReservedKillFailures() int64 {
+// PendingTerminations returns how many backends whose termination failed (a
+// closed reserved connection whose pg_terminate_backend was refused or lost) are
+// still running on the server. A backend that is confirmed gone is forgotten.
+//
+// Closing the client side of such a connection does not stop a statement the
+// backend is executing, so until the backend is gone the work of that connection
+// may still commit.
+func (m *Manager) PendingTerminations(ctx context.Context) (int, error) {
 	pools := m.userPoolsSnapshot.Load()
 	if pools == nil {
-		return 0
+		return 0, nil
 	}
-	var total int64
+	byPool := make(map[*UserPool][]uint32)
+	var all []uint32
 	for _, pool := range *pools {
-		total += pool.ReservedKillFailures()
+		if pids := pool.UnterminatedBackends(); len(pids) > 0 {
+			byPool[pool] = pids
+			all = append(all, pids...)
+		}
 	}
-	return total
+	if len(all) == 0 {
+		return 0, nil
+	}
+	ids := make([]string, len(all))
+	for i, pid := range all {
+		ids[i] = strconv.FormatUint(uint64(pid), 10)
+	}
+	conn, err := m.GetAdminConn(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Recycle()
+	// pg_stat_activity lists every backend's pid, whatever role owns it.
+	results, err := conn.Conn.QueryWithRetry(ctx, "SELECT pid FROM pg_stat_activity WHERE pid IN ("+strings.Join(ids, ",")+")")
+	if err != nil {
+		return 0, err
+	}
+	alive := map[uint32]bool{}
+	for _, res := range results {
+		for _, row := range res.Rows {
+			pid, err := strconv.ParseUint(string(row.Values[0]), 10, 32)
+			if err != nil {
+				return 0, err
+			}
+			alive[uint32(pid)] = true
+		}
+	}
+	for pool, pids := range byPool {
+		var gone []uint32
+		for _, pid := range pids {
+			if !alive[pid] {
+				gone = append(gone, pid)
+			}
+		}
+		pool.ForgetBackends(gone)
+	}
+	return len(alive), nil
 }
 
 // IsClosed reports whether the manager is terminally closed. It returns false
