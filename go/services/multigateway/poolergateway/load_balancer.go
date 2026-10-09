@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -75,6 +76,10 @@ type shardSummary struct {
 
 	mu        sync.Mutex
 	primaries primarySet
+
+	// unmanaged is set once any pooler of the shard reports itself unmanaged, so
+	// selection can skip the scan for unmanaged members on every other shard.
+	unmanaged atomic.Bool
 }
 
 // primarySet is the set of poolers currently claiming to be the writable
@@ -355,6 +360,19 @@ func (lb *loadBalancer) notifyLeaderServingFromSummary(summary *shardSummary, co
 //     (see matchesReplicaTarget). Excludes both the current leader and a
 //     stale leader.
 func (lb *loadBalancer) getConnection(target *query.Target) (*poolerConnection, error) {
+	return lb.selectConnection(target, true)
+}
+
+// getControlConnection selects a pooler for a request the application gate does
+// not apply to (a credential lookup): a pooler whose gate is closed is as good as
+// an open one, so a fence does not hold such requests back.
+func (lb *loadBalancer) getControlConnection(target *query.Target) (*poolerConnection, error) {
+	return lb.selectConnection(target, false)
+}
+
+// selectConnection implements getConnection; requireOpenGate excludes poolers
+// whose application gate is closed.
+func (lb *loadBalancer) selectConnection(target *query.Target, requireOpenGate bool) (*poolerConnection, error) {
 	if target == nil {
 		return nil, errors.New("target cannot be nil")
 	}
@@ -362,17 +380,20 @@ func (lb *loadBalancer) getConnection(target *query.Target) (*poolerConnection, 
 	sk := target.GetShardKey()
 	key := shardKeyOf(sk)
 
-	// A shard served by unmanaged poolers has no leader: any admitting pooler
-	// backed by the external database serves it.
-	if conn, handled, err := lb.unmanagedConnection(target); handled {
-		return conn, err
-	}
-
 	// Look up the shard summary under lb.mu, release it, then read the elected
 	// leader id via the summary's own lock.
 	lb.mu.Lock()
 	summary := lb.shards[key]
 	lb.mu.Unlock()
+
+	// A shard served by unmanaged poolers has no leader: any admitting pooler
+	// backed by the external database serves it. A shard known to have none
+	// skips the scan, which keeps ordinary clusters off this path entirely.
+	if summary == nil || summary.unmanaged.Load() {
+		if conn, handled, err := lb.unmanagedConnection(target, requireOpenGate); handled {
+			return conn, err
+		}
+	}
 	var (
 		leaderID   topoclient.ComponentID
 		haveLeader bool
@@ -402,7 +423,7 @@ func (lb *loadBalancer) getConnection(target *query.Target) (*poolerConnection, 
 		}
 		// A leader whose application gate is closed (fenced) cannot take the
 		// request: hold it until a pooler admits again rather than bouncing off it.
-		if h := conn.Health(); h != nil && h.AdmissionClosed {
+		if h := conn.Health(); requireOpenGate && h != nil && h.AdmissionClosed {
 			return nil, newNoWritablePrimaryError(
 				"leader %s is not admitting application queries for database=%s, tablegroup=%s, shard=%s",
 				leaderID, sk.GetDatabase(), sk.GetTableGroup(), sk.GetShard())
@@ -601,6 +622,9 @@ func (lb *loadBalancer) onPoolerHealthUpdate(conn *poolerConnection) {
 
 	poolerID := topoclient.ComponentIDString(conn.PoolerInfo().GetId())
 	summary := lb.summaryForPooler(conn.PoolerInfo().Multipooler)
+	if lb.isUnmanaged(conn) {
+		summary.unmanaged.Store(true)
+	}
 
 	// A pooler is a routing primary iff a LIVE broadcast advertises role PRIMARY.
 	// That implies writability: a pooler only advertises PRIMARY once it is the
@@ -742,7 +766,7 @@ func (lb *loadBalancer) isUnmanaged(conn *poolerConnection) bool {
 // application gate is open. When none is eligible the error is the same
 // bufferable one a missing leader returns, so requests wait for a pooler to
 // admit again instead of failing.
-func (lb *loadBalancer) unmanagedConnection(target *query.Target) (conn *poolerConnection, handled bool, err error) {
+func (lb *loadBalancer) unmanagedConnection(target *query.Target, requireOpenGate bool) (conn *poolerConnection, handled bool, err error) {
 	if lb.cache == nil {
 		return nil, false, nil
 	}
@@ -753,7 +777,7 @@ func (lb *loadBalancer) unmanagedConnection(target *query.Target) (conn *poolerC
 			continue
 		}
 		members = append(members, c)
-		if h := c.Health(); h != nil && h.LastError == nil && h.isServing() && !h.AdmissionClosed {
+		if h := c.Health(); h != nil && h.LastError == nil && h.isServing() && (!requireOpenGate || !h.AdmissionClosed) {
 			eligible = append(eligible, c)
 		}
 	}

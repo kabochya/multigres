@@ -497,6 +497,7 @@ func (mg *Multigateway) Init(ctx context.Context) error {
 			mg.executor.SetApplicationTableGroup(tg)
 		})
 		mg.poolerGateway.SetAppRouting(routing)
+		mg.scatterConn.SetApplicationTableGroupCheck(routing.IsApplicationTableGroup)
 		poller := poolergateway.NewRoutingPoller(mg.poolerGateway, routing, db, mg.routingPollInterval.Get(), logger, nil)
 		go poller.Run(mg.shutdownCtx)
 		logger.InfoContext(ctx, "following application routing", "database", db)

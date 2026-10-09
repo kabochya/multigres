@@ -52,11 +52,15 @@ type AppRouting struct {
 	known    bool
 	aliases  map[string]bool
 	onChange []func(old, new string)
+	// changed is closed, and replaced, whenever the application tablegroup
+	// changes: a waiter that resolved the tablegroup before the change learns
+	// that what it resolved is stale.
+	changed chan struct{}
 }
 
 // NewAppRouting returns routing state for database, unknown until first Update.
 func NewAppRouting(database string) *AppRouting {
-	return &AppRouting{database: database, aliases: map[string]bool{PendingAppTableGroup: true}}
+	return &AppRouting{database: database, aliases: map[string]bool{PendingAppTableGroup: true}, changed: make(chan struct{})}
 }
 
 // OnChange registers a callback run, outside the lock and in registration
@@ -68,11 +72,29 @@ func (r *AppRouting) OnChange(f func(old, new string)) {
 	r.onChange = append(r.onChange, f)
 }
 
+// IsApplicationTableGroup reports whether tablegroup is, or ever was, the
+// application tablegroup of this database.
+func (r *AppRouting) IsApplicationTableGroup(tablegroup string) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.aliases[tablegroup]
+}
+
 // Current returns the application tablegroup and whether it is known yet.
 func (r *AppRouting) Current() (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.current, r.known
+}
+
+// snapshot returns the applied tablegroup and version, and whether any is known.
+func (r *AppRouting) snapshot() (tablegroup string, version int64, known bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.current, r.version, r.known
 }
 
 // Update records a read of the routing pointer. A version at or below the one
@@ -90,6 +112,10 @@ func (r *AppRouting) Update(tablegroup string, version int64) bool {
 	changed := !r.known || old != tablegroup
 	r.current, r.version, r.known = tablegroup, version, true
 	r.aliases[tablegroup] = true
+	if changed {
+		close(r.changed)
+		r.changed = make(chan struct{})
+	}
 	callbacks := append([]func(old, new string){}, r.onChange...)
 	r.mu.Unlock()
 	if changed {
@@ -106,25 +132,36 @@ func (r *AppRouting) Update(tablegroup string, version int64) bool {
 // with a bufferable error. Targets are built per call, so it swaps the target's
 // key in place; the old key, which a buffered request may hold, is not edited.
 func (r *AppRouting) Rewrite(target *query.Target) error {
+	_, err := r.rewrite(target)
+	return err
+}
+
+// rewrite is Rewrite that also returns a channel closed when the application
+// tablegroup next changes, captured together with the rewrite so no change can
+// fall between them. It is nil when the target is not an application target.
+func (r *AppRouting) rewrite(target *query.Target) (<-chan struct{}, error) {
 	if r == nil || target == nil || target.GetShardKey() == nil {
-		return nil
+		return nil, nil
 	}
 	sk := target.GetShardKey()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if !r.aliases[sk.GetTableGroup()] {
-		return nil
+		return nil, nil
 	}
 	if !r.known {
-		return newNoWritablePrimaryError("application routing for database=%s is not known yet", r.database)
+		return r.changed, newNoWritablePrimaryError("application routing for database=%s is not known yet", r.database)
 	}
 	// Replace the key rather than edit it: a buffered request holds the old one.
 	target.ShardKey = &clustermetadatapb.ShardKey{Database: sk.GetDatabase(), TableGroup: r.current, Shard: sk.GetShard()}
-	return nil
+	return r.changed, nil
 }
 
 // AuthTableGroup is the tablegroup whose poolers answer credential lookups: the
-// application tablegroup once known, else the default one.
+// application tablegroup. Before it is known the lookup targets the pending
+// tablegroup and waits like any other request, rather than consulting the
+// default cohort, whose roles and password verifiers need not match the ones the
+// application database uses. Without application routing it is the default one.
 func (r *AppRouting) AuthTableGroup() string {
 	if r == nil {
 		return constants.DefaultTableGroup
@@ -132,7 +169,7 @@ func (r *AppRouting) AuthTableGroup() string {
 	if tg, known := r.Current(); known {
 		return tg
 	}
-	return constants.DefaultTableGroup
+	return PendingAppTableGroup
 }
 
 // SetAppRouting wires application routing into the gateway. On a change it
@@ -158,7 +195,7 @@ func (pg *PoolerGateway) drainTableGroup(tablegroup string) {
 	pg.loadBalancer.mu.Lock()
 	var keys []*clustermetadatapb.ShardKey
 	for _, summary := range pg.loadBalancer.shards {
-		if summary.shardKey.GetTableGroup() == tablegroup {
+		if summary.shardKey.GetDatabase() == pg.appRouting.database && summary.shardKey.GetTableGroup() == tablegroup {
 			keys = append(keys, summary.shardKey)
 		}
 	}
@@ -181,6 +218,8 @@ type RoutingPoller struct {
 	logger   *slog.Logger
 	// onChange runs after the pointer changed (plan cache invalidation).
 	onChange func()
+	// failures counts consecutive failed reads (touched only by the polling loop).
+	failures int
 	// read fetches the routing pointer; a seam for tests.
 	read func(ctx context.Context) (*multipoolerservicepb.GetServingStateResponse, error)
 }
@@ -225,7 +264,23 @@ func (p *RoutingPoller) PollOnce(ctx context.Context) {
 	defer cancel()
 	resp, err := p.read(callCtx)
 	if err != nil {
-		p.logger.DebugContext(ctx, "routing poll failed", "error", err)
+		// Warned on the first failure and then every tenth, so an outage is
+		// visible without a line per poll.
+		if p.failures++; p.failures == 1 || p.failures%10 == 0 {
+			p.logger.WarnContext(ctx, "routing poll failed; keeping the last known routing",
+				"error", err, "consecutive_failures", p.failures)
+		}
+		return
+	}
+	p.failures = 0
+	if resp.GetAppTablegroup() == "" {
+		p.logger.WarnContext(ctx, "the default primary has no application routing pointer; application traffic stays held until one is set",
+			"database", p.database)
+		return
+	}
+	if current, version, known := p.routing.snapshot(); known && resp.GetRoutingVersion() < version {
+		p.logger.WarnContext(ctx, "routing version went backwards; ignoring it until it passes the applied one",
+			"applied_version", version, "read_version", resp.GetRoutingVersion(), "current", current, "read", resp.GetAppTablegroup())
 		return
 	}
 	if p.routing.Update(resp.GetAppTablegroup(), resp.GetRoutingVersion()) {

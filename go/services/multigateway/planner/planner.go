@@ -698,9 +698,11 @@ func (p *Planner) planUnlistenStmt(sql string, stmt *ast.UnlistenStmt) (*engine.
 	return engine.NewPlan(sql, engine.NewUnlistenPrimitive(stmt.Conditionname, sql)), nil
 }
 
-// planNotifyStmt routes NOTIFY to the default table group as a regular query.
+// planNotifyStmt routes NOTIFY to the default table group as a regular query. It
+// does not follow the application tablegroup: LISTEN subscribes on the default
+// cohort, so a NOTIFY sent anywhere else would never be delivered.
 func (p *Planner) planNotifyStmt(sql string) (*engine.Plan, error) {
-	return engine.NewPlan(sql, engine.NewRoute(p.tableGroup(), constants.DefaultShard, sql, nil)), nil
+	return engine.NewPlan(sql, engine.NewRoute(constants.DefaultTableGroup, constants.DefaultShard, sql, nil)), nil
 }
 
 // tableGroup returns the tablegroup application queries are routed to.

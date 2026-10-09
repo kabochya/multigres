@@ -176,7 +176,10 @@ func TestAppRoutingRewriteAndVersions(t *testing.T) {
 	err := r.Rewrite(pending)
 	require.Error(t, err)
 	assert.True(t, isNoWritablePrimaryError(err))
-	assert.Equal(t, constants.DefaultTableGroup, r.AuthTableGroup())
+	// Credential lookups wait for routing too, rather than asking the default cohort.
+	assert.Equal(t, PendingAppTableGroup, r.AuthTableGroup())
+	var nilRouting *AppRouting
+	assert.Equal(t, constants.DefaultTableGroup, nilRouting.AuthTableGroup(), "without application routing it is the default")
 
 	require.True(t, r.Update("migrateTG", 1))
 	tg, known := r.Current()
@@ -283,6 +286,63 @@ func TestRoutingFlipReleasesBufferedRequestsToTheNewTablegroup(t *testing.T) {
 	assert.Equal(t, "destTG", target.GetShardKey().GetTableGroup(), "and its target was re-resolved")
 }
 
+// TestRoutingFlipBeforeTheDestinationOpensHoldsTheRequestAgain: routing moves
+// while the destination is still fenced. The released request must wait again on
+// the destination instead of spending its retries on it, and be served when the
+// destination admits.
+func TestRoutingFlipBeforeTheDestinationOpensHoldsTheRequestAgain(t *testing.T) {
+	failoverBuffer := newTestFailoverBuffer(t, 10)
+	lb := newTestLBWithLeaderServing(t, "zone1", failoverBuffer.StopBuffering)
+	pg := &PoolerGateway{loadBalancer: lb, buffer: failoverBuffer, logger: slog.New(slog.DiscardHandler)}
+
+	src := unmanagedPooler("src", "zone1", "migrateTG")
+	dst := unmanagedPooler("dst", "zone1", "destTG")
+	addPoolerForTest(t, lb, src)
+	addPoolerForTest(t, lb, dst)
+	reportHealth(connForTest(t, lb, src), clustermetadatapb.PoolerServingStatus_SERVING, true)
+	reportHealth(connForTest(t, lb, dst), clustermetadatapb.PoolerServingStatus_SERVING, true)
+
+	routing := NewAppRouting(constants.DefaultPostgresDatabase)
+	pg.SetAppRouting(routing)
+	routing.Update("migrateTG", 1)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	target := writableTarget("migrateTG")
+	selected := make(chan *poolerConnection, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- pg.withBuffering(ctx, target, true, false, func(conn *poolerConnection) error {
+			selected <- conn
+			return nil
+		})
+	}()
+
+	bufferedOn := func(tg string) func() bool {
+		key := &clustermetadatapb.ShardKey{Database: constants.DefaultPostgresDatabase, TableGroup: tg, Shard: constants.DefaultShard}
+		return func() bool {
+			probe, stop := context.WithCancel(ctx)
+			stop()
+			_, err := failoverBuffer.WaitIfAlreadyBuffering(probe, key)
+			return errors.Is(err, context.Canceled)
+		}
+	}
+	require.Eventually(t, bufferedOn("migrateTG"), 5*time.Second, time.Millisecond, "held on the source")
+
+	// Routing moves while the destination is still closed.
+	require.True(t, routing.Update("destTG", 2))
+	require.Eventually(t, bufferedOn("destTG"), 5*time.Second, time.Millisecond, "held again, now on the destination")
+	select {
+	case err := <-done:
+		t.Fatalf("request returned while the destination was fenced: %v", err)
+	default:
+	}
+
+	reportHealth(connForTest(t, lb, dst), clustermetadatapb.PoolerServingStatus_SERVING, false)
+	require.NoError(t, <-done)
+	assert.Equal(t, poolerID(dst), (<-selected).ID())
+}
+
 func TestColdGatewayFailsClosedUntilRoutingIsKnown(t *testing.T) {
 	failoverBuffer := newTestFailoverBuffer(t, 10)
 	lb := newTestLBWithLeaderServing(t, "zone1", failoverBuffer.StopBuffering)
@@ -317,4 +377,53 @@ func TestColdGatewayFailsClosedUntilRoutingIsKnown(t *testing.T) {
 	routing.Update("migrateTG", 1)
 	require.NoError(t, <-done)
 	assert.Equal(t, poolerID(src), (<-selected).ID())
+}
+
+// TestOnlyUnmanagedShardsAreScannedForUnmanagedMembers: the scan for unmanaged
+// members is per-request work, so a shard whose poolers are all managed must not
+// pay it, while an unmanaged shard is recognized from its first health report.
+func TestOnlyUnmanagedShardsAreScannedForUnmanagedMembers(t *testing.T) {
+	lb := newTestLB(t, "zone1")
+	managed := createTestMultipooler("m1", "zone1", "default", constants.DefaultShard, clustermetadatapb.PoolerType_PRIMARY)
+	unmanaged := unmanagedPooler("u1", "zone1", "migrateTG")
+	addPoolerForTest(t, lb, managed)
+	addPoolerForTest(t, lb, unmanaged)
+	reportHealth(connForTest(t, lb, managed), clustermetadatapb.PoolerServingStatus_SERVING, false)
+	reportHealth(connForTest(t, lb, unmanaged), clustermetadatapb.PoolerServingStatus_SERVING, false)
+
+	summaryOf := func(p *clustermetadatapb.Multipooler) *shardSummary {
+		lb.mu.Lock()
+		defer lb.mu.Unlock()
+		return lb.shards[shardKeyOf(p.GetShardKey())]
+	}
+	require.NotNil(t, summaryOf(managed))
+	assert.False(t, summaryOf(managed).unmanaged.Load())
+	require.NotNil(t, summaryOf(unmanaged))
+	assert.True(t, summaryOf(unmanaged).unmanaged.Load())
+
+	conn, err := lb.getConnection(writableTarget("migrateTG"))
+	require.NoError(t, err)
+	assert.Equal(t, poolerID(unmanaged), conn.ID())
+}
+
+// TestControlRequestsAreNotHeldBackByAClosedGate: a credential lookup is not
+// application work, so a fence must not make new logins wait.
+func TestControlRequestsAreNotHeldBackByAClosedGate(t *testing.T) {
+	lb := newTestLB(t, "zone1")
+	closed := unmanagedPooler("closed", "zone1", "migrateTG")
+	addPoolerForTest(t, lb, closed)
+	reportHealth(connForTest(t, lb, closed), clustermetadatapb.PoolerServingStatus_SERVING, true)
+
+	_, err := lb.getConnection(writableTarget("migrateTG"))
+	require.Error(t, err)
+	assert.True(t, isNoWritablePrimaryError(err), "application work waits for the gate")
+
+	conn, err := lb.getControlConnection(writableTarget("migrateTG"))
+	require.NoError(t, err)
+	assert.Equal(t, poolerID(closed), conn.ID())
+
+	// A pooler that is not serving at all still cannot answer.
+	reportHealth(connForTest(t, lb, closed), clustermetadatapb.PoolerServingStatus_DISABLED, true)
+	_, err = lb.getControlConnection(writableTarget("migrateTG"))
+	require.Error(t, err)
 }
