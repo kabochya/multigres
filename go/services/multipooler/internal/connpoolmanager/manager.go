@@ -1117,6 +1117,20 @@ func (m *Manager) CloseReservedConnections(ctx context.Context) int {
 	return total
 }
 
+// ReservedKillFailures returns how many reserved-connection kills did not
+// succeed across all user pools.
+func (m *Manager) ReservedKillFailures() int64 {
+	pools := m.userPoolsSnapshot.Load()
+	if pools == nil {
+		return 0
+	}
+	var total int64
+	for _, pool := range *pools {
+		total += pool.ReservedKillFailures()
+	}
+	return total
+}
+
 // IsClosed reports whether the manager is terminally closed. It returns false
 // during a reopen window: the manager is mid-refresh, not shut down.
 func (m *Manager) IsClosed() bool {

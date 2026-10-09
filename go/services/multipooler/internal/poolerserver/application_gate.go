@@ -52,6 +52,12 @@ type ApplicationGate interface {
 	FenceApplication(ctx context.Context, drainTimeout time.Duration) (terminated int, err error)
 }
 
+// reservedKillReporter is implemented by pool managers that can report failed
+// backend terminations.
+type reservedKillReporter interface {
+	ReservedKillFailures() int64
+}
+
 var _ ApplicationGate = (*QueryPoolerServer)(nil)
 
 // BeginRequest admits an application query request, like StartRequest, but also
@@ -65,6 +71,11 @@ func (s *QueryPoolerServer) BeginRequest(target *query.Target, kind RequestKind)
 	if err := s.startRequestLocked(target, kind, true /* gated */); err != nil {
 		return nil, err
 	}
+	// Only a pooler with admission control ever waits for requests to finish, so
+	// every other pooler skips the accounting (and its second lock acquisition).
+	if !s.admissionControlled {
+		return noopRelease, nil
+	}
 	s.activeRequests++
 	var once sync.Once
 	return func() {
@@ -77,12 +88,15 @@ func (s *QueryPoolerServer) BeginRequest(target *query.Target, kind RequestKind)
 	}, nil
 }
 
-// notifyRequestsLocked wakes anyone waiting for requests to finish.
+func noopRelease() {}
+
+// notifyRequestsLocked wakes anyone waiting for requests to finish. The channel
+// is created by the waiter, so a completion nobody waits for allocates nothing.
 func (s *QueryPoolerServer) notifyRequestsLocked() {
 	if s.requestsChanged != nil {
 		close(s.requestsChanged)
+		s.requestsChanged = nil
 	}
-	s.requestsChanged = make(chan struct{})
 }
 
 // EnableAdmissionControl implements ApplicationGate.
@@ -160,8 +174,20 @@ func (s *QueryPoolerServer) FenceApplication(ctx context.Context, drainTimeout t
 	}
 
 	terminated := 0
+	var failuresBefore int64
+	reporter, _ := s.poolManager.(reservedKillReporter)
+	if reporter != nil {
+		failuresBefore = reporter.ReservedKillFailures()
+	}
 	if s.poolManager != nil {
 		terminated = s.poolManager.CloseReservedConnections(ctx)
+	}
+	// A kill that failed leaves its backend free to finish the statement it was
+	// running, after this fence would have been acknowledged. Fail, stay closed.
+	if reporter != nil {
+		if failed := reporter.ReservedKillFailures() - failuresBefore; failed > 0 {
+			return terminated, fmt.Errorf("could not terminate %d reserved connection(s) at the fence deadline; the fence cannot be acknowledged", failed)
+		}
 	}
 	if s.logger != nil {
 		s.logger.WarnContext(ctx, "application fence deadline passed, terminated remaining work",

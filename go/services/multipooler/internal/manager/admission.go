@@ -128,17 +128,21 @@ type admissionLifecycle struct{ pm *MultipoolerManager }
 func (l admissionLifecycle) OnStateChange(_ context.Context, s servingstate.State) error {
 	pm := l.pm
 	a := &pm.admission
+	// The gate is closed while holding a.mu so that it is ordered against
+	// enforceAdmission's open-and-record step: a close either lands before that
+	// step (and the open is refused by the generation check) or after it (and
+	// withdraws the decision it recorded).
 	a.mu.Lock()
 	changed := a.lastRole != s.Routing.Role || a.lastStatus != s.ServingStatus
 	if changed {
 		a.lastRole, a.lastStatus = s.Routing.Role, s.ServingStatus
 		a.applied = nil
-	}
-	a.mu.Unlock()
-	if changed {
 		if g, err := pm.applicationGate(); err == nil {
 			g.CloseApplication()
 		}
+	}
+	a.mu.Unlock()
+	if changed {
 		pm.signalAdmission()
 	}
 	return nil
@@ -175,14 +179,25 @@ func (pm *MultipoolerManager) runAdmission(ctx context.Context) {
 		case <-events:
 		case <-ticker.C:
 		}
+		// A managed pooler must be visible in topology before it reads anything:
+		// the coordinator fences the poolers it finds there, and one that opens
+		// from a read taken before it is listed could stay open past a fence
+		// committed without it. Unmanaged poolers register before they start.
+		if !pm.IsUnmanaged() && !pm.record.IsRegistered() {
+			continue
+		}
+		g, err := pm.applicationGate()
+		if err != nil {
+			continue
+		}
 		a.mu.Lock()
-		decided := a.applied != nil
+		decided := a.applied != nil && a.applied.generation == g.AdmissionGeneration()
 		a.mu.Unlock()
 		if decided || pm.healthStreamer.getState().ServingStatus != clustermetadatapb.PoolerServingStatus_SERVING {
 			continue
 		}
 		attemptCtx, cancel := context.WithTimeout(ctx, admissionReadTimeout)
-		_, err := pm.enforceAdmission(attemptCtx, multipoolerservicepb.AdmissionState_ADMISSION_STATE_UNSPECIFIED, "")
+		_, err = pm.enforceAdmission(attemptCtx, multipoolerservicepb.AdmissionState_ADMISSION_STATE_UNSPECIFIED, "")
 		cancel()
 		if err != nil {
 			pm.logger.DebugContext(ctx, "admission not decided yet; staying closed", "error", err)
@@ -297,20 +312,23 @@ func (pm *MultipoolerManager) enforceAdmission(ctx context.Context, expected mul
 		if _, err := g.FenceApplication(ctx, pm.admissionDrainTimeout()); err != nil {
 			return nil, err
 		}
-		generation = g.AdmissionGeneration()
-	} else {
-		if err := pm.admissionBackendReady(); err != nil {
-			return nil, err
-		}
-		if !g.OpenApplication(generation) {
-			return nil, mterrors.New(mtrpcpb.Code_ABORTED, "pooler lifecycle changed while reading admission; retry")
-		}
+	} else if err := pm.admissionBackendReady(); err != nil {
+		return nil, err
 	}
 
-	applied := &appliedAdmission{state: settled, requestID: row.GetRequestId(), generation: generation}
+	// Open (or record the fence) and store the decision in one step against
+	// the lifecycle sink, which closes the gate under the same lock.
 	a.mu.Lock()
+	defer a.mu.Unlock()
+	if settled == multipoolerservicepb.AdmissionState_ADMISSION_STATE_FENCED {
+		// The gate is closed, and stays closed; whatever closed it again since
+		// the drain only reinforces the decision.
+		generation = g.AdmissionGeneration()
+	} else if !g.OpenApplication(generation) {
+		return nil, mterrors.New(mtrpcpb.Code_ABORTED, "pooler lifecycle changed while reading admission; retry")
+	}
+	applied := &appliedAdmission{state: settled, requestID: row.GetRequestId(), generation: generation}
 	a.applied = applied
-	a.mu.Unlock()
 	return applied, nil
 }
 
