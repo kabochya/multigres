@@ -69,6 +69,11 @@ type Multigateway struct {
 	// slots in the replication preamble (default off, dynamic/reloadable).
 	slotBasedReplicationEnabled viperutil.Value[bool]
 	queryStreamReuse            viperutil.Value[bool]
+	// routingPollDatabase, when set, makes the gateway follow the application
+	// routing pointer of that database on the default primary (prototype).
+	routingPollDatabase viperutil.Value[string]
+	// routingPollInterval is how often the pointer is read.
+	routingPollInterval viperutil.Value[time.Duration]
 	// keepTransactionOnGatewayRejection, when enabled, leaves an open explicit
 	// transaction in-block after a gateway policy rejection (feature_not_supported)
 	// instead of aborting it. Off by default so clients see PostgreSQL's contract
@@ -263,6 +268,12 @@ func NewMultigateway(opts ...Option) *Multigateway {
 			Dynamic:  true,
 			EnvVars:  []string{"MT_ENABLE_SLOT_BASED_REPLICATION"},
 		}),
+		routingPollDatabase: viperutil.Configure(reg, "routing-poll-database", viperutil.Options[string]{
+			Default: "", FlagName: "routing-poll-database",
+		}),
+		routingPollInterval: viperutil.Configure(reg, "routing-poll-interval", viperutil.Options[time.Duration]{
+			Default: 500 * time.Millisecond, FlagName: "routing-poll-interval",
+		}),
 		queryStreamReuse: viperutil.Configure(reg, "query-stream-reuse", viperutil.Options[bool]{
 			Default: true, FlagName: "query-stream-reuse", EnvVars: []string{"MT_QUERY_STREAM_REUSE"},
 		}),
@@ -340,6 +351,8 @@ func (mg *Multigateway) RegisterFlags(fs *pflag.FlagSet) {
 	fs.String("pg-tls-cert-file", mg.pgTLSCertFile.Default(), "path to TLS certificate file for PostgreSQL SSL connections")
 	fs.String("pg-tls-key-file", mg.pgTLSKeyFile.Default(), "path to TLS private key file for PostgreSQL SSL connections")
 	fs.Bool("pg-require-ssl", mg.pgRequireSSL.Default(), "require TLS for all client PostgreSQL connections; multigateway fails to start if no cert/key is configured. CancelRequest still permitted over plaintext.")
+	fs.String("routing-poll-database", mg.routingPollDatabase.Default(), "follow the application routing pointer of this database on the default primary: application queries go to the tablegroup it names and fail closed until it is known (prototype)")
+	fs.Duration("routing-poll-interval", mg.routingPollInterval.Default(), "how often to read the application routing pointer")
 	fs.Bool("enable-slot-based-replication", mg.slotBasedReplicationEnabled.Default(), "admit non-temporary logical replication slots registered for failover (slot-based replication). Default off.")
 	fs.Bool("keep-transaction-on-gateway-rejection", mg.keepTransactionOnGatewayRejection.Default(), "leave an open explicit transaction in-block after a gateway policy rejection (feature_not_supported) instead of aborting it. Off by default so clients see PostgreSQL's contract that any wire error aborts the transaction; intended for pg_regress and compatibility test suites.")
 	fs.Int("pg-replica-port", mg.pgReplicaPort.Default(), "optional port for replica-reads connections; 0 disables the replica listener")
@@ -362,6 +375,8 @@ func (mg *Multigateway) RegisterFlags(fs *pflag.FlagSet) {
 		mg.pgTLSKeyFile,
 		mg.pgRequireSSL,
 		mg.slotBasedReplicationEnabled,
+		mg.routingPollDatabase,
+		mg.routingPollInterval,
 		mg.keepTransactionOnGatewayRejection,
 		mg.pgReplicaPort,
 		mg.pgReplicaLowLagMs,
@@ -469,6 +484,24 @@ func (mg *Multigateway) Init(ctx context.Context) error {
 	// Pass ScatterConn as the IExecute implementation
 	mg.executor = executor.NewExecutor(mg.scatterConn, logger, mg.planCacheMemory.Get())
 	mg.executor.SetSlotBasedReplicationEnabled(mg.slotBasedReplicationEnabled.Get)
+
+	// PROTOTYPE STUB: follow the application routing pointer on the default
+	// primary. Until the first read the planner targets a pending tablegroup that
+	// fails closed with a bufferable error.
+	if db := mg.routingPollDatabase.Get(); db != "" {
+		routing := poolergateway.NewAppRouting(db)
+		mg.executor.SetApplicationTableGroup(poolergateway.PendingAppTableGroup)
+		// Plan against the new tablegroup first, then release what was held for
+		// the old one.
+		routing.OnChange(func(_, tg string) {
+			mg.executor.SetApplicationTableGroup(tg)
+		})
+		mg.poolerGateway.SetAppRouting(routing)
+		mg.scatterConn.SetApplicationTableGroupCheck(routing.IsApplicationTableGroup)
+		poller := poolergateway.NewRoutingPoller(mg.poolerGateway, routing, db, mg.routingPollInterval.Get(), logger, nil)
+		go poller.Run(mg.shutdownCtx)
+		logger.InfoContext(ctx, "following application routing", "database", db)
+	}
 	// Started only now that mg.executor is assigned — see CobraPreRunE's doc
 	// comment, which subscribes mg.configReloaded, for why the consumer
 	// can't start any earlier.

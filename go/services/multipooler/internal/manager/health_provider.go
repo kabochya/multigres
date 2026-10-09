@@ -74,6 +74,10 @@ type healthStreamer struct {
 	// poolers.
 	backendReady bool
 
+	// admissionClosed mirrors the application gate of an admission-controlled
+	// pooler so gateways can steer around a closed pooler.
+	admissionClosed bool
+
 	// metrics publishes replication lag and serving-state transitions as OTel
 	// metrics. Always non-nil after newHealthStreamer.
 	metrics *healthMetrics
@@ -189,6 +193,7 @@ func (hs *healthStreamer) SetReplicationLag(lagNs int64) {
 func (hs *healthStreamer) buildStateLocked() *poolerserver.HealthState {
 	return &poolerserver.HealthState{
 		BackendReady:                hs.backendReady,
+		AdmissionClosed:             hs.admissionClosed,
 		PoolerID:                    hs.poolerID,
 		ServingStatus:               hs.servingStatus,
 		RoutingState:                hs.routingState,
@@ -371,5 +376,17 @@ func (hs *healthStreamer) setBackendReady(ready bool) {
 		return
 	}
 	hs.backendReady = ready
+	hs.broadcastLocked()
+}
+
+// setAdmissionClosed records the application gate's state and broadcasts a
+// change so gateways learn immediately.
+func (hs *healthStreamer) setAdmissionClosed(closed bool) {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	if hs.admissionClosed == closed {
+		return
+	}
+	hs.admissionClosed = closed
 	hs.broadcastLocked()
 }

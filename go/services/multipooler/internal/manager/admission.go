@@ -138,6 +138,7 @@ func (l admissionLifecycle) OnStateChange(_ context.Context, s servingstate.Stat
 		if g, err := pm.applicationGate(); err == nil {
 			g.CloseApplication()
 		}
+		pm.healthStreamer.setAdmissionClosed(true)
 	}
 	a.mu.Unlock()
 	if changed {
@@ -307,6 +308,8 @@ func (pm *MultipoolerManager) enforceAdmission(ctx context.Context, expected mul
 	if settled == multipoolerservicepb.AdmissionState_ADMISSION_STATE_FENCED {
 		// Close, drain, and only then acknowledge. A failed drain leaves the gate
 		// closed and the call failing, never a false acknowledgment.
+		// Tell gateways the gate is closing before the drain, which can be long.
+		pm.healthStreamer.setAdmissionClosed(true)
 		if _, err := g.FenceApplication(ctx, pm.admissionDrainTimeout()); err != nil {
 			return nil, err
 		}
@@ -325,6 +328,9 @@ func (pm *MultipoolerManager) enforceAdmission(ctx context.Context, expected mul
 	} else if !g.OpenApplication(generation) {
 		return nil, mterrors.New(mtrpcpb.Code_ABORTED, "pooler lifecycle changed while reading admission; retry")
 	}
+	// Reported to gateways under the same lock, so a lifecycle close that follows
+	// cannot be overwritten by this open.
+	pm.healthStreamer.setAdmissionClosed(settled == multipoolerservicepb.AdmissionState_ADMISSION_STATE_FENCED)
 	applied := &appliedAdmission{state: settled, requestID: row.GetRequestId(), generation: generation}
 	a.applied = applied
 	return applied, nil

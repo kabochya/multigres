@@ -99,6 +99,12 @@ type MultigatewayConnectionState struct {
 	// so it genuinely belongs to connection state.
 	PendingBeginQuery string
 
+	// copyTarget is the target the active COPY was established on. Routing can
+	// re-resolve a COPY's target while it waits to start (application routing
+	// moving), so the data phase must use the target the reservation was recorded
+	// under, not rebuild one from the statement's plan. Guarded by mu.
+	copyTarget *query.Target
+
 	// ActiveTransactionBeginQuery stores the BEGIN/START statement that describes
 	// the current transaction's characteristics. PendingBeginQuery is consumed when
 	// the first backend reservation starts the transaction; this copy survives that
@@ -381,6 +387,49 @@ func NewShardState(target *query.Target) *ShardState {
 	return &ShardState{
 		Target: target,
 	}
+}
+
+// DropReservationsWhere forgets every shard state that holds a reserved
+// connection on a target for which drop returns true, and returns what it held.
+// It only edits the gateway's bookkeeping: nothing is sent to a pooler.
+func (m *MultigatewayConnectionState) DropReservationsWhere(drop func(*query.Target) bool) []*query.ReservedState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var dropped []*query.ReservedState
+	kept := m.ShardStates[:0]
+	for _, ss := range m.ShardStates {
+		if ss.ReservedState.GetReservedConnectionId() != 0 && drop(ss.Target) {
+			dropped = append(dropped, ss.ReservedState)
+			continue
+		}
+		kept = append(kept, ss)
+	}
+	for i := len(kept); i < len(m.ShardStates); i++ {
+		m.ShardStates[i] = nil
+	}
+	m.ShardStates = kept
+	return dropped
+}
+
+// SetCopyTarget records the target the active COPY was established on.
+func (m *MultigatewayConnectionState) SetCopyTarget(t *query.Target) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.copyTarget = t
+}
+
+// CopyTarget returns the target the active COPY was established on, or nil.
+func (m *MultigatewayConnectionState) CopyTarget() *query.Target {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.copyTarget
+}
+
+// ClearCopyTarget forgets the active COPY's target.
+func (m *MultigatewayConnectionState) ClearCopyTarget() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.copyTarget = nil
 }
 
 // GetMatchingShardState gets the shardState (if any) that matches the target specified.

@@ -2480,9 +2480,15 @@ type StreamPoolerHealthResponse struct {
 	// It is false while unverified, on an identity mismatch, and on any managed
 	// pooler (whose readiness is reported through serving_status and
 	// routing_state).
-	BackendReady  bool `protobuf:"varint,7,opt,name=backend_ready,json=backendReady,proto3" json:"backend_ready,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	BackendReady bool `protobuf:"varint,7,opt,name=backend_ready,json=backendReady,proto3" json:"backend_ready,omitempty"`
+	// admission_closed is true while an admission-controlled pooler's application
+	// gate is closed: it is serving and healthy but refuses application queries
+	// (fenced, or not yet decided). Gateways exclude such a pooler from selection
+	// and buffer until one admits again. False means open, and is the value for
+	// every pooler without admission control.
+	AdmissionClosed bool `protobuf:"varint,8,opt,name=admission_closed,json=admissionClosed,proto3" json:"admission_closed,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *StreamPoolerHealthResponse) Reset() {
@@ -2553,6 +2559,13 @@ func (x *StreamPoolerHealthResponse) GetReplicationLagNs() int64 {
 func (x *StreamPoolerHealthResponse) GetBackendReady() bool {
 	if x != nil {
 		return x.BackendReady
+	}
+	return false
+}
+
+func (x *StreamPoolerHealthResponse) GetAdmissionClosed() bool {
+	if x != nil {
+		return x.AdmissionClosed
 	}
 	return false
 }
@@ -3717,14 +3730,15 @@ const file_multipoolerservice_proto_rawDesc = "" +
 	"\x18keep_sticky_reservations\x18\x04 \x01(\bR\x16keepStickyReservations\"`\n" +
 	"!ReleaseReservedConnectionResponse\x12;\n" +
 	"\x0ereserved_state\x18\x01 \x01(\v2\x14.query.ReservedStateR\rreservedState\"\x1b\n" +
-	"\x19StreamPoolerHealthRequest\"\x91\x03\n" +
+	"\x19StreamPoolerHealthRequest\"\xbc\x03\n" +
 	"\x1aStreamPoolerHealthResponse\x120\n" +
 	"\tpooler_id\x18\x02 \x01(\v2\x13.clustermetadata.IDR\bpoolerId\x12K\n" +
 	"\x0eserving_status\x18\x03 \x01(\x0e2$.clustermetadata.PoolerServingStatusR\rservingStatus\x12B\n" +
 	"\rrouting_state\x18\x04 \x01(\v2\x1d.clustermetadata.RoutingStateR\froutingState\x12]\n" +
 	"\x1drecommended_staleness_timeout\x18\x05 \x01(\v2\x19.google.protobuf.DurationR\x1brecommendedStalenessTimeout\x12,\n" +
 	"\x12replication_lag_ns\x18\x06 \x01(\x03R\x10replicationLagNs\x12#\n" +
-	"\rbackend_ready\x18\a \x01(\bR\fbackendReady\"w\n" +
+	"\rbackend_ready\x18\a \x01(\bR\fbackendReady\x12)\n" +
+	"\x10admission_closed\x18\b \x01(\bR\x0fadmissionClosed\"w\n" +
 	"\x11BackingConnection\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
 	"\x03url\x18\x02 \x01(\tR\x03url\x12<\n" +

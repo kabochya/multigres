@@ -61,6 +61,11 @@ type poolerHealth struct {
 	// Zero on the primary or when not yet measured.
 	ReplicationLagNs int64
 
+	// AdmissionClosed is true while the pooler's application gate is closed: it
+	// is serving but refuses application queries (fenced or undecided). It is
+	// false for poolers without admission control.
+	AdmissionClosed bool
+
 	// LastError is the most recent error from the health stream.
 	LastError error
 
@@ -90,6 +95,7 @@ func (h *poolerHealth) simpleCopy() *poolerHealth {
 		ServingStatus:    h.ServingStatus,
 		RoutingState:     h.RoutingState,
 		ReplicationLagNs: h.ReplicationLagNs,
+		AdmissionClosed:  h.AdmissionClosed,
 		LastError:        h.LastError,
 		LastResponse:     h.LastResponse,
 	}
@@ -414,6 +420,7 @@ func (pc *poolerConnection) processHealthResponse(response *multipoolerservice.S
 		ServingStatus:    response.ServingStatus,
 		RoutingState:     response.RoutingState,
 		ReplicationLagNs: response.ReplicationLagNs,
+		AdmissionClosed:  response.AdmissionClosed,
 		LastError:        nil,
 		LastResponse:     time.Now(),
 	}

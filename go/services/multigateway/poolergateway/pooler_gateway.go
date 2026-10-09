@@ -119,6 +119,10 @@ type PoolerGateway struct {
 	// gateway shuts the cache down, which tears down everything in turn.
 	cache *poolerwatch.PoolerCache[*poolerConnection]
 
+	// appRouting, when set, steers application targets to the tablegroup the
+	// default primary's routing pointer names. See app_routing.go.
+	appRouting *AppRouting
+
 	// logger for debugging
 	logger *slog.Logger
 }
@@ -321,14 +325,34 @@ func (pg *PoolerGateway) withBuffering(
 	retryReadOnlyError bool,
 	inner func(conn *poolerConnection) error,
 ) error {
-	bufferedOnce := false
-	// Buffer operations are keyed on the target's full ShardKey
-	// (database + tableGroup + shard) — no need to copy field-by-field.
-	sk := target.GetShardKey()
+	return pg.withBufferingSelecting(ctx, target, singleQuery, retryReadOnlyError, pg.loadBalancer.getConnection, inner)
+}
+
+// withBufferingSelecting is withBuffering with the pooler selection supplied by
+// the caller.
+func (pg *PoolerGateway) withBufferingSelecting(
+	ctx context.Context,
+	target *query.Target,
+	singleQuery bool,
+	retryReadOnlyError bool,
+	selectConn func(*query.Target) (*poolerConnection, error),
+	inner func(conn *poolerConnection) error,
+) error {
+	// bufferedOn is the shard a request has already waited on. A request that
+	// moves to another shard because routing changed waits there again: the
+	// tablegroup it was released into may itself still be closed.
+	bufferedOn := ""
 
 	var err error
 	for range constants.MaxBufferingRetries + 1 {
-		if pg.buffer != nil && !bufferedOnce && modeRequiresLeader(target.GetMode()) {
+		// Re-resolve the application tablegroup on every attempt: a request that
+		// waited out a cutover must retry against the tablegroup that now owns
+		// the traffic, not the one it was planned for.
+		routingChanged, rewriteErr := pg.appRouting.rewrite(target)
+		// Buffer operations are keyed on the target's full ShardKey
+		// (database + tableGroup + shard) — no need to copy field-by-field.
+		sk := target.GetShardKey()
+		if pg.buffer != nil && bufferedOn != shardKeyString(sk) && modeRequiresLeader(target.GetMode()) {
 			var retryDone buffer.RetryDoneFunc
 			var bufErr error
 			if err == nil {
@@ -342,25 +366,44 @@ func (pg *PoolerGateway) withBuffering(
 				// rejects them throughout the drain, so a wasted round-trip is
 				// pointless.
 				if !singleQuery {
-					retryDone, bufErr = pg.buffer.WaitIfAlreadyBuffering(ctx, sk)
+					waitCtx, stop := contextUntil(ctx, routingChanged)
+					retryDone, bufErr = pg.buffer.WaitIfAlreadyBuffering(waitCtx, sk)
+					stop()
 				}
 			} else {
 				// Reactive: after a buffer-worthy error, wait for failover to end.
-				retryDone, bufErr = pg.buffer.WaitForFailoverEnd(ctx, sk)
+				// A routing change ends the wait: what was being waited for is
+				// the old tablegroup, which no longer carries this request.
+				waitCtx, stop := contextUntil(ctx, routingChanged)
+				retryDone, bufErr = pg.buffer.WaitForFailoverEnd(waitCtx, sk)
+				stop()
 			}
-			if bufErr != nil {
+			// A routing change ends the wait, however the buffer reports it: what
+			// was being waited for is the tablegroup that just lost the traffic.
+			routingMoved := ctx.Err() == nil && isClosed(routingChanged)
+			if bufErr != nil && !routingMoved {
 				return bufErr
 			}
 			if retryDone != nil {
 				// Hold the drain slot until all bounded retries finish. This keeps
 				// DrainConcurrency as backpressure if the new primary fails again.
 				defer retryDone()
-				bufferedOnce = true
+				bufferedOn = shardKeyString(sk)
+			}
+			if routingMoved {
+				// The error that sent this request to wait belongs to the
+				// tablegroup it just left: start over against the new one.
+				err = nil
+				continue
 			}
 		}
 
 		var conn *poolerConnection
-		conn, err = pg.loadBalancer.getConnection(target)
+		if rewriteErr != nil {
+			err = rewriteErr
+		} else {
+			conn, err = selectConn(target)
+		}
 		if err != nil {
 			if classifyError(err, target, retryReadOnlyError) == actionBuffer {
 				continue
@@ -385,6 +428,40 @@ func (pg *PoolerGateway) withBuffering(
 		return translatePreExecutionUnavailable(err)
 	}
 	return translatePreExecutionUnavailable(err)
+}
+
+// shardKeyString identifies a shard for comparing where a request has waited.
+func shardKeyString(sk *clustermetadatapb.ShardKey) string {
+	return sk.GetDatabase() + "/" + sk.GetTableGroup() + "/" + sk.GetShard()
+}
+
+// contextUntil returns a context that ends when parent does or when ch closes.
+// A nil ch never closes.
+func contextUntil(parent context.Context, ch <-chan struct{}) (context.Context, context.CancelFunc) {
+	if ch == nil {
+		return parent, func() {}
+	}
+	ctx, cancel := context.WithCancel(parent)
+	go func() {
+		select {
+		case <-ch:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
+}
+
+func isClosed(ch <-chan struct{}) bool {
+	if ch == nil {
+		return false
+	}
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
 }
 
 // isClientDrivenFailure reports whether err is a cancellation or timeout the
@@ -643,14 +720,16 @@ func (pg *PoolerGateway) GetAuthCredentials(ctx context.Context, req *multipoole
 	target := &query.Target{
 		ShardKey: &clustermetadatapb.ShardKey{
 			Database:   req.GetDatabase(),
-			TableGroup: "default", // TODO: discover the auth tablegroup from cluster config
+			TableGroup: pg.appRouting.AuthTableGroup(), // the application tablegroup once routing is known
 			Shard:      constants.DefaultShard,
 		},
 		Mode: query.Mode_MODE_WRITABLE,
 	}
 
 	var resp *multipoolerpb.GetAuthCredentialsResponse
-	err := pg.withBuffering(ctx, target, false, false, func(conn *poolerConnection) error {
+	// Credential lookups are not application work, so a closed application gate
+	// does not exclude a pooler from answering them.
+	err := pg.withBufferingSelecting(ctx, target, false, false, pg.loadBalancer.getControlConnection, func(conn *poolerConnection) error {
 		var err error
 		resp, err = conn.ServiceClient().GetAuthCredentials(ctx, req)
 		// Convert gRPC error so classifyError can read the PgDiagnostic SQLSTATE.
