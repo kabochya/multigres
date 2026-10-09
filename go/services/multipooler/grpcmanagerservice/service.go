@@ -209,6 +209,11 @@ func (s *managerService) SetPostgresRestartsEnabled(ctx context.Context, req *mu
 
 // ReloadConfig triggers a PostgreSQL configuration reload and confirms it took effect.
 func (s *managerService) ReloadConfig(ctx context.Context, req *multipoolermanagerdatapb.ReloadConfigRequest) (*multipoolermanagerdatapb.ReloadConfigResponse, error) {
+	// An unmanaged pooler has no pgctld to ask, and reloading the configuration of
+	// an external postgres is not ours to do.
+	if err := s.manager.RejectIfUnmanaged("ReloadConfig"); err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
 	resp, err := s.manager.ReloadConfig(ctx, req)
 	if err != nil {
 		return nil, mterrors.ToGRPC(err)

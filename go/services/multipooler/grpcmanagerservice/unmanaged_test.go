@@ -32,7 +32,7 @@ import (
 	"github.com/multigres/multigres/go/tools/viperutil"
 )
 
-// TestManagerServiceRejectsUnmanaged verifies that lifecycle RPCs fail with an
+// TestManagerServiceRejectsUnmanaged verifies that every management RPC, including ReloadConfig, fail with an
 // explicit FAILED_PRECONDITION on an unmanaged pooler instead of reaching
 // components (pgctld, consensus, backups) that do not exist for it.
 func TestManagerServiceRejectsUnmanaged(t *testing.T) {
@@ -80,6 +80,10 @@ func TestManagerServiceRejectsUnmanaged(t *testing.T) {
 		},
 		"ResignLeadership": func() error {
 			_, err := svc.ResignLeadership(ctx, &multipoolermanagerdata.ResignLeadershipRequest{})
+			return err
+		},
+		"ReloadConfig": func() error {
+			_, err := svc.ReloadConfig(ctx, &multipoolermanagerdata.ReloadConfigRequest{})
 			return err
 		},
 		"SetPostgresRestartsEnabled": func() error {

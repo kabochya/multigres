@@ -331,6 +331,12 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 	// MVP validation: fail fast if tablegroup/shard are not the MVP defaults.
 	// Unmanaged poolers serve a non-default tablegroup and never touch the
 	// multischema tables, so the MVP restriction does not apply to them.
+	// An unmanaged pooler fronts an external database, never the default cohort that
+	// holds cluster metadata: it would take over the whole shard as far as
+	// gateways and the orchestrator are concerned.
+	if unmanaged && multipooler.GetShardKey().GetTableGroup() == constants.DefaultTableGroup {
+		return nil, mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "an unmanaged pooler cannot serve the default tablegroup")
+	}
 	if !unmanaged {
 		if err := constants.ValidateMVPTableGroupAndShard(multipooler.GetShardKey().GetTableGroup(), multipooler.GetShardKey().GetShard()); err != nil {
 			return nil, mterrors.Wrap(err, "MVP validation failed")

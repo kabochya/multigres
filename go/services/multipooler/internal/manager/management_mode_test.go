@@ -86,3 +86,14 @@ func TestUnmanagedRoutingStateNeverCarriesConsensusRule(t *testing.T) {
 	got = pm.stateManager.deriveRoutingState(pgmode.InRecovery, nil)
 	require.Equal(t, servingstate.RoutingRoleUnknown, got.Role)
 }
+
+func TestUnmanagedPoolerCannotServeTheDefaultTablegroup(t *testing.T) {
+	_, err := NewMultipoolerManager(slog.Default(), &clustermetadatapb.Multipooler{
+		Id:             &clustermetadatapb.ID{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: "zone1", Name: "external"},
+		ShardKey:       &clustermetadatapb.ShardKey{Database: "db", TableGroup: "default", Shard: "0-inf"},
+		ManagementMode: clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED,
+	}, &Config{})
+	require.Error(t, err)
+	require.Equal(t, mtrpcpb.Code_FAILED_PRECONDITION, mterrors.Code(err))
+	require.ErrorContains(t, err, "default tablegroup")
+}
