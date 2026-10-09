@@ -57,11 +57,33 @@ type migrationFixture struct {
 	srcPortText string
 }
 
+// migrationOptions varies the fixture.
+type migrationOptions struct {
+	// sourceDrain is the unmanaged poolers' fence drain deadline.
+	sourceDrain time.Duration
+	// limitedBackingRole makes the poolers' backing connection a role that is
+	// neither a superuser nor a member of the application role, so it cannot
+	// terminate the application's backends.
+	limitedBackingRole bool
+}
+
+// limitedBackingRole is the non-superuser role of migrationOptions.
+const (
+	limitedRole     = "appbackend"
+	limitedPassword = "backend-secret"
+)
+
 // newMigrationFixture builds the cluster. sourceDrain is the unmanaged poolers'
 // fence drain deadline.
 func newMigrationFixture(t *testing.T, sourceDrain time.Duration) *migrationFixture {
 	t.Helper()
+	return newMigrationFixtureWith(t, migrationOptions{sourceDrain: sourceDrain})
+}
+
+func newMigrationFixtureWith(t *testing.T, opts migrationOptions) *migrationFixture {
+	t.Helper()
 	ctx := t.Context()
+	sourceDrain := opts.sourceDrain
 
 	def, cleanupDef := NewIsolated(t, WithMultipoolerCount(3), WithMultiorchCount(1), WithLeaderFailoverGracePeriod("0s", "0s"))
 	t.Cleanup(cleanupDef)
@@ -98,7 +120,19 @@ func newMigrationFixture(t *testing.T, sourceDrain time.Duration) *migrationFixt
 		require.NoError(t, err)
 	}
 
-	seedBackingConnection(t, def, "mig-src", externalDSN(f.srcPort), externalSystemIdentifier(t, f.srcPort))
+	backingDSN := externalDSN(f.srcPort)
+	if opts.limitedBackingRole {
+		_, err = f.srcAdmin.Exec(ctx, "CREATE ROLE "+limitedRole+" LOGIN PASSWORD '"+limitedPassword+"'")
+		require.NoError(t, err)
+		_, err = f.srcAdmin.Exec(ctx, "GRANT CONNECT ON DATABASE postgres TO "+limitedRole)
+		require.NoError(t, err)
+		// Credential lookup reads the role verifiers, which the backing role needs
+		// to be able to see; that is the only privilege beyond connecting.
+		_, err = f.srcAdmin.Exec(ctx, "GRANT SELECT ON pg_authid TO "+limitedRole)
+		require.NoError(t, err)
+		backingDSN = fmt.Sprintf("postgres://%s:%s@127.0.0.1:%d/postgres?sslmode=disable", limitedRole, limitedPassword, f.srcPort)
+	}
+	seedBackingConnection(t, def, "mig-src", backingDSN, externalSystemIdentifier(t, f.srcPort))
 	setServingRow(t, def, "migrateTG", "mig-src", "UNFENCED", "r-src0")
 	seedRouting(t, def, "migrateTG")
 	for _, name := range []string{"mig-src-1", "mig-src-2"} {
@@ -107,7 +141,11 @@ func newMigrationFixture(t *testing.T, sourceDrain time.Duration) *migrationFixt
 	}
 	for _, p := range f.srcPoolers {
 		waitBackendReady(t, p)
-		requireAdmits(t, p.grpcPort, "the source must admit while UNFENCED")
+		if !opts.limitedBackingRole {
+			// The probe connects as the backing role; with a limited one the
+			// gateway login below is the proof that the source admits.
+			requireAdmits(t, p.grpcPort, "the source must admit while UNFENCED")
+		}
 	}
 	f.gatewayPort = startRoutedGateway(t, def)
 	require.Eventually(t, func() bool {
@@ -297,6 +335,40 @@ type migrator struct {
 	// fence request ids of the last cutover, which the rollback must name to
 	// unfence what the cutover fenced.
 	srcFenceID, destFenceID string
+	// betweenRouteAndUnfence, when set, runs after routing moved and before the
+	// destination is unfenced.
+	betweenRouteAndUnfence func()
+	// srcFrozen and destFrozen are the application rows of a side at the moment
+	// its fence was acknowledged. A fenced side must hold exactly these until it
+	// is unfenced or overwritten by a catch-up, however long that takes.
+	srcFrozen, destFrozen map[int64]bool
+}
+
+// snapshot returns the application rows currently on a database.
+func (m *migrator) snapshot(ctx context.Context, conn *pgx.Conn) map[int64]bool {
+	m.f.t.Helper()
+	ids, err := ledgerIDs(ctx, conn)
+	require.NoError(m.f.t, err)
+	return ids
+}
+
+// requireSourceFrozen asserts that nothing reached the source since its fence was
+// acknowledged: the same rows, not merely as many.
+func (m *migrator) requireSourceFrozen(ctx context.Context, when string) {
+	m.f.t.Helper()
+	if m.srcFrozen == nil {
+		return
+	}
+	requireExactly(m.f.t, "source "+when+": it must hold exactly what it held at its fence", m.srcFrozen, m.snapshot(ctx, m.f.srcAdmin))
+}
+
+// requireDestFrozen is requireSourceFrozen for the destination.
+func (m *migrator) requireDestFrozen(ctx context.Context, when string) {
+	m.f.t.Helper()
+	if m.destFrozen == nil {
+		return
+	}
+	requireExactly(m.f.t, "destination "+when+": it must hold exactly what it held at its fence", m.destFrozen, m.snapshot(ctx, m.f.adminConn(m.f.dest)))
 }
 
 func (m *migrator) id(step string) string {
@@ -343,16 +415,23 @@ func (m *migrator) Cutover(ctx context.Context) {
 	// Both sides are fenced and acknowledged: nothing may write to the source from
 	// here on. Catch up, then route.
 	srcBefore := countLedger(t, f.srcAdmin)
+	m.srcFrozen = m.snapshot(ctx, f.srcAdmin)
 	destAdmin := f.adminConn(f.dest)
 	m.copyLedger(ctx, f.srcAdmin, destAdmin)
 	require.Equal(t, srcBefore, countLedger(t, destAdmin), "catch-up must copy every row")
 
 	_, err = f.control().route(ctx, "migrateTG", "destTG", m.id("route"))
 	require.NoError(t, err)
+	m.requireSourceFrozen(ctx, "after routing moved")
+	if m.betweenRouteAndUnfence != nil {
+		m.betweenRouteAndUnfence()
+	}
 	_, err = f.control().unfence(ctx, "destTG", m.id("unfence-dest"), m.destFenceID)
 	require.NoError(t, err)
 
-	require.Equal(t, srcBefore, countLedger(t, f.srcAdmin), "no write may land on the source after its fence was acknowledged")
+	// The source stays fenced from here on, and the rollback overwrites it, so
+	// this is checked again where the rollback begins.
+	m.requireSourceFrozen(ctx, "after the destination was unfenced")
 }
 
 // Rollback moves application traffic back to the source.
@@ -363,13 +442,19 @@ func (m *migrator) Rollback(ctx context.Context) {
 	state := ctl.state(ctx, "migrateTG", "destTG")
 	require.Equal(t, "destTG", state.AppTablegroup, "the destination must own the traffic")
 
+	// Whatever reached the fenced source while the destination served would be
+	// erased by the catch-up below, so look before it runs.
+	m.requireSourceFrozen(ctx, "before the rollback's catch-up")
+
 	destFence := m.id("fence-dest")
 	_, err := ctl.fence(ctx, "destTG", destFence)
 	require.NoError(t, err)
 
 	destAdmin := f.adminConn(f.dest)
 	destBefore := countLedger(t, destAdmin)
+	m.destFrozen = m.snapshot(ctx, destAdmin)
 	m.copyLedger(ctx, destAdmin, f.srcAdmin)
+	m.srcFrozen = nil // the catch-up replaced the source's rows
 	require.Equal(t, destBefore, countLedger(t, f.srcAdmin), "catch-up must copy every row")
 
 	_, err = f.control().route(ctx, "destTG", "migrateTG", m.id("route"))
@@ -378,5 +463,5 @@ func (m *migrator) Rollback(ctx context.Context) {
 	require.NoError(t, err)
 	m.destFenceID = destFence
 
-	require.Equal(t, destBefore, countLedger(t, f.adminConn(f.dest)), "no write may land on the destination after its fence was acknowledged")
+	m.requireDestFrozen(ctx, "after the rollback moved traffic back")
 }

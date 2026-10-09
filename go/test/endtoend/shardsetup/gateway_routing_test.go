@@ -57,7 +57,7 @@ func startRoutedGateway(t *testing.T, s *ShardSetup) int {
 
 // startRoutedGatewayNamed is startRoutedGateway with a name and a routing poll
 // interval. A long interval makes a gateway whose routing goes stale.
-func startRoutedGatewayNamed(t *testing.T, s *ShardSetup, name, pollInterval string) int {
+func startRoutedGatewayNamed(t *testing.T, s *ShardSetup, name, pollInterval string, extraArgs ...string) int {
 	t.Helper()
 	pgPort, httpPort, grpcPort := utils.GetFreePort(t), utils.GetFreePort(t), utils.GetFreePort(t)
 	gw := s.CreateMultigatewayInstance(t, name, pgPort, httpPort, grpcPort)
@@ -67,6 +67,7 @@ func startRoutedGatewayNamed(t *testing.T, s *ShardSetup, name, pollInterval str
 		"--buffer-max-failover-duration", "60s", "--buffer-min-time-between-failovers", "0s",
 		"--buffer-drain-concurrency", "5",
 	}
+	gw.ExtraArgs = append(gw.ExtraArgs, extraArgs...)
 	require.NoError(t, gw.Start(s.Context(), t))
 	// Only the most recent gateway is tracked by the setup; stop each one.
 	t.Cleanup(func() { gw.TerminateGracefully(t.Logf, 10*time.Second) })
