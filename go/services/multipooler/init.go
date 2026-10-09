@@ -91,6 +91,9 @@ func validateUnrecoverableMinAttempts(n int) error {
 
 // Multipooler represents the main multipooler instance with all configuration and state
 type Multipooler struct {
+	// allowNonDefaultTableGroup lets a managed pooler serve a tablegroup other
+	// than the default one, as the leader of its own cohort.
+	allowNonDefaultTableGroup viperutil.Value[bool]
 	// backingConnection names the connection an unmanaged pooler fronts. Setting
 	// it makes the pooler unmanaged (see managementModeFor).
 	backingConnection   viperutil.Value[string]
@@ -221,6 +224,11 @@ func NewMultipooler(telemetry *telemetry.Telemetry, opts ...Option) *Multipooler
 			Dynamic:  false,
 			EnvVars:  []string{"MT_SERVICE_ID"},
 		}),
+		allowNonDefaultTableGroup: viperutil.Configure(reg, "allow-non-default-tablegroup", viperutil.Options[bool]{
+			Default:  false,
+			FlagName: "allow-non-default-tablegroup",
+			Dynamic:  false,
+		}),
 		backingConnection: viperutil.Configure(reg, "backing-connection", viperutil.Options[string]{
 			Default:  "",
 			FlagName: "backing-connection",
@@ -344,6 +352,7 @@ func (mp *Multipooler) consensusEnabled() bool {
 
 // RegisterFlags registers all multipooler flags with the given FlagSet
 func (mp *Multipooler) RegisterFlags(flags *pflag.FlagSet) {
+	flags.Bool("allow-non-default-tablegroup", mp.allowNonDefaultTableGroup.Default(), "allow this managed pooler to serve a tablegroup other than the default one, as the leader of its own cohort (prototype)")
 	flags.String("backing-connection", mp.backingConnection.Default(), "Name of the connection of an external postgres to front. Setting it makes this an unmanaged pooler: no pgctld, backups or consensus")
 	flags.String("pgctld-addr", mp.pgctldAddr.Default(), "Address of pgctld gRPC service")
 	flags.String("cell", mp.cell.Default(), "cell to use")
@@ -369,6 +378,7 @@ func (mp *Multipooler) RegisterFlags(flags *pflag.FlagSet) {
 
 	viperutil.BindFlags(
 		flags,
+		mp.allowNonDefaultTableGroup,
 		mp.backingConnection,
 		mp.pgctldAddr,
 		mp.cell,
@@ -689,7 +699,8 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 
 		StaticLeader: mp.staticLeader,
 
-		ExternalBackend: externalBackend,
+		AllowNonDefaultTableGroup: mp.allowNonDefaultTableGroup.Get(),
+		ExternalBackend:           externalBackend,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create multipooler: %w", err)

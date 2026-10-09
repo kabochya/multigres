@@ -606,3 +606,68 @@ func TestRepoRetentionConfig(t *testing.T) {
 	assert.Equal(t, RetentionFullType, cfg["repo2-retention-full-type"])
 	assert.Equal(t, RetentionHistory, cfg["repo2-retention-history"])
 }
+
+func TestForTableGroupScopesNonDefaultRepositories(t *testing.T) {
+	t.Run("default tablegroup is unchanged", func(t *testing.T) {
+		cfg, err := NewConfig(utils.FilesystemBackupLocation("/var/backups"))
+		require.NoError(t, err)
+		scoped, err := cfg.ForTableGroup("default")
+		require.NoError(t, err)
+		assert.Same(t, cfg, scoped)
+	})
+
+	t.Run("filesystem gets its own path", func(t *testing.T) {
+		cfg, err := NewConfig(utils.FilesystemBackupLocation("/var/backups"))
+		require.NoError(t, err)
+		scoped, err := cfg.ForTableGroup("destTG")
+		require.NoError(t, err)
+
+		got, err := scoped.PgBackRestConfig(1, InitialRepoGeneration, "multigres")
+		require.NoError(t, err)
+		assert.Equal(t, "/var/backups/tablegroups/destTG", got["repo1-path"])
+
+		// The original is not modified.
+		orig, err := cfg.PgBackRestConfig(1, InitialRepoGeneration, "multigres")
+		require.NoError(t, err)
+		assert.Equal(t, "/var/backups", orig["repo1-path"])
+	})
+
+	t.Run("s3 gets its own key prefix", func(t *testing.T) {
+		loc := &clustermetadatapb.BackupLocation{Location: &clustermetadatapb.BackupLocation_S3{S3: &clustermetadatapb.S3Backup{
+			Bucket: "b", Region: "us-east-1", KeyPrefix: "prod/",
+		}}}
+		cfg, err := NewConfig(loc)
+		require.NoError(t, err)
+		scoped, err := cfg.ForTableGroup("destTG")
+		require.NoError(t, err)
+		got, err := scoped.PgBackRestConfig(1, InitialRepoGeneration, "multigres")
+		require.NoError(t, err)
+		assert.Equal(t, "/prod/tablegroups/destTG/multigres", got["repo1-path"])
+		assert.Equal(t, "prod/", loc.GetS3().KeyPrefix, "the original location is not modified")
+	})
+
+	t.Run("s3 prefix of only slashes adds no empty component", func(t *testing.T) {
+		for _, prefix := range []string{"/", "//", "prod//"} {
+			loc := &clustermetadatapb.BackupLocation{Location: &clustermetadatapb.BackupLocation_S3{S3: &clustermetadatapb.S3Backup{
+				Bucket: "b", Region: "us-east-1", KeyPrefix: prefix,
+			}}}
+			cfg, err := NewConfig(loc)
+			require.NoError(t, err)
+			scoped, err := cfg.ForTableGroup("destTG")
+			require.NoError(t, err)
+			got, err := scoped.PgBackRestConfig(1, InitialRepoGeneration, "multigres")
+			require.NoError(t, err)
+			assert.NotContains(t, got["repo1-path"], "//", "prefix %q", prefix)
+			assert.Contains(t, got["repo1-path"], "tablegroups/destTG/multigres")
+		}
+	})
+
+	t.Run("rejects an empty or path-escaping tablegroup", func(t *testing.T) {
+		cfg, err := NewConfig(utils.FilesystemBackupLocation("/var/backups"))
+		require.NoError(t, err)
+		_, err = cfg.ForTableGroup("")
+		require.Error(t, err)
+		_, err = cfg.ForTableGroup("../escape")
+		require.Error(t, err)
+	})
+}

@@ -83,6 +83,13 @@ type Config struct {
 	// monitor starts postgres as a primary rather than a standby.
 	StaticLeader bool
 
+	// AllowNonDefaultTableGroup lifts the MVP restriction that a pooler must
+	// serve the default tablegroup and shard. A pooler of another tablegroup
+	// leads its own cohort with its own postgres and does not create the global
+	// multischema tables (tablegroup, tablegroup_table, shard), which live only on
+	// the default cohort.
+	AllowNonDefaultTableGroup bool
+
 	// ExternalBackend is the external PostgreSQL an unmanaged pooler fronts.
 	// Nil for managed poolers. It is the resolved form of --backing-connection.
 	ExternalBackend *ExternalBackend
