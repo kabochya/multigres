@@ -646,6 +646,22 @@ func TestForTableGroupScopesNonDefaultRepositories(t *testing.T) {
 		assert.Equal(t, "prod/", loc.GetS3().KeyPrefix, "the original location is not modified")
 	})
 
+	t.Run("s3 prefix of only slashes adds no empty component", func(t *testing.T) {
+		for _, prefix := range []string{"/", "//", "prod//"} {
+			loc := &clustermetadatapb.BackupLocation{Location: &clustermetadatapb.BackupLocation_S3{S3: &clustermetadatapb.S3Backup{
+				Bucket: "b", Region: "us-east-1", KeyPrefix: prefix,
+			}}}
+			cfg, err := NewConfig(loc)
+			require.NoError(t, err)
+			scoped, err := cfg.ForTableGroup("destTG")
+			require.NoError(t, err)
+			got, err := scoped.PgBackRestConfig(1, InitialRepoGeneration, "multigres")
+			require.NoError(t, err)
+			assert.NotContains(t, got["repo1-path"], "//", "prefix %q", prefix)
+			assert.Contains(t, got["repo1-path"], "tablegroups/destTG/multigres")
+		}
+	})
+
 	t.Run("rejects an empty or path-escaping tablegroup", func(t *testing.T) {
 		cfg, err := NewConfig(utils.FilesystemBackupLocation("/var/backups"))
 		require.NoError(t, err)

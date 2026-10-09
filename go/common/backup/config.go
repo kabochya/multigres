@@ -72,8 +72,9 @@ func (c *Config) ForTableGroup(tableGroup string) (*Config, error) {
 		loc.Filesystem.Path = path
 	case *clustermetadatapb.BackupLocation_S3:
 		prefix := "tablegroups/" + tableGroup
-		if loc.S3.KeyPrefix != "" {
-			prefix = strings.TrimSuffix(loc.S3.KeyPrefix, "/") + "/" + prefix
+		// A prefix of "/" (or "a//") must not leave an empty path component.
+		if base := strings.Trim(loc.S3.KeyPrefix, "/"); base != "" {
+			prefix = base + "/" + prefix
 		}
 		loc.S3.KeyPrefix = prefix
 	default:

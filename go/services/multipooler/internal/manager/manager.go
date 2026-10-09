@@ -342,7 +342,11 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 	if unmanaged && multipooler.GetShardKey().GetTableGroup() == constants.DefaultTableGroup {
 		return nil, mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "an unmanaged pooler cannot serve the default tablegroup")
 	}
-	if !unmanaged && !config.AllowNonDefaultTableGroup {
+	// The default tablegroup is always held to the MVP shard, even when other
+	// tablegroups are allowed: it runs the multischema initialization, which
+	// supports only that shard.
+	nonDefaultAllowed := config.AllowNonDefaultTableGroup && multipooler.GetShardKey().GetTableGroup() != constants.DefaultTableGroup
+	if !unmanaged && !nonDefaultAllowed {
 		if err := constants.ValidateMVPTableGroupAndShard(multipooler.GetShardKey().GetTableGroup(), multipooler.GetShardKey().GetShard()); err != nil {
 			return nil, mterrors.Wrap(err, "MVP validation failed")
 		}

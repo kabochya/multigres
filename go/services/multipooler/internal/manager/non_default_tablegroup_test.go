@@ -45,6 +45,11 @@ func TestAllowNonDefaultTableGroupLiftsMVPValidation(t *testing.T) {
 	require.NoError(t, err)
 	pm.ShutdownForTest(t.Context())
 
+	// The default tablegroup keeps the MVP shard even when others are allowed: it
+	// runs the multischema initialization, which supports only that shard.
+	_, err = newManager(constants.DefaultTableGroup, "0-80", true)
+	require.ErrorContains(t, err, "MVP validation failed")
+
 	// An empty tablegroup or shard is still invalid.
 	_, err = newManager("", constants.DefaultShard, true)
 	require.ErrorContains(t, err, "TableGroup is required")
