@@ -16,14 +16,18 @@ package manager
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/multigres/multigres/go/common/servenv/toporeg"
+	"github.com/multigres/multigres/go/common/topoclient"
 	clustermetadatapb "github.com/multigres/multigres/go/pb/clustermetadata"
 	"github.com/multigres/multigres/go/services/multipooler/internal/manager/actionlock"
 )
@@ -423,6 +427,12 @@ func (r *poolerRecord) publishIfNeeded(ctx context.Context) {
 		"serving_status", desired.ServingStatus.String())
 }
 
+// multipoolerGetter reads an existing topology entry. The real topology store
+// provides it; the minimal stores some tests use do not.
+type multipoolerGetter interface {
+	GetMultipooler(ctx context.Context, id *clustermetadatapb.ID) (*topoclient.MultipoolerInfo, error)
+}
+
 // RegisterPreparing publishes a DISABLED topology entry for an unmanaged pooler
 // before it reads any metadata. It runs before the manager exists; once the
 // manager starts, the normal record lifecycle takes ownership of the entry.
@@ -430,12 +440,48 @@ func (r *poolerRecord) publishIfNeeded(ctx context.Context) {
 // Registering first closes a gap: a restarted pooler must not leave a stale
 // SERVING entry in topology while it is still deciding whether it may serve, and
 // a coordinator that snapshots topology must be able to see it.
+//
+// It overwrites an earlier entry of the same pooler, which is how a restart
+// replaces its predecessor's, but never an entry that is not an unmanaged
+// pooler's: reusing a managed pooler's service id must not turn it into an
+// unmanaged one.
 func RegisterPreparing(ctx context.Context, ts poolerTopoStore, initial *clustermetadatapb.Multipooler) error {
+	if getter, ok := ts.(multipoolerGetter); ok {
+		existing, err := getter.GetMultipooler(ctx, initial.GetId())
+		switch {
+		case err == nil:
+			if existing.GetManagementMode() != clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED {
+				return fmt.Errorf("pooler %s is already registered as a managed pooler; refusing to replace it", topoclient.ComponentIDString(initial.GetId()))
+			}
+		case !errors.Is(err, &topoclient.TopoError{Code: topoclient.NoNode}):
+			return fmt.Errorf("read existing registration: %w", err)
+		}
+	}
 	record, err := newPoolerRecord(nil, ts, initial)
 	if err != nil {
 		return err
 	}
 	rec := routingStateForPublish(record.Snapshot())
 	rec.ServingStatus = clustermetadatapb.PoolerServingStatus_DISABLED
+	return record.topoClient.RegisterMultipooler(ctx, rec, true /* allowUpdate */)
+}
+
+// MarkPreparingFailed records that a pooler that registered with RegisterPreparing
+// gave up before it ever served. A leftover DISABLED entry would keep every
+// membership snapshot of its tablegroup waiting for a pooler that is gone;
+// SHUTDOWN is the state that says it has stopped.
+func MarkPreparingFailed(ctx context.Context, ts poolerTopoStore, initial *clustermetadatapb.Multipooler) error {
+	record, err := newPoolerRecord(nil, ts, initial)
+	if err != nil {
+		return err
+	}
+	rec := routingStateForPublish(record.Snapshot())
+	rec.ServingStatus = clustermetadatapb.PoolerServingStatus_DISABLED
+	rec.RoutingState = nil
+	rec.LifecycleStatus = &clustermetadatapb.PoolerLifecycle{
+		Status:  clustermetadatapb.PoolerLifecycleStatus_LIFECYCLE_SHUTDOWN,
+		Reason:  "bootstrap failed",
+		Updated: timestamppb.Now(),
+	}
 	return record.topoClient.RegisterMultipooler(ctx, rec, true /* allowUpdate */)
 }

@@ -204,10 +204,13 @@ func TestBootstrapStaysClosedWhenDefaultPrimaryIsUnreachable(t *testing.T) {
 	_, err := bootstrapBackingConnection(t.Context(), ts, initial, "src", insecureTransport, slog.Default())
 	require.ErrorContains(t, err, "pooler stays closed")
 
-	// It still registered first, closed.
+	// It still registered first, closed, and then marked itself stopped so no
+	// membership snapshot waits for it.
 	info, getErr := ts.GetMultipooler(t.Context(), initial.Id)
 	require.NoError(t, getErr)
 	require.Equal(t, clustermetadatapb.PoolerServingStatus_DISABLED, info.GetServingStatus())
+	require.Equal(t, clustermetadatapb.PoolerLifecycleStatus_LIFECYCLE_SHUTDOWN, info.GetLifecycleStatus().GetStatus())
+	require.Equal(t, clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED, info.GetManagementMode())
 }
 
 func TestBootstrapFailsOnUnknownOrMismatchedConnection(t *testing.T) {

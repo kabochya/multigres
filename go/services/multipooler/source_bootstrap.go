@@ -74,6 +74,13 @@ func bootstrapBackingConnection(ctx context.Context, ts topoclient.Store, initia
 		logger.WarnContext(ctx, "backing connection bootstrap attempt failed", "attempt", attempt, "error", err)
 	})
 	if err != nil {
+		// Do not leave a DISABLED entry behind for a pooler that is about to exit:
+		// it would keep gateways and coordinators waiting on it.
+		markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if markErr := manager.MarkPreparingFailed(markCtx, ts, initial); markErr != nil {
+			logger.WarnContext(ctx, "could not mark the failed pooler as stopped", "error", markErr)
+		}
 		return nil, errors.Join(errors.New("backing connection bootstrap unavailable; pooler stays closed"), err)
 	}
 	return conn, nil
