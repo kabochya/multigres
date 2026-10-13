@@ -22,8 +22,6 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/multigres/multigres/go/common/metadataclient"
@@ -371,12 +369,12 @@ func (pm *MultipoolerManager) readTablegroupServing(ctx context.Context) (*multi
 	if pm.config == nil || pm.config.TopoClient == nil {
 		return nil, errors.New("default primary discovery unavailable")
 	}
-	transport := pm.config.DefaultPrimaryTransport
-	if transport == nil {
-		transport = grpc.WithTransportCredentials(insecure.NewCredentials())
+	transport, err := pm.config.DefaultPrimaryDialOption()
+	if err != nil {
+		return nil, mterrors.Wrap(err, "default primary transport")
 	}
 	var row *multipoolerservicepb.TablegroupServingState
-	err := metadataclient.WithDefaultPrimary(ctx, pm.config.TopoClient, key.GetDatabase(), transport, func(c multipoolerservicepb.MultipoolerServiceClient) error {
+	err = metadataclient.WithDefaultPrimary(ctx, pm.config.TopoClient, key.GetDatabase(), transport, func(c multipoolerservicepb.MultipoolerServiceClient) error {
 		resp, err := c.GetServingState(ctx, req)
 		if err != nil {
 			return err

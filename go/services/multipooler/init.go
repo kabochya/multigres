@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -570,10 +571,25 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context) error {
 	unmanaged := mode == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
 
 	// Transport to the default primary pooler, used to fetch a backing connection
-	// at bootstrap and to read admission state afterwards.
-	defaultPrimaryTransport, err := mp.defaultPrimaryConn.TransportCredentials(logger)
-	if err != nil {
-		return fmt.Errorf("default primary transport: %w", err)
+	// at bootstrap and to read admission state afterwards. It is built on first
+	// use, so an ordinary pooler that never needs it neither logs the TLS-not-
+	// configured warning nor fails startup under --multipooler-grpc-require-tls.
+	// A pooler that will certainly use it (unmanaged, or under admission control)
+	// builds it now so a misconfiguration fails at startup.
+	var (
+		transportOnce sync.Once
+		transportOpt  grpc.DialOption
+		transportErr  error
+	)
+	defaultPrimaryTransport := func() (grpc.DialOption, error) {
+		transportOnce.Do(func() { transportOpt, transportErr = mp.defaultPrimaryConn.TransportCredentials(logger) })
+		return transportOpt, transportErr
+	}
+	var bootstrapTransport grpc.DialOption
+	if unmanaged || mp.admissionControl.Get() {
+		if bootstrapTransport, err = defaultPrimaryTransport(); err != nil {
+			return fmt.Errorf("default primary transport: %w", err)
+		}
 	}
 
 	// An unmanaged pooler takes its endpoint and credentials from the named
@@ -605,7 +621,7 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context) error {
 		initial.PortMap["grpc"] = int32(mp.grpcServer.Port())
 		initial.PortMap["http"] = int32(mp.senv.GetHTTPPort())
 		initial.ServingStatus = clustermetadatapb.PoolerServingStatus_DISABLED
-		backing, err = bootstrapBackingConnection(startCtx, mp.ts, initial, mp.backingConnection.Get(), defaultPrimaryTransport, logger)
+		backing, err = bootstrapBackingConnection(startCtx, mp.ts, initial, mp.backingConnection.Get(), bootstrapTransport, logger)
 		if err != nil {
 			return err
 		}

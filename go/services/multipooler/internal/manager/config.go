@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/multigres/multigres/go/common/backup"
 	"github.com/multigres/multigres/go/common/topoclient"
@@ -100,10 +101,12 @@ type Config struct {
 	// connection for the pooler to apply that tablegroup's admission state.
 	BackingConnectionName string
 
-	// DefaultPrimaryTransport is the gRPC transport used to reach the default
-	// primary pooler for admission reads. Nil means insecure, which matches the
-	// existing internal gRPC default.
-	DefaultPrimaryTransport grpc.DialOption
+	// DefaultPrimaryTransport resolves the gRPC transport used to reach the
+	// default primary pooler for admission reads. It is called on first use, so a
+	// cluster that never uses admission control or the serving-control RPCs never
+	// builds it (and never logs its TLS warning). Nil means insecure, which matches
+	// the existing internal gRPC default.
+	DefaultPrimaryTransport func() (grpc.DialOption, error)
 
 	// ExternalBackend is the external PostgreSQL an unmanaged pooler fronts.
 	// Nil for managed poolers. It is the resolved form of --backing-connection.
@@ -118,4 +121,12 @@ type ExternalBackend struct {
 	// ExpectedSystemIdentifier is the pg_control_system() identifier the
 	// endpoint must report. The monitor withdraws readiness on any other value.
 	ExpectedSystemIdentifier string
+}
+
+// DefaultPrimaryDialOption returns the transport to the default primary pooler.
+func (c *Config) DefaultPrimaryDialOption() (grpc.DialOption, error) {
+	if c == nil || c.DefaultPrimaryTransport == nil {
+		return grpc.WithTransportCredentials(insecure.NewCredentials()), nil
+	}
+	return c.DefaultPrimaryTransport()
 }

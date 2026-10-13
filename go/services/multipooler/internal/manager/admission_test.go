@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
 
 	"github.com/multigres/multigres/go/common/mterrors"
 	clustermetadatapb "github.com/multigres/multigres/go/pb/clustermetadata"
@@ -462,4 +463,19 @@ func TestStopTopoRegistrationClosesTheGate(t *testing.T) {
 
 	h.pm.StopTopoRegistration(t.Context())
 	require.False(t, h.gate.ApplicationOpen())
+}
+
+func TestDefaultPrimaryDialOptionIsResolvedOnlyWhenAsked(t *testing.T) {
+	var nilConfig *Config
+	opt, err := nilConfig.DefaultPrimaryDialOption()
+	require.NoError(t, err)
+	require.NotNil(t, opt, "no configuration means the insecure internal default")
+
+	calls := 0
+	boom := errors.New("tls required but not configured")
+	cfg := &Config{DefaultPrimaryTransport: func() (grpc.DialOption, error) { calls++; return nil, boom }}
+	require.Zero(t, calls, "constructing the config resolves nothing")
+	_, err = cfg.DefaultPrimaryDialOption()
+	require.ErrorIs(t, err, boom)
+	require.Equal(t, 1, calls)
 }
