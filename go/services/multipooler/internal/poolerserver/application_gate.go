@@ -35,8 +35,10 @@ var forceFinalWait = 5 * time.Second
 type ApplicationGate interface {
 	// EnableAdmissionControl closes the gate and makes every role or serving
 	// change close it again until the admission state is re-read. Call it once,
-	// before any application work.
-	EnableAdmissionControl()
+	// before any application work. quiescenceExcludedRoles are database roles whose
+	// backends a fence does not wait for (a migrator's, for example), in addition
+	// to the pooler's own admin role.
+	EnableAdmissionControl(quiescenceExcludedRoles []string)
 	// AdmissionGeneration returns a token that changes whenever the gate closes.
 	AdmissionGeneration() uint64
 	// OpenApplication opens the gate only if no close happened since generation
@@ -52,10 +54,11 @@ type ApplicationGate interface {
 	FenceApplication(ctx context.Context, drainTimeout time.Duration) (terminated int, err error)
 }
 
-// backendTerminationChecker is implemented by pool managers that remember
-// backends they failed to terminate.
-type backendTerminationChecker interface {
-	PendingTerminations(ctx context.Context) (int, error)
+// backendQuiescenceChecker is implemented by pool managers that can count the
+// client backends of the database that are doing work, other than those of the
+// given roles and the pooler's own.
+type backendQuiescenceChecker interface {
+	BusyBackends(ctx context.Context, excludedRoles []string) (int, error)
 }
 
 var _ ApplicationGate = (*QueryPoolerServer)(nil)
@@ -100,9 +103,10 @@ func (s *QueryPoolerServer) notifyRequestsLocked() {
 }
 
 // EnableAdmissionControl implements ApplicationGate.
-func (s *QueryPoolerServer) EnableAdmissionControl() {
+func (s *QueryPoolerServer) EnableAdmissionControl(quiescenceExcludedRoles []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.quiescenceExcludedRoles = quiescenceExcludedRoles
 	s.admissionControlled = true
 	s.applicationBlocked = true
 	s.admissionGeneration++
@@ -167,11 +171,11 @@ func (s *QueryPoolerServer) FenceApplication(ctx context.Context, drainTimeout t
 	}
 	err := s.awaitIdle(drainCtx)
 	if err == nil {
-		// Idle, but backends that an earlier fence failed to terminate may still
-		// be running.
-		termCtx, cancel := context.WithTimeout(ctx, forceFinalWait)
+		// The pooler is idle; the server may not be (a backend whose connection the
+		// pooler closed, a direct client).
+		quietCtx, cancel := context.WithTimeout(ctx, forceFinalWait)
 		defer cancel()
-		return 0, s.awaitTerminations(termCtx)
+		return 0, s.awaitBackendQuiescent(quietCtx)
 	}
 	if ctx.Err() != nil {
 		return 0, ctx.Err()
@@ -190,32 +194,38 @@ func (s *QueryPoolerServer) FenceApplication(ctx context.Context, drainTimeout t
 	if err := s.awaitIdle(finalCtx); err != nil {
 		return terminated, fmt.Errorf("application work still in flight after terminating reserved connections: %w", err)
 	}
-	if err := s.awaitTerminations(finalCtx); err != nil {
+	if err := s.awaitBackendQuiescent(finalCtx); err != nil {
 		return terminated, err
 	}
 	return terminated, nil
 }
 
-// awaitTerminations waits until every backend whose termination failed earlier
-// is gone from the server. Closing a connection whose backend is still executing
-// a statement does not stop the statement, so such a backend could commit after
-// the fence was acknowledged; a fence that cannot rule that out fails.
-func (s *QueryPoolerServer) awaitTerminations(ctx context.Context) error {
-	checker, ok := s.poolManager.(backendTerminationChecker)
+// awaitBackendQuiescent waits until the database server shows no application work
+// in flight. Closing a connection whose backend is still executing a statement does
+// not stop the statement, and a client that reaches the database directly is not
+// something the pooler's own accounting sees; looking at the backends themselves
+// covers both, along with every way the pooler may have given up on a connection
+// without learning that its work ended. A check that cannot be made fails the
+// fence, so does work still running at the deadline.
+func (s *QueryPoolerServer) awaitBackendQuiescent(ctx context.Context) error {
+	checker, ok := s.poolManager.(backendQuiescenceChecker)
 	if !ok {
 		return nil
 	}
+	s.mu.Lock()
+	excluded := s.quiescenceExcludedRoles
+	s.mu.Unlock()
 	for {
-		pending, err := checker.PendingTerminations(ctx)
+		busy, err := checker.BusyBackends(ctx, excluded)
 		if err != nil {
-			return fmt.Errorf("check backends that could not be terminated: %w", err)
+			return fmt.Errorf("check that the backend is quiescent: %w", err)
 		}
-		if pending == 0 {
+		if busy == 0 {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("%d backend(s) that could not be terminated are still running; the fence cannot be acknowledged", pending)
+			return fmt.Errorf("%d backend(s) of the database are still doing work; the fence cannot be acknowledged", busy)
 		case <-time.After(100 * time.Millisecond):
 		}
 	}

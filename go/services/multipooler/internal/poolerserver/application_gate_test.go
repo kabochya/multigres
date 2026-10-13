@@ -16,6 +16,7 @@ package poolerserver
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,7 +31,7 @@ func newGatedTestServer(t *testing.T) *QueryPoolerServer {
 	t.Helper()
 	s := newStartRequestTestServer()
 	s.servingStatus = clustermetadatapb.PoolerServingStatus_SERVING
-	s.EnableAdmissionControl()
+	s.EnableAdmissionControl(nil)
 	require.True(t, s.OpenApplication(s.AdmissionGeneration()))
 	return s
 }
@@ -44,7 +45,7 @@ func TestApplicationGateClosedByDefaultWhenAdmissionControlled(t *testing.T) {
 
 	s = newStartRequestTestServer()
 	s.servingStatus = clustermetadatapb.PoolerServingStatus_SERVING
-	s.EnableAdmissionControl()
+	s.EnableAdmissionControl(nil)
 	_, err = s.BeginRequest(nil, RequestSingleQuery)
 	requireMTF01(t, err)
 	_, err = s.BeginRequest(nil, RequestNewReservation)
@@ -54,7 +55,7 @@ func TestApplicationGateClosedByDefaultWhenAdmissionControlled(t *testing.T) {
 func TestClosedGateStillAdmitsControlRequestsAndOpenReservedWork(t *testing.T) {
 	s := newStartRequestTestServer()
 	s.servingStatus = clustermetadatapb.PoolerServingStatus_SERVING
-	s.EnableAdmissionControl()
+	s.EnableAdmissionControl(nil)
 
 	// Control and metadata requests (credential lookups) bypass the gate.
 	require.NoError(t, s.StartRequest(nil, RequestNewReservation))
@@ -196,15 +197,21 @@ func TestFenceNeverAcknowledgesWhileWorkRemains(t *testing.T) {
 	require.False(t, s.ApplicationOpen())
 }
 
-// pendingTerminationPoolManager is a pool manager that remembers backends it
-// failed to terminate.
-type pendingTerminationPoolManager struct {
+// quiescencePoolManager is a pool manager that reports how many backends of the
+// database are doing work, whatever the pooler itself knows.
+type quiescencePoolManager struct {
 	*drainMockPoolManager
-	pending atomic.Int64
+	busy     atomic.Int64
+	checkErr atomic.Pointer[error]
+	excluded atomic.Pointer[[]string]
 }
 
-func (m *pendingTerminationPoolManager) PendingTerminations(context.Context) (int, error) {
-	return int(m.pending.Load()), nil
+func (m *quiescencePoolManager) BusyBackends(_ context.Context, excluded []string) (int, error) {
+	m.excluded.Store(&excluded)
+	if e := m.checkErr.Load(); e != nil {
+		return 0, *e
+	}
+	return int(m.busy.Load()), nil
 }
 
 func shortFinalWait(t *testing.T) {
@@ -214,35 +221,90 @@ func shortFinalWait(t *testing.T) {
 	t.Cleanup(func() { forceFinalWait = old })
 }
 
-// TestFenceFailsWhileABackendItCouldNotTerminateIsStillRunning: a connection whose
-// backend was not terminated may still be executing a statement, so the fence must
-// not be acknowledged even though the connection is gone from the pool, and a later
-// fence must not forget it.
-func TestFenceFailsWhileABackendItCouldNotTerminateIsStillRunning(t *testing.T) {
+// TestFenceFailsWhileTheServerStillShowsWork: the pooler is idle (nothing admitted,
+// nothing borrowed, nothing reserved) yet a backend is still working: a statement a
+// closed connection left running, a connection torn down mid-statement, a client
+// that reaches the database directly. The fence must not be acknowledged, on the
+// first attempt or a retry, and completes once the server is quiet.
+func TestFenceFailsWhileTheServerStillShowsWork(t *testing.T) {
+	shortFinalWait(t)
+	s := newGatedTestServer(t)
+	pm := &quiescencePoolManager{drainMockPoolManager: newDrainMockPoolManager()}
+	pm.busy.Store(2)
+	s.poolManager = pm
+
+	_, err := s.FenceApplication(t.Context(), 50*time.Millisecond)
+	require.ErrorContains(t, err, "2 backend(s)")
+	require.False(t, s.ApplicationOpen())
+
+	_, err = s.FenceApplication(t.Context(), 50*time.Millisecond)
+	require.ErrorContains(t, err, "2 backend(s)", "a retry looks at the server again")
+
+	pm.busy.Store(0)
+	_, err = s.FenceApplication(t.Context(), 50*time.Millisecond)
+	require.NoError(t, err)
+}
+
+// TestFenceWaitsForTheServerToQuiesce: work that ends within the deadline lets the
+// fence complete.
+func TestFenceWaitsForTheServerToQuiesce(t *testing.T) {
+	s := newGatedTestServer(t)
+	pm := &quiescencePoolManager{drainMockPoolManager: newDrainMockPoolManager()}
+	pm.busy.Store(1)
+	s.poolManager = pm
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		pm.busy.Store(0)
+	}()
+	_, err := s.FenceApplication(t.Context(), 50*time.Millisecond)
+	require.NoError(t, err)
+}
+
+// TestFenceFailsClosedWhenTheServerCannotBeChecked: a fence that cannot tell is
+// not a fence.
+func TestFenceFailsClosedWhenTheServerCannotBeChecked(t *testing.T) {
+	shortFinalWait(t)
+	s := newGatedTestServer(t)
+	pm := &quiescencePoolManager{drainMockPoolManager: newDrainMockPoolManager()}
+	boom := errors.New("admin connection refused")
+	pm.checkErr.Store(&boom)
+	s.poolManager = pm
+
+	_, err := s.FenceApplication(t.Context(), 50*time.Millisecond)
+	require.ErrorIs(t, err, boom)
+	require.False(t, s.ApplicationOpen())
+}
+
+// TestFenceChecksTheServerAfterTerminatingReservedConnections: the check also runs
+// after the force-terminate path, where closed connections are most likely to have
+// left statements behind.
+func TestFenceChecksTheServerAfterTerminatingReservedConnections(t *testing.T) {
 	shortFinalWait(t)
 	s := newGatedTestServer(t)
 	base := newDrainMockPoolManager()
-	pm := &pendingTerminationPoolManager{drainMockPoolManager: base}
+	pm := &quiescencePoolManager{drainMockPoolManager: base}
 	base.reservedAdd(1)
 	base.closeReservedCount = 1
 	base.onCloseReserved = func() {
-		pm.pending.Store(1) // the terminate failed, but the connection was released
+		pm.busy.Store(1) // the terminate failed: the backend runs on
 		base.reservedAdd(-1)
 	}
 	s.poolManager = pm
 
 	_, err := s.FenceApplication(t.Context(), 50*time.Millisecond)
-	require.ErrorContains(t, err, "could not be terminated")
-	require.False(t, s.ApplicationOpen())
+	require.ErrorContains(t, err, "1 backend(s)")
+}
 
-	// Nothing is left in the pool now, yet the backend still runs.
-	_, err = s.FenceApplication(t.Context(), 50*time.Millisecond)
-	require.ErrorContains(t, err, "could not be terminated", "a retry must not forget the backend")
-
-	// Once the backend is gone the fence completes.
-	pm.pending.Store(0)
-	_, err = s.FenceApplication(t.Context(), 50*time.Millisecond)
+// TestFenceExcludesTheConfiguredRoles.
+func TestFenceExcludesTheConfiguredRoles(t *testing.T) {
+	s := newStartRequestTestServer()
+	s.servingStatus = clustermetadatapb.PoolerServingStatus_SERVING
+	s.EnableAdmissionControl([]string{"migrator"})
+	pm := &quiescencePoolManager{drainMockPoolManager: newDrainMockPoolManager()}
+	s.poolManager = pm
+	_, err := s.FenceApplication(t.Context(), 50*time.Millisecond)
 	require.NoError(t, err)
+	require.Equal(t, []string{"migrator"}, *pm.excluded.Load())
 }
 
 // TestBeginRequestSkipsAccountingWithoutAdmissionControl: only a controlled pooler

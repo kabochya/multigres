@@ -107,7 +107,6 @@ type Manager struct {
 
 	ctx           context.Context          // Manager lifecycle context, used for lazy pool creation
 	adminPool     *admin.Pool              // Shared admin pool for kill operations
-	unstopped     admin.UnstoppedBackends  // Backends that could not be shown to have stopped; outlives the pools
 	settingsCache *connstate.SettingsCache // Shared settings cache for all users
 	metrics       *Metrics                 // OpenTelemetry metrics
 
@@ -241,7 +240,6 @@ func (m *Manager) Open(ctx context.Context, connConfig *ConnectionConfig) {
 	m.adminPool = admin.NewPool(ctx, &admin.PoolConfig{
 		ClientConfig:   adminClientConfig,
 		ConnPoolConfig: adminPoolConfig,
-		Unstopped:      &m.unstopped,
 	})
 	m.adminPool.Open()
 
@@ -1120,44 +1118,44 @@ func (m *Manager) CloseReservedConnections(ctx context.Context) int {
 	return total
 }
 
-// PendingTerminations returns how many backends that the pooler closed its
-// connection to but could not stop (a refused or lost pg_terminate_backend, a
-// cancel that failed or did not take effect) are still running on the server.
+// BusyBackends returns how many client backends of the pooler's database are doing
+// application work on the server its admin connection reaches: any whose state is
+// not idle (an idle-in-transaction backend counts, as does one whose state is not
+// visible), except the admin connection itself and the connections of excludedRoles
+// and of the pooler's own admin role.
 //
-// Closing the client side of such a connection does not stop a statement the
-// backend is executing, so until the backend is gone the work of that connection
-// may still commit. Backends are matched by pid and start time, so a pid the
-// server reuses is not mistaken for the original.
-func (m *Manager) PendingTerminations(ctx context.Context) (int, error) {
-	pids := m.unstopped.Pids()
-	if len(pids) == 0 {
-		return 0, nil
+// It looks at the server, not at what the pooler remembers: a statement a closed
+// connection left running, a connection that failed in the middle of a statement,
+// or a direct client are all counted the same way. The caller needs the admin role
+// to see other roles' state (a superuser or a member of pg_read_all_stats).
+func (m *Manager) BusyBackends(ctx context.Context, excludedRoles []string) (int, error) {
+	roles := append([]string{m.config.PgUser()}, excludedRoles...)
+	quoted := make([]string, len(roles))
+	for i, r := range roles {
+		quoted[i] = "'" + strings.ReplaceAll(r, "'", "''") + "'"
 	}
-	ids := make([]string, len(pids))
-	for i, pid := range pids {
-		ids[i] = strconv.FormatUint(uint64(pid), 10)
-	}
+	sql := "SELECT count(*) FROM pg_stat_activity" +
+		" WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()" +
+		" AND datname = '" + strings.ReplaceAll(m.PgDatabase(), "'", "''") + "'" +
+		" AND state IS DISTINCT FROM 'idle'" +
+		" AND usename NOT IN (" + strings.Join(quoted, ",") + ")"
 	conn, err := m.GetAdminConn(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer conn.Recycle()
-	// pg_stat_activity lists every backend, whatever role owns it.
-	results, err := conn.Conn.QueryWithRetry(ctx, "SELECT pid, backend_start::text FROM pg_stat_activity WHERE pid IN ("+strings.Join(ids, ",")+")")
+	results, err := conn.Conn.QueryWithRetry(ctx, sql)
 	if err != nil {
 		return 0, err
 	}
-	alive := map[uint32]string{}
-	for _, res := range results {
-		for _, row := range res.Rows {
-			pid, err := strconv.ParseUint(string(row.Values[0]), 10, 32)
-			if err != nil {
-				return 0, err
-			}
-			alive[uint32(pid)] = string(row.Values[1])
-		}
+	if len(results) == 0 || len(results[0].Rows) == 0 || len(results[0].Rows[0].Values) == 0 {
+		return 0, errors.New("backend activity query returned no row")
 	}
-	return m.unstopped.Resolve(alive), nil
+	n, err := strconv.Atoi(string(results[0].Rows[0].Values[0]))
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // IsClosed reports whether the manager is terminally closed. It returns false

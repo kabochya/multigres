@@ -49,7 +49,9 @@ type gatedController struct {
 	gate *poolerserver.QueryPoolerServer
 }
 
-func (g gatedController) EnableAdmissionControl()         { g.gate.EnableAdmissionControl() }
+func (g gatedController) EnableAdmissionControl(excluded []string) {
+	g.gate.EnableAdmissionControl(excluded)
+}
 func (g gatedController) AdmissionGeneration() uint64     { return g.gate.AdmissionGeneration() }
 func (g gatedController) OpenApplication(gen uint64) bool { return g.gate.OpenApplication(gen) }
 func (g gatedController) CloseApplication()               { g.gate.CloseApplication() }
@@ -89,7 +91,7 @@ func newAdmissionHarness(t *testing.T, unmanaged bool) *admissionHarness {
 	gate := poolerserver.NewQueryPoolerServer(slog.New(slog.DiscardHandler), nil, initial.Id, "migrateTG", "0-inf", nil, 0, false)
 	// Serving, so admitted requests are not rejected for the serving state.
 	require.NoError(t, gate.OnStateChange(t.Context(), servingstate.State{ServingStatus: clustermetadatapb.PoolerServingStatus_SERVING}))
-	gate.EnableAdmissionControl()
+	gate.EnableAdmissionControl(nil)
 	pm.qsc = gatedController{mockPoolerController: &mockPoolerController{}, gate: gate}
 
 	h := &admissionHarness{pm: pm, gate: gate}

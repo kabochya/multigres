@@ -164,6 +164,10 @@ type MultipoolerManager struct {
 	// pgMonitor manages the PostgreSQL monitoring loop. See periodicRunner.
 	pgMonitor periodicRunner
 
+	// activityPrivilegeWarned is set once the missing-privilege error of an
+	// external backend has been logged, so it is not repeated on every probe.
+	activityPrivilegeWarned atomic.Bool
+
 	// promotionInProgress is set while pg_promote() has been called but postgres has not yet
 	// transitioned to primary mode. Cleared when promotion completes (success or failure).
 	// Reported in the health status so multiorch can suppress spurious PrimaryIsDead detection.
@@ -467,7 +471,7 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 	// application gate is closed from the moment the query server exists.
 	if unmanaged || config.AdmissionControl {
 		if gate, ok := pm.qsc.(poolerserver.ApplicationGate); ok {
-			gate.EnableAdmissionControl()
+			gate.EnableAdmissionControl(config.AdmissionQuiescenceExcludeRoles)
 		}
 	}
 

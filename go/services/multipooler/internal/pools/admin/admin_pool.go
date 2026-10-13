@@ -29,10 +29,6 @@ type PoolConfig struct {
 
 	// ConnPoolConfig is the connection pool configuration.
 	ConnPoolConfig *connpool.Config
-
-	// Unstopped remembers backends that could not be shown to have stopped. It is
-	// shared by the manager's pools and may be nil.
-	Unstopped *UnstoppedBackends
 }
 
 // PooledConn is an alias for a pooled admin connection.
@@ -73,12 +69,6 @@ func (p *Pool) Open() {
 	}
 
 	p.pool.Open(connector, nil)
-}
-
-// RecordUnstopped notes that the backend with this pid may still be running
-// although the pooler gave up on its connection.
-func (p *Pool) RecordUnstopped(pid uint32) {
-	p.config.Unstopped.Record(pid)
 }
 
 // Get acquires an admin connection from the pool.

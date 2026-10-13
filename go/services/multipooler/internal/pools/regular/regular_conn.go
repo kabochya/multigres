@@ -438,11 +438,6 @@ func (c *Conn) Kill(ctx context.Context) error {
 		return errors.New("cannot kill connection: admin pool not configured")
 	}
 	_, err := c.adminPool.TerminateBackend(ctx, c.ProcessID())
-	if err != nil {
-		// The connection is about to be closed, but its backend may keep running
-		// whatever it was sent.
-		c.adminPool.RecordUnstopped(c.ProcessID())
-	}
 	return err
 }
 
@@ -812,16 +807,7 @@ func (c *Conn) handleContextCancellation() {
 	defer cancel()
 	ok, err := c.adminPool.CancelBackend(cancelCtx, c.ProcessID())
 	if err != nil || !ok {
-		c.recordUnstopped()
 		c.conn.ForceClose()
-	}
-}
-
-// recordUnstopped notes that this connection's backend may keep running a
-// statement after the pooler closes the connection.
-func (c *Conn) recordUnstopped() {
-	if c.adminPool != nil {
-		c.adminPool.RecordUnstopped(c.ProcessID())
 	}
 }
 
@@ -848,8 +834,6 @@ func drainOpAfterCancel[T any](c *Conn, ch <-chan T) T {
 	case res := <-ch:
 		return res
 	case <-timer.C:
-		// The cancel was sent but the statement did not stop in time.
-		c.recordUnstopped()
 		c.conn.ForceClose()
 		return <-ch
 	}

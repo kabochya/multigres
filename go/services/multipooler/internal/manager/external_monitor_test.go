@@ -70,6 +70,7 @@ func TestExternalReadinessFailsClosedAndRecovers(t *testing.T) {
 			}
 			if step.serving {
 				qs.AddQueryPatternOnce(exactly(externalIdentityQuery), mock.MakeQueryResult([]string{"sysid", "database"}, [][]any{{"123", "db"}}))
+				qs.AddQueryPatternOnce(exactly(externalActivityQuery), mock.MakeQueryResult([]string{"ok"}, [][]any{{true}}))
 			}
 			pm.checkExternalReadiness(t.Context())
 			require.Equal(t, step.serving, pm.record.ServingStatus() == clustermetadatapb.PoolerServingStatus_SERVING)
@@ -97,6 +98,9 @@ func TestExternalIdentityMismatchWithdrawsReadiness(t *testing.T) {
 	} {
 		qs.AddQueryPatternOnce(exactly(externalReadinessQuery), mock.MakeQueryResult([]string{"writable"}, [][]any{{true}}))
 		qs.AddQueryPatternOnce(exactly(externalIdentityQuery), mock.MakeQueryResult([]string{"sysid", "database"}, [][]any{{tc.sysID, tc.database}}))
+		if tc.serving {
+			qs.AddQueryPatternOnce(exactly(externalActivityQuery), mock.MakeQueryResult([]string{"ok"}, [][]any{{true}}))
+		}
 		pm.checkExternalReadiness(t.Context())
 		require.Equal(t, tc.serving, pm.record.ServingStatus() == clustermetadatapb.PoolerServingStatus_SERVING, "%+v", tc)
 		require.Equal(t, tc.serving, pm.healthStreamer.getState().BackendReady, "%+v", tc)
@@ -127,3 +131,27 @@ type noopRunner struct{}
 
 func (noopRunner) StartWithOptions(func(ctx context.Context), ...timer.StartOption) bool { return true }
 func (noopRunner) Stop()                                                                 {}
+
+// TestExternalBackendWithoutActivityVisibilityNeverServes: a backing role that
+// cannot see other roles' backends could never tell a fence that the server is
+// quiet, so the pooler refuses to serve.
+func TestExternalBackendWithoutActivityVisibilityNeverServes(t *testing.T) {
+	pm, qs := newExternalMonitorManager(t, "123")
+	for range 2 {
+		qs.AddQueryPatternOnce(exactly(externalReadinessQuery), mock.MakeQueryResult([]string{"writable"}, [][]any{{true}}))
+		qs.AddQueryPatternOnce(exactly(externalIdentityQuery), mock.MakeQueryResult([]string{"sysid", "database"}, [][]any{{"123", "db"}}))
+		qs.AddQueryPatternOnce(exactly(externalActivityQuery), mock.MakeQueryResult([]string{"ok"}, [][]any{{false}}))
+		pm.checkExternalReadiness(t.Context())
+		require.False(t, pm.healthStreamer.getState().BackendReady)
+		require.NotEqual(t, clustermetadatapb.PoolerServingStatus_SERVING, pm.record.ServingStatus())
+		require.NoError(t, qs.ExpectationsWereMet())
+	}
+	require.True(t, pm.activityPrivilegeWarned.Load(), "the requirement is reported")
+
+	// Granted, it serves.
+	qs.AddQueryPatternOnce(exactly(externalReadinessQuery), mock.MakeQueryResult([]string{"writable"}, [][]any{{true}}))
+	qs.AddQueryPatternOnce(exactly(externalIdentityQuery), mock.MakeQueryResult([]string{"sysid", "database"}, [][]any{{"123", "db"}}))
+	qs.AddQueryPatternOnce(exactly(externalActivityQuery), mock.MakeQueryResult([]string{"ok"}, [][]any{{true}}))
+	pm.checkExternalReadiness(t.Context())
+	require.True(t, pm.healthStreamer.getState().BackendReady)
+}

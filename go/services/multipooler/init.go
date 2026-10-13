@@ -96,6 +96,9 @@ type Multipooler struct {
 	admissionControl viperutil.Value[bool]
 	// admissionDrainTimeout bounds how long a fence waits for application work.
 	admissionDrainTimeout viperutil.Value[time.Duration]
+	// admissionQuiescenceExcludeRoles are database roles whose backends a fence
+	// does not wait for.
+	admissionQuiescenceExcludeRoles viperutil.Value[[]string]
 	// backingConnection names the connection an unmanaged pooler fronts. Setting
 	// it makes the pooler unmanaged (see managementModeFor).
 	backingConnection   viperutil.Value[string]
@@ -236,6 +239,10 @@ func NewMultipooler(telemetry *telemetry.Telemetry, opts ...Option) *Multipooler
 			FlagName: "admission-control",
 			Dynamic:  false,
 		}),
+		admissionQuiescenceExcludeRoles: viperutil.Configure(reg, "admission-quiescence-exclude-roles", viperutil.Options[[]string]{
+			Default:  []string{},
+			FlagName: "admission-quiescence-exclude-roles",
+		}),
 		admissionDrainTimeout: viperutil.Configure(reg, "admission-drain-timeout", viperutil.Options[time.Duration]{
 			Default:  30 * time.Second,
 			FlagName: "admission-drain-timeout",
@@ -366,6 +373,7 @@ func (mp *Multipooler) consensusEnabled() bool {
 func (mp *Multipooler) RegisterFlags(flags *pflag.FlagSet) {
 	flags.Bool("admission-control", mp.admissionControl.Default(), "start closed and open application admission only after reading an UNFENCED admission state for this tablegroup from the default primary; unmanaged poolers always do (prototype)")
 	flags.Duration("admission-drain-timeout", mp.admissionDrainTimeout.Default(), "how long a fence waits for in-flight application work before terminating what remains")
+	flags.StringSlice("admission-quiescence-exclude-roles", mp.admissionQuiescenceExcludeRoles.Default(), "database roles whose backends a fence does not wait for (besides the pooler's own admin role), such as a migrator that keeps connections open on the fenced database")
 	flags.String("backing-connection", mp.backingConnection.Default(), "Name of the connection of an external postgres to front. Setting it makes this an unmanaged pooler: no pgctld, backups or consensus")
 	flags.String("pgctld-addr", mp.pgctldAddr.Default(), "Address of pgctld gRPC service")
 	flags.String("cell", mp.cell.Default(), "cell to use")
@@ -393,6 +401,7 @@ func (mp *Multipooler) RegisterFlags(flags *pflag.FlagSet) {
 		flags,
 		mp.admissionControl,
 		mp.admissionDrainTimeout,
+		mp.admissionQuiescenceExcludeRoles,
 		mp.backingConnection,
 		mp.pgctldAddr,
 		mp.cell,
@@ -752,11 +761,12 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context) error {
 
 		StaticLeader: mp.staticLeader,
 
-		AdmissionControl:        mp.admissionControl.Get(),
-		AdmissionDrainTimeout:   mp.admissionDrainTimeout.Get(),
-		BackingConnectionName:   mp.backingConnection.Get(),
-		DefaultPrimaryTransport: defaultPrimaryTransport,
-		ExternalBackend:         externalBackend,
+		AdmissionControl:                mp.admissionControl.Get(),
+		AdmissionDrainTimeout:           mp.admissionDrainTimeout.Get(),
+		AdmissionQuiescenceExcludeRoles: mp.admissionQuiescenceExcludeRoles.Get(),
+		BackingConnectionName:           mp.backingConnection.Get(),
+		DefaultPrimaryTransport:         defaultPrimaryTransport,
+		ExternalBackend:                 externalBackend,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create multipooler: %w", err)

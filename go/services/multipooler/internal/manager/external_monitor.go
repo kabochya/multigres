@@ -30,6 +30,12 @@ const (
 	externalReadinessQuery = "SELECT NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off'"
 	// externalIdentityQuery reports the physical identity of the endpoint.
 	externalIdentityQuery = "SELECT system_identifier::text, current_database() FROM pg_control_system()"
+	// externalActivityQuery is true when the backing role can see the state of other
+	// roles' backends: a superuser, or a member of pg_read_all_stats. A fence waits
+	// for the server to show no application work, and without this the state of the
+	// application roles' idle pooled connections reads as unknown, looking busy
+	// forever.
+	externalActivityQuery = "SELECT rolsuper OR pg_has_role(current_user, 'pg_read_all_stats', 'member') FROM pg_roles WHERE rolname = current_user"
 
 	externalProbeTimeout = 2 * time.Second
 )
@@ -37,6 +43,11 @@ const (
 // errExternalIdentityMismatch means the endpoint answered but is not the source
 // the backing connection names.
 var errExternalIdentityMismatch = errors.New("external backend identity does not match its backing connection")
+
+// errExternalCannotObserveActivity means the backing role cannot see what other
+// roles' backends are doing, so a fence could never tell that the server is quiet.
+var errExternalCannotObserveActivity = errors.New(
+	"the backing role must be a superuser or a member of pg_read_all_stats: a fence needs to see the state of the application roles' backends")
 
 // startExternalMonitorLocked starts the observe-only monitor of an external
 // backend. It never repairs or reconfigures the external database: a failed
@@ -75,6 +86,17 @@ func (pm *MultipoolerManager) probeExternalBackend(ctx context.Context) error {
 	if want == nil || want.ExpectedSystemIdentifier == "" || sysID != want.ExpectedSystemIdentifier || database != want.Database {
 		return errExternalIdentityMismatch
 	}
+	result, err = pm.adminQuery(ctx, externalActivityQuery)
+	if err != nil {
+		return err
+	}
+	var canObserve bool
+	if err := executor.ScanSingleRow(result, &canObserve); err != nil {
+		return err
+	}
+	if !canObserve {
+		return errExternalCannotObserveActivity
+	}
 	return nil
 }
 
@@ -83,7 +105,12 @@ func (pm *MultipoolerManager) checkExternalReadiness(ctx context.Context) {
 	err := pm.probeExternalBackend(probeCtx)
 	cancel()
 	ready := err == nil
-	if err != nil {
+	if errors.Is(err, errExternalCannotObserveActivity) {
+		// A configuration error rather than a passing condition: say so once, loudly.
+		if pm.activityPrivilegeWarned.CompareAndSwap(false, true) {
+			pm.logger.ErrorContext(ctx, "refusing to serve: external backend privilege requirement not met", "error", err)
+		}
+	} else if err != nil {
 		pm.logger.DebugContext(ctx, "external backend not ready", "error", err)
 	}
 	pm.healthStreamer.setBackendReady(ready)

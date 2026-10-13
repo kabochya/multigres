@@ -88,11 +88,12 @@ type QueryPoolerServer struct {
 	// re-read. admissionGeneration orders closes against opens so a read begun
 	// before a change cannot open the gate afterwards. activeRequests counts
 	// admitted requests that have not finished.
-	applicationBlocked  bool
-	admissionControlled bool
-	admissionGeneration uint64
-	activeRequests      int
-	requestsChanged     chan struct{}
+	applicationBlocked      bool
+	quiescenceExcludedRoles []string // roles a fence does not wait on; see EnableAdmissionControl
+	admissionControlled     bool
+	admissionGeneration     uint64
+	activeRequests          int
+	requestsChanged         chan struct{}
 
 	// stateChanged is closed and re-created on every state transition.
 	// AwaitStateChange blocks on this channel to be notified when the
