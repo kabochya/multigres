@@ -146,6 +146,11 @@ type Multipooler struct {
 	// flags). Nil in single-process mode, which never runs unmanaged.
 	defaultPrimaryConn *rpcclient.ConnConfig
 
+	// preparing is the topology record an unmanaged pooler registered while it
+	// bootstrapped. If startup fails afterwards, Init marks it stopped so it does
+	// not linger as a DISABLED pooler.
+	preparing *clustermetadatapb.Multipooler
+
 	ts            topoclient.Store
 	poolerManager *manager.MultipoolerManager
 	serverStatus  Status
@@ -486,6 +491,24 @@ func (mp *Multipooler) resolveManagementMode() (clustermetadatapb.PoolerManageme
 // or if some connections fail, it launches goroutines that retry
 // until successful.
 func (mp *Multipooler) Init(startCtx context.Context) error {
+	err := mp.initMultipooler(startCtx)
+	if err != nil && mp.preparing != nil {
+		mp.markPreparingStopped(startCtx)
+	}
+	return err
+}
+
+// markPreparingStopped records that an unmanaged pooler that registered while
+// bootstrapping failed later in startup and will exit.
+func (mp *Multipooler) markPreparingStopped(ctx context.Context) {
+	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := manager.MarkPreparingFailed(markCtx, mp.ts, mp.preparing); err != nil {
+		mp.senv.GetLogger().WarnContext(ctx, "could not mark the failed pooler as stopped", "error", err)
+	}
+}
+
+func (mp *Multipooler) initMultipooler(startCtx context.Context) error {
 	startCtx, span := telemetry.Tracer().Start(startCtx, "Init")
 	defer span.End()
 
@@ -538,6 +561,12 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 		if mp.tableGroup.Get() == "" || mp.shard.Get() == "" {
 			return errors.New("table group and shard are required")
 		}
+		// Refused before anything is registered: an unmanaged pooler fronts an
+		// external database, never the default cohort that holds cluster metadata,
+		// and registering first would leave a record behind for a pooler that exits.
+		if mp.tableGroup.Get() == constants.DefaultTableGroup {
+			return errors.New("an unmanaged pooler cannot serve the default tablegroup")
+		}
 		// Register as DISABLED/UNMANAGED, find the default primary and fetch
 		// the named connection before anything can serve.
 		transport, err := mp.defaultPrimaryConn.TransportCredentials(logger)
@@ -558,6 +587,8 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 		if err != nil {
 			return err
 		}
+		// From here on a startup failure must not leave the registration behind.
+		mp.preparing = initial
 		mp.connPoolConfig.SetBackingCredentials(backing.User, backing.Password, backing.SSLMode, backing.SSLRootCert, backing.SSLNegotiation)
 	} else {
 		if err := mp.connPoolConfig.ResolvePgPassword(); err != nil {

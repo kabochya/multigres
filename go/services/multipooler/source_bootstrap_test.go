@@ -34,6 +34,7 @@ import (
 	"github.com/multigres/multigres/go/common/topoclient/memorytopo"
 	clustermetadatapb "github.com/multigres/multigres/go/pb/clustermetadata"
 	multipoolerservicepb "github.com/multigres/multigres/go/pb/multipoolerservice"
+	"github.com/multigres/multigres/go/services/multipooler/internal/manager"
 )
 
 // fastRetries makes bootstrap give up quickly so failure paths run in
@@ -240,4 +241,24 @@ func TestBootstrapFailsOnUnknownOrMismatchedConnection(t *testing.T) {
 			require.Nil(t, got)
 		})
 	}
+}
+
+// TestStartupFailureAfterBootstrapMarksTheRegistrationStopped: a failure after the
+// pooler registered, such as one while building the manager, must not leave a
+// DISABLED record behind that membership snapshots and gateways would wait on.
+func TestStartupFailureAfterBootstrapMarksTheRegistrationStopped(t *testing.T) {
+	ts, _ := memorytopo.NewServerAndFactory(t.Context(), "zone1")
+	defer ts.Close()
+	initial := unmanagedRecord()
+	require.NoError(t, manager.RegisterPreparing(t.Context(), ts, initial))
+	info, err := ts.GetMultipooler(t.Context(), initial.Id)
+	require.NoError(t, err)
+	require.NotEqual(t, clustermetadatapb.PoolerLifecycleStatus_LIFECYCLE_SHUTDOWN, info.GetLifecycleStatus().GetStatus())
+
+	mp := &Multipooler{ts: ts, preparing: initial}
+	mp.markPreparingStopped(t.Context())
+
+	info, err = ts.GetMultipooler(t.Context(), initial.Id)
+	require.NoError(t, err)
+	require.Equal(t, clustermetadatapb.PoolerLifecycleStatus_LIFECYCLE_SHUTDOWN, info.GetLifecycleStatus().GetStatus())
 }
