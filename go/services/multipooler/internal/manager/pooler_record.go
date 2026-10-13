@@ -470,6 +470,10 @@ func RegisterPreparing(ctx context.Context, ts poolerTopoStore, initial *cluster
 // gave up before it ever served. A leftover DISABLED entry would keep every
 // membership snapshot of its tablegroup waiting for a pooler that is gone;
 // SHUTDOWN is the state that says it has stopped.
+//
+// The write is unconditional. That is acceptable under the operational rule that
+// at most one live process runs per service id: nothing else can be registered
+// under this id, so the record being replaced is this process's own.
 func MarkPreparingFailed(ctx context.Context, ts poolerTopoStore, initial *clustermetadatapb.Multipooler) error {
 	record, err := newPoolerRecord(nil, ts, initial)
 	if err != nil {

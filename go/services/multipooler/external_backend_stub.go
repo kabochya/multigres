@@ -16,8 +16,10 @@ package multipooler
 
 import (
 	"errors"
+	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 // PROTOTYPE STUB: backing connections are stored as postgres:// URLs.
@@ -36,6 +38,18 @@ func parseBackingURL(name, raw string) (*backingConnection, error) {
 	}
 	if u.Scheme != "postgres" && u.Scheme != "postgresql" {
 		return nil, errors.New("backing connection URL must use the postgres scheme")
+	}
+	// The pooler's admin connection must reach the same server as its application
+	// connections: fence safety looks at the backends of that one server. A list of
+	// hosts, a host given as a parameter, or a target_session_attrs choice could
+	// send the two to different servers.
+	if strings.Contains(u.Host, ",") {
+		return nil, errors.New("backing connection URL names more than one host; a single server is required")
+	}
+	for _, param := range []string{"host", "hostaddr", "port", "target_session_attrs", "load_balance_hosts"} {
+		if u.Query().Has(param) {
+			return nil, fmt.Errorf("backing connection URL sets %q as a parameter; a single server given in the URL authority is required", param)
+		}
 	}
 	port := 5432
 	if p := u.Port(); p != "" {

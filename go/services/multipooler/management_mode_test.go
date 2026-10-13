@@ -78,6 +78,24 @@ func TestParseBackingURL(t *testing.T) {
 	}
 }
 
+// TestParseBackingURLRequiresASingleServer: fence safety looks at the backends of
+// the server the pooler's admin connection reaches, so a URL that could send the
+// admin connection and the application connections to different servers is
+// refused.
+func TestParseBackingURLRequiresASingleServer(t *testing.T) {
+	for _, bad := range []string{
+		"postgres://u@h1:5432,h2:5432/db",
+		"postgres://u@h1/db?host=h2",
+		"postgres://u@h1/db?hostaddr=10.0.0.1",
+		"postgres://u@h1/db?port=5433",
+		"postgres://u@h1/db?target_session_attrs=read-write",
+		"postgres://u@h1/db?load_balance_hosts=random",
+	} {
+		_, err := parseBackingURL("src", bad)
+		require.Error(t, err, bad)
+	}
+}
+
 func TestResolveManagementMode(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
