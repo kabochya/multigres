@@ -1964,6 +1964,13 @@ func (pm *MultipoolerManager) StartTopoRegistration(alarm func(string)) {
 // publisher before applying the finalize callback, so no other goroutine
 // can publish over our shutdown state regardless of locking.
 func (pm *MultipoolerManager) StopTopoRegistration(ctx context.Context) {
+	// A pooler that announces shutdown is no longer in any fence membership, so it
+	// must not keep admitting application work, even if its graceful stop timed out.
+	if pm.admissionControlled() {
+		if g, err := pm.applicationGate(); err == nil {
+			g.CloseApplication()
+		}
+	}
 	pm.record.Unregister(ctx, func(s *MutablePoolerRecordState) {
 		s.RoutingState = nil
 		s.ServingStatus = clustermetadatapb.PoolerServingStatus_DISABLED

@@ -107,6 +107,7 @@ type Manager struct {
 
 	ctx           context.Context          // Manager lifecycle context, used for lazy pool creation
 	adminPool     *admin.Pool              // Shared admin pool for kill operations
+	unstopped     admin.UnstoppedBackends  // Backends that could not be shown to have stopped; outlives the pools
 	settingsCache *connstate.SettingsCache // Shared settings cache for all users
 	metrics       *Metrics                 // OpenTelemetry metrics
 
@@ -240,6 +241,7 @@ func (m *Manager) Open(ctx context.Context, connConfig *ConnectionConfig) {
 	m.adminPool = admin.NewPool(ctx, &admin.PoolConfig{
 		ClientConfig:   adminClientConfig,
 		ConnPoolConfig: adminPoolConfig,
+		Unstopped:      &m.unstopped,
 	})
 	m.adminPool.Open()
 
@@ -1118,31 +1120,21 @@ func (m *Manager) CloseReservedConnections(ctx context.Context) int {
 	return total
 }
 
-// PendingTerminations returns how many backends whose termination failed (a
-// closed reserved connection whose pg_terminate_backend was refused or lost) are
-// still running on the server. A backend that is confirmed gone is forgotten.
+// PendingTerminations returns how many backends that the pooler closed its
+// connection to but could not stop (a refused or lost pg_terminate_backend, a
+// cancel that failed or did not take effect) are still running on the server.
 //
 // Closing the client side of such a connection does not stop a statement the
 // backend is executing, so until the backend is gone the work of that connection
-// may still commit.
+// may still commit. Backends are matched by pid and start time, so a pid the
+// server reuses is not mistaken for the original.
 func (m *Manager) PendingTerminations(ctx context.Context) (int, error) {
-	pools := m.userPoolsSnapshot.Load()
-	if pools == nil {
+	pids := m.unstopped.Pids()
+	if len(pids) == 0 {
 		return 0, nil
 	}
-	byPool := make(map[*UserPool][]uint32)
-	var all []uint32
-	for _, pool := range *pools {
-		if pids := pool.UnterminatedBackends(); len(pids) > 0 {
-			byPool[pool] = pids
-			all = append(all, pids...)
-		}
-	}
-	if len(all) == 0 {
-		return 0, nil
-	}
-	ids := make([]string, len(all))
-	for i, pid := range all {
+	ids := make([]string, len(pids))
+	for i, pid := range pids {
 		ids[i] = strconv.FormatUint(uint64(pid), 10)
 	}
 	conn, err := m.GetAdminConn(ctx)
@@ -1150,31 +1142,22 @@ func (m *Manager) PendingTerminations(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	defer conn.Recycle()
-	// pg_stat_activity lists every backend's pid, whatever role owns it.
-	results, err := conn.Conn.QueryWithRetry(ctx, "SELECT pid FROM pg_stat_activity WHERE pid IN ("+strings.Join(ids, ",")+")")
+	// pg_stat_activity lists every backend, whatever role owns it.
+	results, err := conn.Conn.QueryWithRetry(ctx, "SELECT pid, backend_start::text FROM pg_stat_activity WHERE pid IN ("+strings.Join(ids, ",")+")")
 	if err != nil {
 		return 0, err
 	}
-	alive := map[uint32]bool{}
+	alive := map[uint32]string{}
 	for _, res := range results {
 		for _, row := range res.Rows {
 			pid, err := strconv.ParseUint(string(row.Values[0]), 10, 32)
 			if err != nil {
 				return 0, err
 			}
-			alive[uint32(pid)] = true
+			alive[uint32(pid)] = string(row.Values[1])
 		}
 	}
-	for pool, pids := range byPool {
-		var gone []uint32
-		for _, pid := range pids {
-			if !alive[pid] {
-				gone = append(gone, pid)
-			}
-		}
-		pool.ForgetBackends(gone)
-	}
-	return len(alive), nil
+	return m.unstopped.Resolve(alive), nil
 }
 
 // IsClosed reports whether the manager is terminally closed. It returns false

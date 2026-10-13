@@ -451,3 +451,15 @@ func TestOpeningAndAConcurrentLifecycleChangeNeverLeaveAStaleDecisionOpen(t *tes
 		_ = lifecycle.OnStateChange(t.Context(), servingstate.State{Routing: servingstate.RoutingState{Role: servingstate.RoutingRoleUnknown}, ServingStatus: clustermetadatapb.PoolerServingStatus_DISABLED})
 	}
 }
+
+// TestStopTopoRegistrationClosesTheGate: a pooler that announces shutdown leaves
+// every fence membership, so it must not keep admitting work afterwards.
+func TestStopTopoRegistrationClosesTheGate(t *testing.T) {
+	h := newAdmissionHarness(t, true)
+	_, err := h.pm.enforceAdmission(t.Context(), multipoolerservicepb.AdmissionState_ADMISSION_STATE_UNSPECIFIED, "")
+	require.NoError(t, err)
+	require.True(t, h.gate.ApplicationOpen())
+
+	h.pm.StopTopoRegistration(t.Context())
+	require.False(t, h.gate.ApplicationOpen())
+}
