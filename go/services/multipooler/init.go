@@ -23,7 +23,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"google.golang.org/grpc"
@@ -519,9 +518,6 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context) error {
 		serviceID = servenv.GenerateRandomServiceID()
 	}
 	cell := mp.cell.Get()
-	// Distinguishes this process start from any earlier or later one of the
-	// same pooler; coordinators key acknowledgments on it.
-	processIncarnation := uuid.NewString()
 
 	// Ensure we open the topo before we start the context, so that the
 	// defer that closes the topo runs after cancelling the context.
@@ -578,7 +574,6 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context) error {
 			return fmt.Errorf("default primary transport: %w", err)
 		}
 		initial := topoclient.NewMultipooler(serviceID, cell, mp.senv.GetHostname())
-		initial.ProcessIncarnation = processIncarnation
 		initial.ManagementMode = mode
 		initial.ShardKey = &clustermetadatapb.ShardKey{
 			Database:   mp.database.Get(),
@@ -662,7 +657,6 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context) error {
 
 	// Create multipooler record with all fields now that servenv.Init() has set them up
 	multipooler := topoclient.NewMultipooler(serviceID, cell, mp.senv.GetHostname())
-	multipooler.ProcessIncarnation = processIncarnation
 	multipooler.PortMap["grpc"] = int32(mp.grpcServer.Port())
 	multipooler.PortMap["http"] = int32(mp.senv.GetHTTPPort())
 	multipooler.PortMap["postgres"] = int32(adopted.pgPort)

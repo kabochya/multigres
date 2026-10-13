@@ -223,9 +223,8 @@ func (s *Server) respond(r *row, tablegroup string) *multipoolerservicepb.Update
 	resp := &multipoolerservicepb.UpdatePoolerAdmissionResponse{State: r.proto(tablegroup)}
 	for _, p := range r.poolers {
 		resp.Acks = append(resp.Acks, &multipoolerservicepb.PoolerAdmissionAck{
-			PoolerId:           &clustermetadatapb.ID{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: "fake", Name: p},
-			ProcessIncarnation: "fake-incarnation",
-			AppliedState:       r.state,
+			PoolerId:     &clustermetadatapb.ID{Component: clustermetadatapb.ID_MULTIPOOLER, Cell: "fake", Name: p},
+			AppliedState: r.state,
 		})
 	}
 	return resp

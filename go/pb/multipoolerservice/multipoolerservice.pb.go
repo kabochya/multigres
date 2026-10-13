@@ -3068,10 +3068,6 @@ type PoolerAdmissionAck struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// pooler_id identifies the pooler.
 	PoolerId *clustermetadata.ID `protobuf:"bytes,1,opt,name=pooler_id,json=poolerId,proto3" json:"pooler_id,omitempty"`
-	// process_incarnation identifies the process that acknowledged. A pooler that
-	// restarts mid-operation has a new incarnation and its old acknowledgment does
-	// not count.
-	ProcessIncarnation string `protobuf:"bytes,2,opt,name=process_incarnation,json=processIncarnation,proto3" json:"process_incarnation,omitempty"`
 	// applied_state is the state the pooler now enforces.
 	AppliedState  AdmissionState `protobuf:"varint,3,opt,name=applied_state,json=appliedState,proto3,enum=multipoolerservice.AdmissionState" json:"applied_state,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -3113,13 +3109,6 @@ func (x *PoolerAdmissionAck) GetPoolerId() *clustermetadata.ID {
 		return x.PoolerId
 	}
 	return nil
-}
-
-func (x *PoolerAdmissionAck) GetProcessIncarnation() string {
-	if x != nil {
-		return x.ProcessIncarnation
-	}
-	return ""
 }
 
 func (x *PoolerAdmissionAck) GetAppliedState() AdmissionState {
@@ -3493,8 +3482,6 @@ type RefreshAdmissionResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// pooler_id identifies the responding pooler.
 	PoolerId *clustermetadata.ID `protobuf:"bytes,1,opt,name=pooler_id,json=poolerId,proto3" json:"pooler_id,omitempty"`
-	// process_incarnation identifies the responding process.
-	ProcessIncarnation string `protobuf:"bytes,2,opt,name=process_incarnation,json=processIncarnation,proto3" json:"process_incarnation,omitempty"`
 	// applied_state is the state the pooler now enforces. For FENCING it is only
 	// returned once the gate is closed and no application work remains.
 	AppliedState AdmissionState `protobuf:"varint,3,opt,name=applied_state,json=appliedState,proto3,enum=multipoolerservice.AdmissionState" json:"applied_state,omitempty"`
@@ -3539,13 +3526,6 @@ func (x *RefreshAdmissionResponse) GetPoolerId() *clustermetadata.ID {
 		return x.PoolerId
 	}
 	return nil
-}
-
-func (x *RefreshAdmissionResponse) GetProcessIncarnation() string {
-	if x != nil {
-		return x.ProcessIncarnation
-	}
-	return ""
 }
 
 func (x *RefreshAdmissionResponse) GetAppliedState() AdmissionState {
@@ -3758,11 +3738,10 @@ const file_multipoolerservice_proto_rawDesc = "" +
 	"\x17GetServingStateResponse\x12L\n" +
 	"\vtablegroups\x18\x01 \x03(\v2*.multipoolerservice.TablegroupServingStateR\vtablegroups\x12%\n" +
 	"\x0eapp_tablegroup\x18\x02 \x01(\tR\rappTablegroup\x12'\n" +
-	"\x0frouting_version\x18\x03 \x01(\x03R\x0eroutingVersion\"\xc0\x01\n" +
+	"\x0frouting_version\x18\x03 \x01(\x03R\x0eroutingVersion\"\xaa\x01\n" +
 	"\x12PoolerAdmissionAck\x120\n" +
-	"\tpooler_id\x18\x01 \x01(\v2\x13.clustermetadata.IDR\bpoolerId\x12/\n" +
-	"\x13process_incarnation\x18\x02 \x01(\tR\x12processIncarnation\x12G\n" +
-	"\rapplied_state\x18\x03 \x01(\x0e2\".multipoolerservice.AdmissionStateR\fappliedState\"\x9a\x02\n" +
+	"\tpooler_id\x18\x01 \x01(\v2\x13.clustermetadata.IDR\bpoolerId\x12G\n" +
+	"\rapplied_state\x18\x03 \x01(\x0e2\".multipoolerservice.AdmissionStateR\fappliedStateJ\x04\b\x02\x10\x03R\x13process_incarnation\"\x9a\x02\n" +
 	"\x1cUpdatePoolerAdmissionRequest\x12\x1a\n" +
 	"\bdatabase\x18\x01 \x01(\tR\bdatabase\x12\x1e\n" +
 	"\n" +
@@ -3792,13 +3771,12 @@ const file_multipoolerservice_proto_rawDesc = "" +
 	"tablegroup\x12I\n" +
 	"\x0eexpected_state\x18\x03 \x01(\x0e2\".multipoolerservice.AdmissionStateR\rexpectedState\x12\x1d\n" +
 	"\n" +
-	"request_id\x18\x04 \x01(\tR\trequestId\"\xe5\x01\n" +
+	"request_id\x18\x04 \x01(\tR\trequestId\"\xcf\x01\n" +
 	"\x18RefreshAdmissionResponse\x120\n" +
-	"\tpooler_id\x18\x01 \x01(\v2\x13.clustermetadata.IDR\bpoolerId\x12/\n" +
-	"\x13process_incarnation\x18\x02 \x01(\tR\x12processIncarnation\x12G\n" +
+	"\tpooler_id\x18\x01 \x01(\v2\x13.clustermetadata.IDR\bpoolerId\x12G\n" +
 	"\rapplied_state\x18\x03 \x01(\x0e2\".multipoolerservice.AdmissionStateR\fappliedState\x12\x1d\n" +
 	"\n" +
-	"request_id\x18\x04 \x01(\tR\trequestId*R\n" +
+	"request_id\x18\x04 \x01(\tR\trequestIdJ\x04\b\x02\x10\x03R\x13process_incarnation*R\n" +
 	"\x0fReplicationMode\x12 \n" +
 	"\x1cREPLICATION_MODE_UNSPECIFIED\x10\x00\x12\x1d\n" +
 	"\x19REPLICATION_MODE_DATABASE\x10\x01*\x80\x03\n" +

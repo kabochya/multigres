@@ -835,10 +835,8 @@ message PoolerAdmissionAck {
   // pooler_id identifies the pooler.
   clustermetadata.ID pooler_id = 1;
 
-  // process_incarnation identifies the process that acknowledged. A pooler that
-  // restarts mid-operation has a new incarnation and its old acknowledgment does
-  // not count.
-  string process_incarnation = 2;
+  reserved 2;
+  reserved "process_incarnation";
 
   // applied_state is the state the pooler now enforces.
   AdmissionState applied_state = 3;
@@ -930,8 +928,8 @@ message RefreshAdmissionResponse {
   // pooler_id identifies the responding pooler.
   clustermetadata.ID pooler_id = 1;
 
-  // process_incarnation identifies the responding process.
-  string process_incarnation = 2;
+  reserved 2;
+  reserved "process_incarnation";
 
   // applied_state is the state the pooler now enforces. For FENCING it is only
   // returned once the gate is closed and no application work remains.
