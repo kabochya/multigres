@@ -1239,6 +1239,13 @@ func checkBootstrapStatus(ctx context.Context, t *testing.T, setup *ShardSetup) 
 		// --- Postgres query ---
 		_, queryErr := QueryStringValue(ctx, client.Pooler, "SELECT 1")
 		queryable := queryErr == nil
+		// A pooler run with admission control starts closed and rejects application
+		// queries until its tablegroup's admission row opens it, which a test seeds only
+		// once the cohort exists. Its own status says whether postgres is up.
+		if !queryable && status != nil && status.PostgresReady && status.IsInitialized &&
+			strings.Contains(queryErr.Error(), "application admission is closed") {
+			queryable = true
+		}
 
 		client.Close()
 
