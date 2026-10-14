@@ -92,14 +92,14 @@ func requireStaysClosed(t *testing.T, grpcPort int, d time.Duration, msg string)
 	testpoll.Never(t, func() bool { return admits(t, grpcPort) }, d, 250*time.Millisecond, msg)
 }
 
-func requireRejectedAsPlannedFailover(t *testing.T, grpcPort int) {
+func requireRejectedAsAdmissionClosed(t *testing.T, grpcPort int) {
 	t.Helper()
 	client, err := NewMultipoolerClient(grpcPort)
 	require.NoError(t, err)
 	defer client.Close()
 	_, err = client.Pooler.ExecuteQuery(t.Context(), "SELECT 1", 1)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "planned failover", "a closed pooler rejects with the bufferable error")
+	require.Contains(t, err.Error(), "application admission is closed", "a closed pooler rejects with the bufferable error")
 }
 
 // waitBackendReady waits until the pooler has validated its external backend.
@@ -134,7 +134,7 @@ func TestUnmanagedAdmissionStartsClosedAndFollowsPersistedState(t *testing.T) {
 
 	// No admission row yet: closed, with a backend that is ready.
 	requireStaysClosed(t, p.grpcPort, 4*time.Second, "a pooler with no admission state must stay closed")
-	requireRejectedAsPlannedFailover(t, p.grpcPort)
+	requireRejectedAsAdmissionClosed(t, p.grpcPort)
 
 	// Persisting UNFENCED opens it, with no refresh.
 	setServingRow(t, s, "migrateTG", "w4-follow", "UNFENCED", "r0")
@@ -147,7 +147,7 @@ func TestUnmanagedAdmissionStartsClosedAndFollowsPersistedState(t *testing.T) {
 	require.Equal(t, multipoolerservicepb.AdmissionState_ADMISSION_STATE_FENCED, resp.AppliedState)
 	require.Equal(t, "unmanaged-adm-1", resp.PoolerId.GetName())
 	require.False(t, admits(t, p.grpcPort))
-	requireRejectedAsPlannedFailover(t, p.grpcPort)
+	requireRejectedAsAdmissionClosed(t, p.grpcPort)
 
 	// A repeat is acknowledged again.
 	_, err = refreshAdmission(ctx, p.grpcPort, s.Database, "migrateTG", "FENCING", "fence-1")

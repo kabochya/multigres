@@ -44,7 +44,7 @@ func TestDefaultCohortAdmissionSurvivesFailover(t *testing.T) {
 	// Closed until a state says otherwise: there is no row for the tablegroup yet.
 	primary := def.GetPrimary(t)
 	requireStaysClosed(t, primary.Multipooler.GrpcPort, 4*time.Second, "a cohort with no admission state must stay closed")
-	requireRejectedAsPlannedFailover(t, primary.Multipooler.GrpcPort)
+	requireRejectedAsAdmissionClosed(t, primary.Multipooler.GrpcPort)
 
 	setServingRow(t, def, "default", "", "UNFENCED", "r0")
 	requireAdmits(t, primary.Multipooler.GrpcPort, "an UNFENCED default cohort must admit queries")
@@ -58,7 +58,7 @@ func TestDefaultCohortAdmissionSurvivesFailover(t *testing.T) {
 	}
 	setServingRow(t, def, "default", "", "FENCED", "fence-1")
 	require.False(t, admits(t, primary.Multipooler.GrpcPort))
-	requireRejectedAsPlannedFailover(t, primary.Multipooler.GrpcPort)
+	requireRejectedAsAdmissionClosed(t, primary.Multipooler.GrpcPort)
 
 	// Fail over the fenced cohort.
 	def.StartMultiorchs(ctx, t)
@@ -78,7 +78,7 @@ func TestDefaultCohortAdmissionSurvivesFailover(t *testing.T) {
 	// The new primary is writable but closed: promotion never reopens admission.
 	newPrimary := def.GetMultipoolerInstance(newPrimaryName)
 	requireStaysClosed(t, newPrimary.Multipooler.GrpcPort, 6*time.Second, "a failover in a fenced cohort must not reopen it")
-	requireRejectedAsPlannedFailover(t, newPrimary.Multipooler.GrpcPort)
+	requireRejectedAsAdmissionClosed(t, newPrimary.Multipooler.GrpcPort)
 
 	// The coordinator unfences; the new primary reads the state again and opens.
 	setServingRow(t, def, "default", "", "UNFENCING", "unfence-1")
