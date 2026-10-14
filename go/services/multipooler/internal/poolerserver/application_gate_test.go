@@ -47,9 +47,9 @@ func TestApplicationGateClosedByDefaultWhenAdmissionControlled(t *testing.T) {
 	s.servingStatus = clustermetadatapb.PoolerServingStatus_SERVING
 	s.EnableAdmissionControl(nil)
 	_, err = s.BeginRequest(nil, RequestSingleQuery)
-	requireMTF01(t, err)
+	requireMTF02(t, err)
 	_, err = s.BeginRequest(nil, RequestNewReservation)
-	requireMTF01(t, err)
+	requireMTF02(t, err)
 }
 
 func TestClosedGateStillAdmitsControlRequestsAndOpenReservedWork(t *testing.T) {
@@ -127,7 +127,7 @@ func TestFenceWaitsForAdmittedRequests(t *testing.T) {
 	}
 
 	_, err = s.BeginRequest(nil, RequestSingleQuery)
-	requireMTF01(t, err)
+	requireMTF02(t, err)
 
 	release()
 	release() // idempotent
@@ -317,4 +317,45 @@ func TestBeginRequestSkipsAccountingWithoutAdmissionControl(t *testing.T) {
 	require.Zero(t, s.activeRequests)
 	release()
 	require.Nil(t, s.requestsChanged, "a completion nobody waits for allocates no channel")
+}
+
+// TestShutdownApplicationClosesTheGateForGood: after the shutdown close nothing may
+// reopen the gate, whatever generation a late admission read holds.
+func TestShutdownApplicationClosesTheGateForGood(t *testing.T) {
+	s := newStartRequestTestServer()
+	s.servingStatus = clustermetadatapb.PoolerServingStatus_SERVING
+	s.EnableAdmissionControl(nil)
+	require.True(t, s.OpenApplication(s.AdmissionGeneration()))
+
+	require.NoError(t, s.ShutdownApplication(t.Context()))
+	require.False(t, s.ApplicationOpen())
+	require.False(t, s.OpenApplication(s.AdmissionGeneration()), "a decision read after the close must not open the gate")
+	_, err := s.BeginRequest(nil, RequestSingleQuery)
+	requireMTF02(t, err)
+}
+
+// TestShutdownApplicationWaitsForAdmittedWork: work admitted before the close is
+// drained, and when it does not finish the caller is told.
+func TestShutdownApplicationWaitsForAdmittedWork(t *testing.T) {
+	s := newStartRequestTestServer()
+	s.servingStatus = clustermetadatapb.PoolerServingStatus_SERVING
+	s.EnableAdmissionControl(nil)
+	require.True(t, s.OpenApplication(s.AdmissionGeneration()))
+	release, err := s.BeginRequest(nil, RequestSingleQuery)
+	require.NoError(t, err)
+
+	short, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	require.Error(t, s.ShutdownApplication(short), "work is still running")
+	require.False(t, s.ApplicationOpen(), "the gate stays closed when the drain does not finish")
+
+	done := make(chan error, 1)
+	go func() { done <- s.ShutdownApplication(t.Context()) }()
+	select {
+	case err := <-done:
+		t.Fatalf("shutdown returned %v while a request was in flight", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	require.NoError(t, <-done)
 }

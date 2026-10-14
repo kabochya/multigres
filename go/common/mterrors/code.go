@@ -226,6 +226,17 @@ var (
 		Format:      "planned failover in progress",
 		Description: "The pooler is transitioning during a planned failover. The query will be retried automatically.",
 	}
+
+	// MTF02 is returned by a multipooler whose application admission gate is
+	// closed (a fence during a migration, or a pooler that has not yet read its
+	// admission state). Like MTF01 it is bufferable, but the closure is deliberate,
+	// not a failover, so the gateway does not apply the guard against buffering
+	// again soon after the last failover cycle.
+	MTF02 = &MTError{
+		ID: "MTF02", Severity: "ERROR",
+		Format:      "application admission is closed",
+		Description: "The pooler is not admitting application queries. The query will be retried automatically.",
+	}
 )
 
 // NewPgError creates a *PgDiagnostic with a real PostgreSQL SQLSTATE code.

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -72,6 +73,9 @@ type admissionRuntime struct {
 	// lastRole and lastStatus are the serving state the decision was made for.
 	lastRole   servingstate.RoutingRole
 	lastStatus clustermetadatapb.PoolerServingStatus
+	// stopped is set when the pooler announces shutdown: the loop ends and no
+	// decision may open the gate again.
+	stopped atomic.Bool
 	// reader, when set, replaces the read from the default primary (tests).
 	reader func(ctx context.Context) (*multipoolerservicepb.TablegroupServingState, error)
 }
@@ -176,6 +180,9 @@ func (pm *MultipoolerManager) runAdmission(ctx context.Context) {
 			return
 		case <-events:
 		case <-ticker.C:
+		}
+		if a.stopped.Load() {
+			return
 		}
 		// A managed pooler must be visible in topology before it reads anything:
 		// the coordinator fences the poolers it finds there, and one that opens

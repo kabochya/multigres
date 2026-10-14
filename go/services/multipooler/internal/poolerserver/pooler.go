@@ -89,6 +89,7 @@ type QueryPoolerServer struct {
 	// before a change cannot open the gate afterwards. activeRequests counts
 	// admitted requests that have not finished.
 	applicationBlocked      bool
+	applicationShutdown     bool     // the gate was closed for good by ShutdownApplication
 	quiescenceExcludedRoles []string // roles a fence does not wait on; see EnableAdmissionControl
 	admissionControlled     bool
 	admissionGeneration     uint64
@@ -353,10 +354,10 @@ func (s *QueryPoolerServer) startRequestLocked(target *query.Target, kind Reques
 		return nil
 	}
 
-	// A closed application gate rejects new application work with the same
-	// bufferable error as a drain, so gateways hold the request and retry.
+	// A closed application gate rejects new application work with a bufferable
+	// error, so gateways hold the request and retry.
 	if gated && s.applicationBlocked {
-		return mterrors.MTF01.New()
+		return mterrors.MTF02.New()
 	}
 
 	switch s.drainPhase {

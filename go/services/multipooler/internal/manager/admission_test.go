@@ -55,7 +55,10 @@ func (g gatedController) EnableAdmissionControl(excluded []string) {
 func (g gatedController) AdmissionGeneration() uint64     { return g.gate.AdmissionGeneration() }
 func (g gatedController) OpenApplication(gen uint64) bool { return g.gate.OpenApplication(gen) }
 func (g gatedController) CloseApplication()               { g.gate.CloseApplication() }
-func (g gatedController) ApplicationOpen() bool           { return g.gate.ApplicationOpen() }
+func (g gatedController) ShutdownApplication(ctx context.Context) error {
+	return g.gate.ShutdownApplication(ctx)
+}
+func (g gatedController) ApplicationOpen() bool { return g.gate.ApplicationOpen() }
 func (g gatedController) FenceApplication(ctx context.Context, d time.Duration) (int, error) {
 	return g.gate.FenceApplication(ctx, d)
 }
@@ -480,4 +483,95 @@ func TestDefaultPrimaryDialOptionIsResolvedOnlyWhenAsked(t *testing.T) {
 	_, err = cfg.DefaultPrimaryDialOption()
 	require.ErrorIs(t, err, boom)
 	require.Equal(t, 1, calls)
+}
+
+// shutdownHarness is an admission harness whose record is registered against a
+// recording topology store, so what StopTopoRegistration publishes can be seen.
+func newShutdownHarness(t *testing.T) (*admissionHarness, *fakeTopoStore) {
+	t.Helper()
+	h := newAdmissionHarness(t, true)
+	_, err := h.pm.enforceAdmission(t.Context(), multipoolerservicepb.AdmissionState_ADMISSION_STATE_UNSPECIFIED, "")
+	require.NoError(t, err)
+	require.True(t, h.gate.ApplicationOpen())
+
+	ts := &fakeTopoStore{}
+	initial := newTestPoolerProto(clustermetadatapb.PoolerType_REPLICA, clustermetadatapb.PoolerServingStatus_SERVING)
+	initial.ManagementMode = clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
+	h.pm.record = mustNewPoolerRecord(t, ts, initial)
+	h.pm.record.Register(t.Context(), func(string) {})
+	require.Eventually(t, func() bool { return ts.calls.Load() >= 1 }, time.Second, time.Millisecond)
+	return h, ts
+}
+
+func announcedShutdown(ts *fakeTopoStore) bool {
+	seen := ts.lastSeen.Load()
+	return seen != nil && seen.GetLifecycleStatus().GetStatus() == clustermetadatapb.PoolerLifecycleStatus_LIFECYCLE_SHUTDOWN
+}
+
+// TestStopTopoRegistrationDrainsAdmittedWorkBeforeAnnouncingShutdown: SHUTDOWN
+// takes the pooler out of every fence membership, so it must not be published while
+// work the pooler admitted can still reach the database.
+func TestStopTopoRegistrationDrainsAdmittedWorkBeforeAnnouncingShutdown(t *testing.T) {
+	h, ts := newShutdownHarness(t)
+	release, err := h.gate.BeginRequest(nil, poolerserver.RequestSingleQuery)
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	go func() {
+		h.pm.StopTopoRegistration(t.Context())
+		close(done)
+	}()
+	require.Eventually(t, func() bool { return !h.gate.ApplicationOpen() }, 2*time.Second, 5*time.Millisecond, "the gate closes at once")
+	select {
+	case <-done:
+		t.Fatal("shutdown finished while admitted work was still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+	require.False(t, announcedShutdown(ts), "not announced while work is in flight")
+
+	release()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not finish after the work did")
+	}
+	require.True(t, announcedShutdown(ts))
+}
+
+// TestStopTopoRegistrationWithWorkStillRunningFailsClosed: when the work does not
+// finish in the budget the record is left as a crashed pooler's would be, and the
+// gate does not reopen however the admission loop runs afterwards. This is the path
+// a graceful shutdown that timed out, or could not take the action lock, leaves.
+func TestStopTopoRegistrationWithWorkStillRunningFailsClosed(t *testing.T) {
+	h, ts := newShutdownHarness(t)
+	_, err := h.gate.BeginRequest(nil, poolerserver.RequestSingleQuery)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	h.pm.StopTopoRegistration(ctx)
+
+	require.False(t, announcedShutdown(ts), "a pooler with running work must not say it has stopped")
+	require.False(t, h.gate.ApplicationOpen())
+
+	// The loop is over, and a decision read now could not open the gate.
+	loopCtx, loopCancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer loopCancel()
+	exited := make(chan struct{})
+	go func() {
+		h.pm.runAdmission(loopCtx)
+		close(exited)
+	}()
+	h.pm.signalAdmission()
+	select {
+	case <-exited:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the admission loop kept running after shutdown")
+	}
+	_, err = h.pm.enforceAdmission(t.Context(), multipoolerservicepb.AdmissionState_ADMISSION_STATE_UNSPECIFIED, "")
+	require.Error(t, err)
+	require.False(t, h.gate.ApplicationOpen())
+	_, err = h.refresh(unfencedState, "r1")
+	require.Error(t, err, "a refresh cannot reopen a pooler that is shutting down")
+	require.False(t, h.gate.ApplicationOpen())
 }

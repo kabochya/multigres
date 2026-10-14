@@ -1964,16 +1964,26 @@ func (pm *MultipoolerManager) StartTopoRegistration(alarm func(string)) {
 // LifecycleStatus=LIFECYCLE_STARTING, and the orchestrator promotes as
 // usual.
 //
+// A pooler with admission control first closes its application gate for good,
+// stops the admission loop and waits, within half of ctx's remaining time, for
+// the work it admitted to finish. If that does not happen it writes nothing
+// (see below), so the record fails closed.
+//
 // Does not require the manager's action lock — record.Unregister stops the
 // publisher before applying the finalize callback, so no other goroutine
 // can publish over our shutdown state regardless of locking.
 func (pm *MultipoolerManager) StopTopoRegistration(ctx context.Context) {
 	// A pooler that announces shutdown is no longer in any fence membership, so it
-	// must not keep admitting application work, even if its graceful stop timed out.
-	if pm.admissionControlled() {
-		if g, err := pm.applicationGate(); err == nil {
-			g.CloseApplication()
-		}
+	// must not admit application work after that, even if its graceful stop timed
+	// out or could not take the action lock.
+	if pm.admissionControlled() && !pm.shutdownApplication(ctx) {
+		// Work admitted before the close is still running, so the pooler must not
+		// say it has stopped: a fence that snapshotted its membership afterwards
+		// would not wait for work that can still reach the database. The process is
+		// about to exit, and the record is left as a crashed pooler's would be: a
+		// fence that includes it fails to get its acknowledgment instead of passing
+		// without it, until an operator removes the entry.
+		return
 	}
 	pm.record.Unregister(ctx, func(s *MutablePoolerRecordState) {
 		s.RoutingState = nil
@@ -1984,6 +1994,30 @@ func (pm *MultipoolerManager) StopTopoRegistration(ctx context.Context) {
 			Updated: timestamppb.Now(),
 		}
 	})
+}
+
+// shutdownApplication closes the application gate terminally and waits for the
+// admitted work to finish, and reports whether it did. It reports true for a pooler
+// that has no gate to close.
+func (pm *MultipoolerManager) shutdownApplication(ctx context.Context) bool {
+	pm.admission.stopped.Store(true)
+	g, err := pm.applicationGate()
+	if err != nil {
+		return true
+	}
+	drainCtx := ctx
+	if deadline, ok := ctx.Deadline(); ok {
+		// Leave the rest for the shutdown write.
+		var cancel context.CancelFunc
+		drainCtx, cancel = context.WithTimeout(ctx, time.Until(deadline)/2)
+		defer cancel()
+	}
+	if err := g.ShutdownApplication(drainCtx); err != nil {
+		pm.logger.WarnContext(ctx, "application work is still running at shutdown; not announcing the pooler as stopped",
+			"error", err)
+		return false
+	}
+	return true
 }
 
 // WaitUntilReady blocks until the manager reaches Ready or Error state, or

@@ -105,6 +105,14 @@ func requireMTF01(t *testing.T, err error) {
 	assert.True(t, mterrors.IsErrorCode(err, mterrors.MTF01.ID), "expected MTF01 error, got: %v", err)
 }
 
+// requireMTF02 asserts that err is the MTF02 (application admission closed)
+// gateway-buffering signal.
+func requireMTF02(t *testing.T, err error) {
+	t.Helper()
+	require.Error(t, err)
+	assert.True(t, mterrors.IsErrorCode(err, mterrors.MTF02.ID), "expected MTF02 error, got: %v", err)
+}
+
 func TestStartRequest_Serving(t *testing.T) {
 	s := newStartRequestTestServer()
 	s.servingStatus = clustermetadatapb.PoolerServingStatus_SERVING

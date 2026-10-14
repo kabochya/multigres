@@ -46,6 +46,11 @@ type ApplicationGate interface {
 	OpenApplication(generation uint64) bool
 	// CloseApplication closes the gate immediately.
 	CloseApplication()
+	// ShutdownApplication closes the gate for good: OpenApplication refuses from
+	// then on, whatever generation it is given. It then waits until no application
+	// work admitted before the close is in flight, and returns an error if ctx
+	// ends first. The gate stays closed either way.
+	ShutdownApplication(ctx context.Context) error
 	// ApplicationOpen reports whether the gate is open.
 	ApplicationOpen() bool
 	// FenceApplication closes the gate and waits until no application work is in
@@ -123,11 +128,23 @@ func (s *QueryPoolerServer) AdmissionGeneration() uint64 {
 func (s *QueryPoolerServer) OpenApplication(generation uint64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if generation != s.admissionGeneration {
+	if generation != s.admissionGeneration || s.applicationShutdown {
 		return false
 	}
 	s.applicationBlocked = false
 	return true
+}
+
+// ShutdownApplication implements ApplicationGate. It waits for the pooler's own
+// work only: the server's other clients are not this pooler's to wait for, and a
+// pooler that has stopped admitting leaves the check of the server to the
+// poolers that stay.
+func (s *QueryPoolerServer) ShutdownApplication(ctx context.Context) error {
+	s.mu.Lock()
+	s.applicationShutdown = true
+	s.closeApplicationLocked()
+	s.mu.Unlock()
+	return s.awaitIdle(ctx)
 }
 
 // CloseApplication implements ApplicationGate.
