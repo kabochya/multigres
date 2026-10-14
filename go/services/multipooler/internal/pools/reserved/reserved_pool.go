@@ -193,6 +193,7 @@ func (p *Pool) NewConn(ctx context.Context, settings *connstate.Settings, opts .
 
 	// Create reserved connection.
 	rc := newConn(pooled, connID, p, o.releaseCleanups)
+	rc.uncounted = o.uncounted
 	rc.SetInactivityTimeout(p.config.InactivityTimeout)
 
 	// Register in active map.
@@ -201,7 +202,7 @@ func (p *Pool) NewConn(ctx context.Context, settings *connstate.Settings, opts .
 	p.mu.Unlock()
 
 	p.reserveCount.Add(1)
-	if p.config.OnReserve != nil {
+	if p.config.OnReserve != nil && !rc.uncounted {
 		p.config.OnReserve()
 	}
 
@@ -410,7 +411,7 @@ func (p *Pool) release(rc *Conn, reason ReleaseReason, gatewaySessionSettings ma
 	// was tainted above.
 	rc.pooled.Recycle()
 
-	if p.config.OnRelease != nil {
+	if p.config.OnRelease != nil && !rc.uncounted {
 		p.config.OnRelease()
 	}
 
@@ -596,6 +597,28 @@ func (p *Pool) KillAll(ctx context.Context) int {
 	ids := make([]int64, 0, len(p.active))
 	for id := range p.active {
 		ids = append(ids, id)
+	}
+	p.mu.Unlock()
+
+	for _, connID := range ids {
+		if err := p.KillConnection(ctx, connID); err != nil {
+			p.logger.WarnContext(ctx, "failed to kill connection during drain",
+				"conn_id", connID, "error", err)
+		}
+	}
+
+	return len(ids)
+}
+
+// KillAllCounted is KillAll for client work: it leaves alone the connections that
+// are infrastructure (see WithoutDrainAccounting).
+func (p *Pool) KillAllCounted(ctx context.Context) int {
+	p.mu.Lock()
+	ids := make([]int64, 0, len(p.active))
+	for id, rc := range p.active {
+		if !rc.uncounted {
+			ids = append(ids, id)
+		}
 	}
 	p.mu.Unlock()
 

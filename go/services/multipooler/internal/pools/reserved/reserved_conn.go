@@ -62,6 +62,9 @@ type Conn struct {
 	// releaseCleanups run before clean release recycles the backend.
 	releaseCleanups []ReleaseCleanup
 
+	// uncounted is set at creation: see WithoutDrainAccounting.
+	uncounted bool
+
 	// inactivityTimeout is the maximum duration the connection can be inactive
 	// (no client activity) before expiring. A value of 0 means no timeout.
 	inactivityTimeout time.Duration
@@ -116,6 +119,12 @@ func newConn(pooled regular.PooledConn, connID int64, pool *Pool, releaseCleanup
 		pool:            pool,
 		releaseCleanups: append([]ReleaseCleanup(nil), releaseCleanups...),
 	}
+}
+
+// Uncounted reports whether the connection is infrastructure that drains do not
+// wait for: see WithoutDrainAccounting.
+func (c *Conn) Uncounted() bool {
+	return c.uncounted
 }
 
 // ConnID returns the unique identifier for this reservation.

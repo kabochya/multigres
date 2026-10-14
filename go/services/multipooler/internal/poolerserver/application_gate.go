@@ -204,7 +204,7 @@ func (s *QueryPoolerServer) FenceApplication(ctx context.Context, drainTimeout t
 
 	terminated := 0
 	if s.poolManager != nil {
-		terminated = s.poolManager.CloseReservedConnections(ctx)
+		terminated = s.poolManager.CloseApplicationConnections(ctx)
 	}
 	if s.logger != nil {
 		s.logger.WarnContext(ctx, "application fence deadline passed, terminated remaining work",

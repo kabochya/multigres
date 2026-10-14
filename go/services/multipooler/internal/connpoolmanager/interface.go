@@ -121,6 +121,11 @@ type PoolManager interface {
 	// used in a non-serving state.
 	CloseReservedConnections(ctx context.Context) int
 
+	// CloseApplicationConnections kills the active reserved connections that are
+	// client work, leaving infrastructure connections (the pubsub listener's LISTEN
+	// connection) alone. Used by a fence.
+	CloseApplicationConnections(ctx context.Context) int
+
 	// --- Stats ---
 
 	// Stats returns statistics for all pools.

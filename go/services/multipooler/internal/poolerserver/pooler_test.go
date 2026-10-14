@@ -376,6 +376,11 @@ func (m *drainMockPoolManager) CloseReservedConnections(ctx context.Context) int
 	return m.closeReservedCount
 }
 
+// CloseApplicationConnections is what a fence uses; the mock counts it as a close.
+func (m *drainMockPoolManager) CloseApplicationConnections(ctx context.Context) int {
+	return m.CloseReservedConnections(ctx)
+}
+
 func (m *drainMockPoolManager) closeReservedCallCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()

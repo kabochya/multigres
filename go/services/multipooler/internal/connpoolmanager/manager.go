@@ -1118,6 +1118,22 @@ func (m *Manager) CloseReservedConnections(ctx context.Context) int {
 	return total
 }
 
+// CloseApplicationConnections kills the active reserved connections across all user
+// pools that are client work. Infrastructure connections, such as the LISTEN
+// connection of the pubsub listener, are left alone: they are not application
+// work, and ending them would drop notifications for the cohort.
+func (m *Manager) CloseApplicationConnections(ctx context.Context) int {
+	pools := m.userPoolsSnapshot.Load()
+	if pools == nil {
+		return 0
+	}
+	total := 0
+	for _, pool := range *pools {
+		total += pool.CloseCountedReservedConnections(ctx)
+	}
+	return total
+}
+
 // BusyBackends returns how many client backends of the pooler's database are doing
 // application work on the server its admin connection reaches: any whose state is
 // not idle (an idle-in-transaction backend counts, as does one whose state is not

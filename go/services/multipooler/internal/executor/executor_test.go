@@ -282,7 +282,9 @@ func (m *stubPoolManager) GetReservedConn(int64, string) (*reserved.Conn, bool) 
 func (m *stubPoolManager) WaitForDrain(context.Context) error           { return nil }
 func (m *stubPoolManager) WaitForReservedDrain(context.Context) error   { return nil }
 func (m *stubPoolManager) CloseReservedConnections(context.Context) int { return 0 }
-func (m *stubPoolManager) Stats() connpoolmanager.ManagerStats          { return connpoolmanager.ManagerStats{} }
+
+func (m *stubPoolManager) CloseApplicationConnections(context.Context) int { return 0 }
+func (m *stubPoolManager) Stats() connpoolmanager.ManagerStats             { return connpoolmanager.ManagerStats{} }
 func (m *stubPoolManager) CredentialQueryRecorder() connpoolmanager.CredentialQueryRecorder {
 	return nil
 }

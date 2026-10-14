@@ -34,6 +34,22 @@ type reservedConnOpts struct {
 
 	// releaseCleanups run before a clean release recycles the backend.
 	releaseCleanups []ReleaseCleanup
+
+	// uncounted keeps the connection out of the pool's reserve and release
+	// accounting and out of KillAllCounted; see WithoutDrainAccounting.
+	uncounted bool
+}
+
+// WithoutDrainAccounting marks the connection as infrastructure rather than client
+// work: it is not counted by the pool's reserve and release callbacks, so a drain
+// does not wait for it, and KillAllCounted leaves it alone. The LISTEN connection
+// of the pubsub listener is one: it is held for as long as anyone listens, and a
+// fence of the application's work must not wait for it or drop it. KillAll, which
+// shutdown uses, still ends it.
+func WithoutDrainAccounting() ReservedConnOption {
+	return func(o *reservedConnOpts) {
+		o.uncounted = true
+	}
 }
 
 // WithValidate registers a callback that runs against the freshly acquired
