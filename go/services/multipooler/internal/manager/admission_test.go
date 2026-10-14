@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
+	"github.com/multigres/multigres/go/common/constants"
 	"github.com/multigres/multigres/go/common/mterrors"
 	clustermetadatapb "github.com/multigres/multigres/go/pb/clustermetadata"
 	mtrpcpb "github.com/multigres/multigres/go/pb/mtrpc"
@@ -67,6 +68,7 @@ func (g gatedController) FenceApplication(ctx context.Context, d time.Duration) 
 // is scripted.
 type admissionHarness struct {
 	pm    *MultipoolerManager
+	tg    string // the tablegroup of the pooler: the default one for a managed pooler
 	gate  *poolerserver.QueryPoolerServer
 	row   atomic.Pointer[multipoolerservicepb.TablegroupServingState]
 	err   atomic.Pointer[error]
@@ -76,8 +78,12 @@ type admissionHarness struct {
 func newAdmissionHarness(t *testing.T, unmanaged bool) *admissionHarness {
 	t.Helper()
 	initial := newTestMultipooler(clustermetadatapb.PoolerType_REPLICA, clustermetadatapb.PoolerServingStatus_DISABLED)
-	initial.ShardKey = &clustermetadatapb.ShardKey{Database: "db", TableGroup: "migrateTG", Shard: "0-inf"}
-	cfg := &Config{AdmissionControl: true, AllowNonDefaultTableGroup: true, AdmissionDrainTimeout: time.Second}
+	tg := constants.DefaultTableGroup
+	if unmanaged {
+		tg = "migrateTG"
+	}
+	initial.ShardKey = &clustermetadatapb.ShardKey{Database: "db", TableGroup: tg, Shard: "0-inf"}
+	cfg := &Config{AdmissionControl: true, AdmissionDrainTimeout: time.Second}
 	if unmanaged {
 		initial.ManagementMode = clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
 		cfg.AdmissionControl = false
@@ -91,13 +97,13 @@ func newAdmissionHarness(t *testing.T, unmanaged bool) *admissionHarness {
 		pm.shutdownCancel()
 	})
 
-	gate := poolerserver.NewQueryPoolerServer(slog.New(slog.DiscardHandler), nil, initial.Id, "migrateTG", "0-inf", nil, 0, false)
+	gate := poolerserver.NewQueryPoolerServer(slog.New(slog.DiscardHandler), nil, initial.Id, tg, "0-inf", nil, 0, false)
 	// Serving, so admitted requests are not rejected for the serving state.
 	require.NoError(t, gate.OnStateChange(t.Context(), servingstate.State{ServingStatus: clustermetadatapb.PoolerServingStatus_SERVING}))
 	gate.EnableAdmissionControl(nil)
 	pm.qsc = gatedController{mockPoolerController: &mockPoolerController{}, gate: gate}
 
-	h := &admissionHarness{pm: pm, gate: gate}
+	h := &admissionHarness{pm: pm, tg: tg, gate: gate}
 	backing := ""
 	if unmanaged {
 		backing = "src"
@@ -121,13 +127,13 @@ func newAdmissionHarness(t *testing.T, unmanaged bool) *admissionHarness {
 
 func (h *admissionHarness) setRow(state multipoolerservicepb.AdmissionState, requestID, backing string) {
 	h.row.Store(&multipoolerservicepb.TablegroupServingState{
-		Tablegroup: "migrateTG", AdmissionState: state, RequestId: requestID, BackingConnection: backing,
+		Tablegroup: h.tg, AdmissionState: state, RequestId: requestID, BackingConnection: backing,
 	})
 }
 
 func (h *admissionHarness) refresh(expected multipoolerservicepb.AdmissionState, requestID string) (*multipoolerservicepb.RefreshAdmissionResponse, error) {
 	return h.pm.RefreshAdmission(context.Background(), &multipoolerservicepb.RefreshAdmissionRequest{
-		Database: "db", Tablegroup: "migrateTG", ExpectedState: expected, RequestId: requestID,
+		Database: "db", Tablegroup: h.tg, ExpectedState: expected, RequestId: requestID,
 	})
 }
 
@@ -263,22 +269,22 @@ func TestRefreshValidatesRequest(t *testing.T) {
 		_, err := h.pm.RefreshAdmission(t.Context(), &multipoolerservicepb.RefreshAdmissionRequest{Database: db, Tablegroup: tg, ExpectedState: state, RequestId: id})
 		return err
 	}
-	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, call("other", "migrateTG", fencingState, "x"))
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, call("other", h.tg, fencingState, "x"))
 	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, call("db", "otherTG", fencingState, "x"))
-	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, call("db", "migrateTG", multipoolerservicepb.AdmissionState_ADMISSION_STATE_UNSPECIFIED, "x"))
-	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, call("db", "migrateTG", fencingState, ""))
+	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, call("db", h.tg, multipoolerservicepb.AdmissionState_ADMISSION_STATE_UNSPECIFIED, "x"))
+	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, call("db", h.tg, fencingState, ""))
 
 	// A managed pooler without admission control refuses.
 	plain := newTestManagerForAdmissionOff(t)
-	_, err := plain.RefreshAdmission(t.Context(), &multipoolerservicepb.RefreshAdmissionRequest{Database: "db", Tablegroup: "migrateTG", ExpectedState: fencingState, RequestId: "x"})
+	_, err := plain.RefreshAdmission(t.Context(), &multipoolerservicepb.RefreshAdmissionRequest{Database: "db", Tablegroup: constants.DefaultTableGroup, ExpectedState: fencingState, RequestId: "x"})
 	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
 }
 
 func newTestManagerForAdmissionOff(t *testing.T) *MultipoolerManager {
 	t.Helper()
 	initial := newTestMultipooler(clustermetadatapb.PoolerType_REPLICA, clustermetadatapb.PoolerServingStatus_DISABLED)
-	initial.ShardKey = &clustermetadatapb.ShardKey{Database: "db", TableGroup: "migrateTG", Shard: "0-inf"}
-	pm, err := NewMultipoolerManager(slog.New(slog.DiscardHandler), initial, &Config{AllowNonDefaultTableGroup: true})
+	initial.ShardKey = &clustermetadatapb.ShardKey{Database: "db", TableGroup: constants.DefaultTableGroup, Shard: "0-inf"}
+	pm, err := NewMultipoolerManager(slog.New(slog.DiscardHandler), initial, &Config{})
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		pm.cancel()
@@ -355,7 +361,7 @@ func TestFenceDoesNotAcknowledgeWhileWorkIsInFlight(t *testing.T) {
 	h.setRow(fencingState, "fence-1", "src")
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
-	_, err = h.pm.RefreshAdmission(ctx, &multipoolerservicepb.RefreshAdmissionRequest{Database: "db", Tablegroup: "migrateTG", ExpectedState: fencingState, RequestId: "fence-1"})
+	_, err = h.pm.RefreshAdmission(ctx, &multipoolerservicepb.RefreshAdmissionRequest{Database: "db", Tablegroup: h.tg, ExpectedState: fencingState, RequestId: "fence-1"})
 	require.Error(t, err, "work is still in flight")
 	require.False(t, h.gate.ApplicationOpen(), "the gate is closed even though the fence did not complete")
 
