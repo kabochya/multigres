@@ -796,8 +796,37 @@ func (mp *Multipooler) ServiceIdentity() servenv.ServiceIdentity {
 	}
 }
 
+// RunDefault runs the server until it is stopped. When the server fails to start,
+// Run returns without firing the close hooks, so what they would have done for
+// the topology record is done here.
 func (mp *Multipooler) RunDefault() error {
-	return mp.senv.RunDefault(mp.grpcServer)
+	err := mp.senv.RunDefault(mp.grpcServer)
+	if err != nil {
+		mp.abandonStartup()
+	}
+	return err
+}
+
+// abandonStartup closes the topology record of a pooler whose server failed to
+// start. A failure after Init but before the manager's registration has landed
+// would otherwise leave the DISABLED record that bootstrapping wrote, which
+// membership snapshots of the tablegroup would wait on for a pooler that is gone.
+func (mp *Multipooler) abandonStartup() {
+	// The server never started, so there is no context to derive this from.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second) //nolint:gocritic // entry point after a failed start
+	defer cancel()
+	if mp.poolerManager != nil {
+		mp.poolerManager.StopTopoRegistration(ctx)
+	}
+	if mp.preparing == nil {
+		return
+	}
+	// The manager's shutdown write, if it registered, already says SHUTDOWN.
+	if info, err := mp.ts.GetMultipooler(ctx, mp.preparing.GetId()); err == nil &&
+		info.GetLifecycleStatus().GetStatus() == clustermetadatapb.PoolerLifecycleStatus_LIFECYCLE_SHUTDOWN {
+		return
+	}
+	mp.markPreparingStopped(ctx)
 }
 
 func (mp *Multipooler) Shutdown(ctx context.Context) {

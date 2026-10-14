@@ -484,7 +484,7 @@ func MarkPreparingFailed(ctx context.Context, ts poolerTopoStore, initial *clust
 	rec.RoutingState = nil
 	rec.LifecycleStatus = &clustermetadatapb.PoolerLifecycle{
 		Status:  clustermetadatapb.PoolerLifecycleStatus_LIFECYCLE_SHUTDOWN,
-		Reason:  "bootstrap failed",
+		Reason:  "startup failed",
 		Updated: timestamppb.Now(),
 	}
 	return record.topoClient.RegisterMultipooler(ctx, rec, true /* allowUpdate */)

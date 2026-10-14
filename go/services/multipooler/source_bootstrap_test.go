@@ -262,3 +262,43 @@ func TestStartupFailureAfterBootstrapMarksTheRegistrationStopped(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, clustermetadatapb.PoolerLifecycleStatus_LIFECYCLE_SHUTDOWN, info.GetLifecycleStatus().GetStatus())
 }
+
+// TestServerFailureBeforeTheManagerRegisteredMarksTheRecordStopped: Init returned
+// and the pooler is serving nothing yet, but the server fails to start before the
+// manager's registration has landed. Run returns without the close hooks, so
+// abandonStartup must close the record bootstrapping wrote.
+func TestServerFailureBeforeTheManagerRegisteredMarksTheRecordStopped(t *testing.T) {
+	ts, _ := memorytopo.NewServerAndFactory(t.Context(), "zone1")
+	defer ts.Close()
+	initial := unmanagedRecord()
+	require.NoError(t, manager.RegisterPreparing(t.Context(), ts, initial))
+
+	mp := &Multipooler{ts: ts, preparing: initial}
+	mp.abandonStartup()
+
+	info, err := ts.GetMultipooler(t.Context(), initial.Id)
+	require.NoError(t, err)
+	require.Equal(t, clustermetadatapb.PoolerLifecycleStatus_LIFECYCLE_SHUTDOWN, info.GetLifecycleStatus().GetStatus())
+}
+
+// TestAbandonStartupKeepsAShutdownTheManagerWrote: the manager's own final write
+// carries the real reason; abandonStartup must not replace it.
+func TestAbandonStartupKeepsAShutdownTheManagerWrote(t *testing.T) {
+	ts, _ := memorytopo.NewServerAndFactory(t.Context(), "zone1")
+	defer ts.Close()
+	initial := unmanagedRecord()
+	require.NoError(t, manager.RegisterPreparing(t.Context(), ts, initial))
+	stopped := proto.Clone(initial).(*clustermetadatapb.Multipooler)
+	stopped.LifecycleStatus = &clustermetadatapb.PoolerLifecycle{
+		Status: clustermetadatapb.PoolerLifecycleStatus_LIFECYCLE_SHUTDOWN,
+		Reason: "pooler shutdown",
+	}
+	require.NoError(t, ts.RegisterMultipooler(t.Context(), stopped, true))
+
+	mp := &Multipooler{ts: ts, preparing: initial}
+	mp.abandonStartup()
+
+	info, err := ts.GetMultipooler(t.Context(), initial.Id)
+	require.NoError(t, err)
+	require.Equal(t, "pooler shutdown", info.GetLifecycleStatus().GetReason())
+}
