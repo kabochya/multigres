@@ -76,7 +76,11 @@ var _ ApplicationGate = (*QueryPoolerServer)(nil)
 func (s *QueryPoolerServer) BeginRequest(target *query.Target, kind RequestKind) (func(), error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.startRequestLocked(target, kind, true /* gated */); err != nil {
+	// Control traffic is not application work: it is served while the gate is
+	// closed. A request that would reserve a connection is not exempt, or the
+	// reservation, whose later requests pass the gate, would be a way in.
+	gated := !(target.GetControl() && kind == RequestSingleQuery)
+	if err := s.startRequestLocked(target, kind, gated); err != nil {
 		return nil, err
 	}
 	// Only a pooler with admission control ever waits for requests to finish, so

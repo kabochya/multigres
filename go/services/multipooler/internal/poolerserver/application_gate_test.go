@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	clustermetadatapb "github.com/multigres/multigres/go/pb/clustermetadata"
+	"github.com/multigres/multigres/go/pb/query"
 	"github.com/multigres/multigres/go/services/multipooler/internal/servingstate"
 )
 
@@ -358,4 +359,29 @@ func TestShutdownApplicationWaitsForAdmittedWork(t *testing.T) {
 	}
 	release()
 	require.NoError(t, <-done)
+}
+
+// TestControlRequestsPassAClosedGateOnlyWhenTheyReserveNothing: control traffic is
+// served while the gate is closed, but one that would start a reservation is gated
+// like application work, since the reservation's later requests would pass it.
+func TestControlRequestsPassAClosedGateOnlyWhenTheyReserveNothing(t *testing.T) {
+	s := newStartRequestTestServer()
+	s.servingStatus = clustermetadatapb.PoolerServingStatus_SERVING
+	s.EnableAdmissionControl(nil)
+	control := &query.Target{Control: true}
+
+	release, err := s.BeginRequest(control, RequestSingleQuery)
+	require.NoError(t, err, "a control query is served while the gate is closed")
+	release()
+
+	_, err = s.BeginRequest(control, RequestNewReservation)
+	requireMTF02(t, err)
+	_, err = s.BeginRequest(&query.Target{}, RequestSingleQuery)
+	requireMTF02(t, err)
+
+	// Not serving at all still rejects it: control bypasses the gate, not the
+	// pooler's own state.
+	s.servingStatus = clustermetadatapb.PoolerServingStatus_DISABLED
+	_, err = s.BeginRequest(control, RequestSingleQuery)
+	requireMTF01(t, err)
 }
