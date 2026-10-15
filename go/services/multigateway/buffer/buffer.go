@@ -351,3 +351,19 @@ func (b *Buffer) drainEntriesForShard(shardKey *clustermetadatapb.ShardKey) []*e
 	b.queue = remaining
 	return drained
 }
+
+type ignoreMinGapKey struct{}
+
+// IgnoringMinTimeBetweenFailovers marks a wait as one that must not be skipped
+// because the shard's previous buffer cycle ended recently. The guard exists to
+// keep a flapping failover from buffering over and over; a deliberate, operator
+// driven closure (a fence during a migration) is not flapping, and a rollback
+// shortly after a cutover must wait like the cutover did.
+func IgnoringMinTimeBetweenFailovers(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ignoreMinGapKey{}, true)
+}
+
+func ignoresMinGap(ctx context.Context) bool {
+	v, _ := ctx.Value(ignoreMinGapKey{}).(bool)
+	return v
+}

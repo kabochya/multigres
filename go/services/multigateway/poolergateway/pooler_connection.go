@@ -39,6 +39,10 @@ import (
 // errPoolerUninitialized is the initial error before health stream connects.
 var errPoolerUninitialized = errors.New("pooler health not initialized")
 
+// gateNotOpen reports whether the pooler's application gate is not admitting: fenced,
+// or closed until the admission state is read.
+func (h *poolerHealth) gateNotOpen() bool { return h.AdmissionClosed || h.AdmissionPending }
+
 // poolerHealth represents the health state received from a multipooler.
 // This is a snapshot of health state that can be safely passed around
 // without synchronization.
@@ -60,6 +64,17 @@ type poolerHealth struct {
 	// ReplicationLagNs is the replication lag in nanoseconds reported by the pooler.
 	// Zero on the primary or when not yet measured.
 	ReplicationLagNs int64
+
+	// AdmissionClosed is true while the pooler's application gate is closed: it
+	// is serving but refuses application queries (fenced or undecided). It is
+	// false for poolers without admission control.
+	AdmissionClosed bool
+
+	// AdmissionPending is true while the pooler's gate is closed for no decision of
+	// its own: it has not read the admission state since it started or failed
+	// over. The pooler is not selected and buffered requests stay held, but this is
+	// not a fence: the buffer's timing guard still applies.
+	AdmissionPending bool
 
 	// LastError is the most recent error from the health stream.
 	LastError error
@@ -90,6 +105,8 @@ func (h *poolerHealth) simpleCopy() *poolerHealth {
 		ServingStatus:    h.ServingStatus,
 		RoutingState:     h.RoutingState,
 		ReplicationLagNs: h.ReplicationLagNs,
+		AdmissionClosed:  h.AdmissionClosed,
+		AdmissionPending: h.AdmissionPending,
 		LastError:        h.LastError,
 		LastResponse:     h.LastResponse,
 	}
@@ -414,6 +431,8 @@ func (pc *poolerConnection) processHealthResponse(response *multipoolerservice.S
 		ServingStatus:    response.ServingStatus,
 		RoutingState:     response.RoutingState,
 		ReplicationLagNs: response.ReplicationLagNs,
+		AdmissionClosed:  response.AdmissionClosed,
+		AdmissionPending: response.AdmissionPending,
 		LastError:        nil,
 		LastResponse:     time.Now(),
 	}

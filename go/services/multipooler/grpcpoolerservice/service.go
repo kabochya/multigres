@@ -1073,6 +1073,8 @@ func healthStateToProto(state *poolerserver.HealthState) *multipoolerpb.StreamPo
 
 	resp.ReplicationLagNs = state.ReplicationLagNs
 	resp.BackendReady = state.BackendReady
+	resp.AdmissionClosed = state.AdmissionClosed
+	resp.AdmissionPending = state.AdmissionPending
 
 	return resp
 }

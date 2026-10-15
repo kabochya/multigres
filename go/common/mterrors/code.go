@@ -87,6 +87,18 @@ func NewReservationEndedByFence() *PgDiagnostic {
 		"The backends that held the session's transaction, temporary tables or locks were closed when application traffic was fenced. Reconnect to start a clean session.")
 }
 
+// NewSessionStateLostAtRouteChange creates a PgDiagnostic for a session that held
+// a reservation (a transaction, temp tables, a session advisory lock, a cursor) on
+// a backend that application routing has since taken away. SQLSTATE 57P01
+// (admin_shutdown), severity FATAL, so the client connection is closed: an error
+// the client could retry from would let it carry on believing it still holds state
+// that is gone, such as a lock another session can now take on the new tablegroup.
+func NewSessionStateLostAtRouteChange() *PgDiagnostic {
+	return NewPgError("FATAL", PgSSAdminShutdown,
+		"terminating connection: application traffic moved while this session held state on the previous database",
+		"The backends that held the session's transaction, temporary tables or locks were closed when traffic moved. Reconnect to start a clean session.")
+}
+
 // NewReservedConnectionTerminated creates a PgDiagnostic for a reserved
 // connection that was terminated before its in-flight work could continue or
 // be concluded. This fires for several distinct, unrelated reasons — most

@@ -1034,9 +1034,9 @@ func TestLoadBalancer_DrainingPrimaryStaysRoutable(t *testing.T) {
 }
 
 // TestLoadBalancer_UnmanagedPoolerIsNeverALeaderOrReplica verifies that an
-// unmanaged pooler reporting PRIMARY does not become the shard's routing
-// primary, and is not offered as a replica either. Unmanaged poolers are
-// selected by backing connection, not by consensus leadership.
+// unmanaged pooler reporting PRIMARY is not recorded as the shard's routing
+// primary and is not offered as a replica: it is selected as an unmanaged pooler
+// (see unmanagedConnection), not through consensus leadership.
 func TestLoadBalancer_UnmanagedPoolerIsNeverALeaderOrReplica(t *testing.T) {
 	lb := newTestLB(t, "zone1")
 
@@ -1049,11 +1049,15 @@ func TestLoadBalancer_UnmanagedPoolerIsNeverALeaderOrReplica(t *testing.T) {
 		external.Id, &clustermetadatapb.RuleNumber{CoordinatorTerm: 1})
 
 	assert.False(t, lb.claimsPrimary(conn), "an unmanaged pooler must not be recorded as a routing primary")
+	_, haveLeader := lb.shards[shardKeyOf(external.GetShardKey())].leaderID()
+	assert.False(t, haveLeader, "no leader exists for a shard served only by unmanaged poolers")
 
+	// It is still selectable, through the unmanaged path.
 	writable := protoutil.NewTarget(constants.DefaultPostgresDatabase, "migrateTG", "0-inf", query.Mode_MODE_WRITABLE)
-	_, err := lb.getConnection(writable)
-	require.Error(t, err, "no leader exists for a shard served only by unmanaged poolers")
+	selected, err := lb.getConnection(writable)
+	require.NoError(t, err)
+	assert.Equal(t, poolerID(external), selected.ID())
 
 	replica := protoutil.NewTarget(constants.DefaultPostgresDatabase, "migrateTG", "0-inf", query.Mode_MODE_INCONSISTENT)
-	assert.False(t, lb.matchesReplicaTarget(conn, replica))
+	assert.False(t, lb.matchesReplicaTarget(conn, replica), "it is not a replica of anything")
 }

@@ -43,11 +43,14 @@ func newTxTestConn() *server.Conn {
 
 // txMockIExecute is a mock IExecute for testing TransactionPrimitive.
 type txMockIExecute struct {
-	streamExecuteErr   error
-	streamExecuteSQL   []string
-	streamExecuteResv  []PlanExecInfo
-	streamExecuteCount int
-	callbackResult     *sqltypes.Result
+	streamExecuteErr error
+	// streamExecuteErrOnCall, when positive, limits streamExecuteErr to that call
+	// (counting from 1); zero returns it from every call.
+	streamExecuteErrOnCall int
+	streamExecuteSQL       []string
+	streamExecuteResv      []PlanExecInfo
+	streamExecuteCount     int
+	callbackResult         *sqltypes.Result
 
 	concludeTransactionErr                error
 	concludeTransactionCount              int
@@ -70,7 +73,7 @@ func (m *txMockIExecute) StreamExecute(
 	m.streamExecuteSQL = append(m.streamExecuteSQL, sql)
 	m.streamExecuteResv = append(m.streamExecuteResv, info)
 	m.streamExecuteCount++
-	if m.streamExecuteErr != nil {
+	if m.streamExecuteErr != nil && (m.streamExecuteErrOnCall == 0 || m.streamExecuteErrOnCall == m.streamExecuteCount) {
 		return m.streamExecuteErr
 	}
 	if m.callbackResult != nil {

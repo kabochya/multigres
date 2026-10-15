@@ -46,6 +46,9 @@ type mockGateway struct {
 	streamExecuteCalled         bool
 	streamExecuteSQL            string
 	streamExecuteOpts           *querypb.ExecuteOptions
+	streamExecuteTarget         *querypb.Target
+	releasedConnectionIDs       []uint64
+	discardedConnectionIDs      []uint64
 	streamExecuteReservationOps *querypb.ReservationOptions
 	streamExecuteErr            error
 	streamExecuteReturnState    *querypb.ReservedState
@@ -104,8 +107,9 @@ type mockGateway struct {
 }
 
 // StreamExecute implements queryservice.QueryService.
-func (m *mockGateway) StreamExecute(_ context.Context, _ *querypb.Target, sql string, opts *querypb.ExecuteOptions, reservationOpts *querypb.ReservationOptions, callback func(context.Context, *sqltypes.Result) error) (*querypb.ReservedState, error) {
+func (m *mockGateway) StreamExecute(_ context.Context, target *querypb.Target, sql string, opts *querypb.ExecuteOptions, reservationOpts *querypb.ReservationOptions, callback func(context.Context, *sqltypes.Result) error) (*querypb.ReservedState, error) {
 	m.streamExecuteCalled = true
+	m.streamExecuteTarget = target
 	m.streamExecuteSQL = sql
 	m.streamExecuteOpts = opts
 	m.streamExecuteReservationOps = reservationOpts
@@ -182,6 +186,7 @@ func (m *mockGateway) CopyOutStream(_ context.Context, _ *querypb.Target, _ *que
 }
 
 func (m *mockGateway) ReleaseReservedConnection(_ context.Context, _ *querypb.Target, options *querypb.ExecuteOptions, keepStickyReservations bool) (*querypb.ReservedState, error) {
+	m.releasedConnectionIDs = append(m.releasedConnectionIDs, options.GetReservedConnectionId())
 	m.releaseReservedConnectionKeepSticky = keepStickyReservations
 	m.releaseReservedConnectionSettings = options.GetSessionSettings()
 	return m.releaseReservedConnectionReturnState, m.releaseReservedConnectionErr
@@ -194,6 +199,7 @@ func (m *mockGateway) ConcludeTransaction(_ context.Context, _ *querypb.Target, 
 }
 
 func (m *mockGateway) DiscardTempTables(ctx context.Context, target *querypb.Target, options *querypb.ExecuteOptions) (*sqltypes.Result, *querypb.ReservedState, error) {
+	m.discardedConnectionIDs = append(m.discardedConnectionIDs, options.GetReservedConnectionId())
 	return nil, nil, nil
 }
 
@@ -1712,4 +1718,356 @@ func TestReleaseAll_MidTransactionStampsPreBeginMap(t *testing.T) {
 	require.NotNil(t, mock2.releaseReservedConnectionSettings)
 	assert.Equal(t, "9MB", mock2.releaseReservedConnectionSettings["work_mem"],
 		"without a transaction the current map is the correct label")
+}
+
+// pinnedCopyGateway models a shard served by several interchangeable poolers
+// with application routing that re-resolves a COPY's target while it starts: the
+// COPY begins on dst-2, under the destination tablegroup, though the statement
+// was planned for the source.
+type pinnedCopyGateway struct {
+	*mockGateway
+	rewriteTo string
+	poolerID  *clustermetadatapb.ID
+
+	directDataCalls int
+	byIDRequests    []*clustermetadatapb.ID
+	pinned          *pinnedCopyService
+}
+
+func (g *pinnedCopyGateway) CopyReady(_ context.Context, target *querypb.Target, _ string, _ *querypb.ExecuteOptions, _ *querypb.ReservationOptions) (int16, []int16, *querypb.ReservedState, error) {
+	// Rewrite replaces the key, as application routing does.
+	target.ShardKey = &clustermetadatapb.ShardKey{Database: target.GetShardKey().GetDatabase(), TableGroup: g.rewriteTo, Shard: target.GetShardKey().GetShard()}
+	return 0, nil, &querypb.ReservedState{ReservedConnectionId: 7, PoolerId: g.poolerID, ReservationReasons: protoutil.ReasonCopy}, nil
+}
+
+// The unpinned data-phase methods stand for "some other pooler": a stream is not
+// there.
+func (g *pinnedCopyGateway) CopySendData(context.Context, *querypb.Target, []byte, *querypb.ExecuteOptions) error {
+	g.directDataCalls++
+	return errors.New("no active COPY stream")
+}
+
+func (g *pinnedCopyGateway) CopyFinalize(context.Context, *querypb.Target, []byte, *querypb.ExecuteOptions) (*sqltypes.Result, *querypb.ReservedState, error) {
+	g.directDataCalls++
+	return nil, nil, errors.New("no active COPY stream")
+}
+
+func (g *pinnedCopyGateway) QueryServiceByID(_ context.Context, id *clustermetadatapb.ID, _ *querypb.Target) (queryservice.QueryService, error) {
+	g.byIDRequests = append(g.byIDRequests, id)
+	g.pinned = &pinnedCopyService{QueryService: g}
+	return g.pinned, nil
+}
+
+// pinnedCopyService is the pooler the COPY stream lives on.
+type pinnedCopyService struct {
+	queryservice.QueryService
+	sent      []*querypb.Target
+	finalized []*querypb.Target
+}
+
+func (s *pinnedCopyService) CopySendData(_ context.Context, target *querypb.Target, _ []byte, _ *querypb.ExecuteOptions) error {
+	s.sent = append(s.sent, target)
+	return nil
+}
+
+func (s *pinnedCopyService) CopyFinalize(_ context.Context, target *querypb.Target, _ []byte, _ *querypb.ExecuteOptions) (*sqltypes.Result, *querypb.ReservedState, error) {
+	s.finalized = append(s.finalized, target)
+	return &sqltypes.Result{CommandTag: "COPY 1"}, nil, nil
+}
+
+// TestScatterConn_CopyDataPhaseFollowsThePoolerAndTargetThatStartedIt: the data
+// phase of a COPY must reach the pooler that holds the stream, under the target
+// the reservation was recorded with, even when routing moved the COPY off the
+// tablegroup it was planned for and the shard has other interchangeable poolers.
+func TestScatterConn_CopyDataPhaseFollowsThePoolerAndTargetThatStartedIt(t *testing.T) {
+	poolerID := &clustermetadatapb.ID{Cell: "cell1", Name: "dst-2"}
+	gw := &pinnedCopyGateway{mockGateway: &mockGateway{}, rewriteTo: "destTG", poolerID: poolerID}
+	sc := NewScatterConn(gw, slog.Default())
+	state := handler.NewMultigatewayConnectionState()
+	conn := newTestConn()
+	ctx := context.Background()
+
+	_, _, err := sc.CopyInitiate(ctx, conn, "migrateTG", "", "COPY t FROM STDIN", state,
+		func(context.Context, *sqltypes.Result) error { return nil })
+	require.NoError(t, err)
+
+	// The statement still says migrateTG, as its plan does.
+	require.NoError(t, sc.CopySendData(ctx, conn, "migrateTG", "", state, []byte("1\n")))
+	require.Zero(t, gw.directDataCalls, "the data phase must not be sent to a pooler selected afresh")
+	require.Len(t, gw.byIDRequests, 1)
+	require.Equal(t, "dst-2", gw.byIDRequests[0].GetName())
+	require.Len(t, gw.pinned.sent, 1)
+	require.Equal(t, "destTG", gw.pinned.sent[0].GetShardKey().GetTableGroup(), "under the target the COPY started with")
+
+	require.NoError(t, sc.CopyFinalize(ctx, conn, "migrateTG", "", state, nil,
+		func(context.Context, *sqltypes.Result) error { return nil }))
+	require.Zero(t, gw.directDataCalls)
+	require.Len(t, gw.pinned.finalized, 1)
+	require.Nil(t, state.CopyTarget(), "the COPY's target is forgotten once it ends")
+}
+
+// routedSession is a session whose reservation is on staleTG, a tablegroup that
+// application routing has moved traffic away from.
+type routedSession struct {
+	gw    *mockGateway
+	sc    *ScatterConn
+	state *handler.MultigatewayConnectionState
+	conn  *server.Conn
+	stale *querypb.Target
+}
+
+func newRoutedSession(t *testing.T, staleTG string, reasons uint32) *routedSession {
+	t.Helper()
+	gw := &mockGateway{callbackResult: &sqltypes.Result{CommandTag: "OK"}}
+	sc := NewScatterConn(gw, slog.Default())
+	// Routing follows the (empty-named) test database; staleTG lost the traffic.
+	sc.SetStaleApplicationTargetCheck(func(_, tg string) bool { return tg == staleTG })
+	state := handler.NewMultigatewayConnectionState()
+	stale := protoutil.NewTarget("", staleTG, "", querypb.Mode_MODE_WRITABLE)
+	state.SetReservedConnection(stale, &querypb.ReservedState{
+		ReservedConnectionId: 42,
+		PoolerId:             &clustermetadatapb.ID{Cell: "cell1", Name: "old"},
+		ReservationReasons:   reasons,
+	})
+	conn := newTestConn()
+	if reasons&protoutil.ReasonTransaction != 0 {
+		conn.SetTxnStatus(protocol.TxnStatusInBlock)
+	}
+	return &routedSession{gw: gw, sc: sc, state: state, conn: conn, stale: stale}
+}
+
+func requireSessionEnded(t *testing.T, err error) {
+	t.Helper()
+	var diag *mterrors.PgDiagnostic
+	require.ErrorAs(t, err, &diag)
+	require.True(t, diag.IsFatal(), "the client connection must be closed")
+	require.Equal(t, mterrors.PgSSAdminShutdown, diag.Code)
+}
+
+// TestScatterConn_AnyRequestFromASessionWithStateOnTheOldTablegroupEndsIt: one rule,
+// for every kind of reservation and every kind of request. A session holding any
+// reservation on the tablegroup that lost the traffic gets a FATAL error on its next
+// request, and nothing it sends reaches the new tablegroup. COMMIT and ROLLBACK in
+// particular must not report an outcome for a transaction that no longer exists.
+func TestScatterConn_AnyRequestFromASessionWithStateOnTheOldTablegroupEndsIt(t *testing.T) {
+	reservations := map[string]uint32{
+		"transaction":   protoutil.ReasonTransaction,
+		"temp table":    protoutil.ReasonTempTable,
+		"advisory lock": protoutil.ReasonSessionAdvisoryLock,
+		"cursor":        protoutil.ReasonPortal,
+	}
+	for name, reasons := range reservations {
+		requests := map[string]func(t *testing.T, r *routedSession) error{
+			"statement": func(t *testing.T, r *routedSession) error {
+				return r.sc.StreamExecute(context.Background(), r.conn, "destTG", "", "SELECT 1", nil, r.state, engine.PlanExecInfo{}, false,
+					func(context.Context, *sqltypes.Result) error { return nil })
+			},
+			"COMMIT": func(t *testing.T, r *routedSession) error {
+				return r.sc.ConcludeTransaction(context.Background(), r.conn, r.state,
+					multipoolerpb.TransactionConclusion_TRANSACTION_CONCLUSION_COMMIT, nil, false, false,
+					func(context.Context, *sqltypes.Result) error { return nil })
+			},
+			"ROLLBACK": func(t *testing.T, r *routedSession) error {
+				return r.sc.ConcludeTransaction(context.Background(), r.conn, r.state,
+					multipoolerpb.TransactionConclusion_TRANSACTION_CONCLUSION_ROLLBACK, nil, false, false,
+					func(context.Context, *sqltypes.Result) error { return nil })
+			},
+			"DISCARD": func(t *testing.T, r *routedSession) error {
+				return r.sc.DiscardTempTables(context.Background(), r.conn, r.state,
+					func(context.Context, *sqltypes.Result) error { return nil })
+			},
+			"describe": func(t *testing.T, r *routedSession) error {
+				_, err := r.sc.Describe(context.Background(), "destTG", "", r.conn, r.state, nil, nil)
+				return err
+			},
+			"copy in": func(t *testing.T, r *routedSession) error {
+				_, _, err := r.sc.CopyInitiate(context.Background(), r.conn, "destTG", "", "COPY t FROM STDIN", r.state,
+					func(context.Context, *sqltypes.Result) error { return nil })
+				return err
+			},
+			"copy out": func(t *testing.T, r *routedSession) error {
+				_, _, _, err := r.sc.CopyOutInitiate(context.Background(), r.conn, "destTG", "", "COPY t TO STDOUT", r.state)
+				return err
+			},
+		}
+		for reqName, request := range requests {
+			t.Run(name+"/"+reqName, func(t *testing.T) {
+				r := newRoutedSession(t, "migrateTG", reasons)
+				requireSessionEnded(t, request(t, r))
+				require.False(t, r.gw.streamExecuteCalled, "nothing may reach the new tablegroup")
+				require.Nil(t, r.state.GetMatchingShardState(r.stale), "the stale reservation is forgotten")
+			})
+		}
+	}
+}
+
+// TestScatterConn_TheRollbackDirectionEndsSessionsToo: traffic moving back from the
+// destination to the source ends the sessions that were reserved on the destination.
+func TestScatterConn_TheRollbackDirectionEndsSessionsToo(t *testing.T) {
+	r := newRoutedSession(t, "destTG", protoutil.ReasonTransaction)
+	err := r.sc.StreamExecute(context.Background(), r.conn, "migrateTG", "", "SELECT 1", nil, r.state, engine.PlanExecInfo{}, false,
+		func(context.Context, *sqltypes.Result) error { return nil })
+	requireSessionEnded(t, err)
+}
+
+// TestScatterConn_SessionsWithNoStateOnTheOldTablegroupAreUntouched: buffering and
+// re-routing apply to them, not session termination.
+func TestScatterConn_SessionsWithNoStateOnTheOldTablegroupAreUntouched(t *testing.T) {
+	r := newRoutedSession(t, "migrateTG", protoutil.ReasonTransaction)
+	r.state.ClearAllReservedConnections() // a session that reserved nothing on the old side
+	r.conn.SetTxnStatus(protocol.TxnStatusIdle)
+	require.NoError(t, r.sc.StreamExecute(context.Background(), r.conn, "destTG", "", "SELECT 1", nil, r.state, engine.PlanExecInfo{}, false,
+		func(context.Context, *sqltypes.Result) error { return nil }))
+	require.True(t, r.gw.streamExecuteCalled)
+
+	// And a reservation on a tablegroup routing never moved traffic away from (a
+	// managed cohort's, another database's) is left alone.
+	r = newRoutedSession(t, "migrateTG", protoutil.ReasonTempTable)
+	r.state.ClearAllReservedConnections()
+	other := protoutil.NewTarget("", "default", "", querypb.Mode_MODE_WRITABLE)
+	r.state.SetReservedConnection(other, &querypb.ReservedState{
+		ReservedConnectionId: 9, PoolerId: &clustermetadatapb.ID{Cell: "cell1", Name: "m1"}, ReservationReasons: protoutil.ReasonTempTable,
+	})
+	require.NoError(t, r.sc.StreamExecute(context.Background(), r.conn, "destTG", "", "SELECT 1", nil, r.state, engine.PlanExecInfo{}, false,
+		func(context.Context, *sqltypes.Result) error { return nil }))
+	require.NotNil(t, r.state.GetMatchingShardState(other))
+}
+
+// TestScatterConn_ControlReservationsDoNotFollowApplicationRouting: a session whose
+// only reservation on the old tablegroup was made by control traffic (a NOTIFY's
+// transaction, say) is not ended by a routing move. The moment an application
+// request uses that reservation it is an application reservation like any other.
+func TestScatterConn_ControlReservationsDoNotFollowApplicationRouting(t *testing.T) {
+	r := newRoutedSession(t, "default", protoutil.ReasonTransaction)
+	r.state.ClearAllReservedConnections()
+	control := protoutil.NewTarget("", "default", "", querypb.Mode_MODE_WRITABLE)
+	control.Control = true
+	r.state.SetReservedConnection(control, &querypb.ReservedState{
+		ReservedConnectionId: 7, PoolerId: &clustermetadatapb.ID{Cell: "cell1", Name: "def-1"}, ReservationReasons: protoutil.ReasonTransaction,
+	})
+	r.conn.SetTxnStatus(protocol.TxnStatusIdle)
+
+	// "default" lost the application traffic (the rollback of a cutover into it).
+	require.NoError(t, r.sc.StreamExecute(context.Background(), r.conn, "migrateTG", "", "SELECT 1", nil, r.state, engine.PlanExecInfo{}, false,
+		func(context.Context, *sqltypes.Result) error { return nil }))
+	require.True(t, r.gw.streamExecuteCalled)
+	require.NotNil(t, r.state.GetMatchingShardState(control), "the control reservation is left alone")
+
+	// An application request that uses the reservation makes it an application one.
+	app := protoutil.NewTarget("", "default", "", querypb.Mode_MODE_WRITABLE)
+	require.NotNil(t, r.state.GetMatchingShardState(app))
+	requireSessionEnded(t, r.sc.StreamExecute(context.Background(), r.conn, "migrateTG", "", "SELECT 2", nil, r.state, engine.PlanExecInfo{}, false,
+		func(context.Context, *sqltypes.Result) error { return nil }))
+	require.Nil(t, r.state.GetMatchingShardState(app))
+}
+
+// TestScatterConn_AStaleReservationDoesNotKeepTheOthersFromBeingReleased: a session
+// that disconnects, or sends DISCARD ALL, with a reservation on the tablegroup that
+// lost the traffic still has its other reservations released. The stale one is
+// forgotten, and is reported separately.
+func TestScatterConn_AStaleReservationDoesNotKeepTheOthersFromBeingReleased(t *testing.T) {
+	for name, tc := range map[string]struct {
+		run func(r *routedSession) error
+		ids func(g *mockGateway) []uint64
+	}{
+		"release all": {
+			run: func(r *routedSession) error {
+				return r.sc.ReleaseAllReservedConnections(context.Background(), r.conn, r.state, false)
+			},
+			ids: func(g *mockGateway) []uint64 { return g.releasedConnectionIDs },
+		},
+		"discard": {
+			run: func(r *routedSession) error {
+				return r.sc.DiscardTempTables(context.Background(), r.conn, r.state, func(context.Context, *sqltypes.Result) error { return nil })
+			},
+			ids: func(g *mockGateway) []uint64 { return g.discardedConnectionIDs },
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRoutedSession(t, "migrateTG", protoutil.ReasonTempTable)
+			// A second reservation, on a tablegroup routing never moved traffic away from.
+			other := protoutil.NewTarget("", "default", "", querypb.Mode_MODE_WRITABLE)
+			other.Control = true
+			r.state.SetReservedConnection(other, &querypb.ReservedState{
+				ReservedConnectionId: 9, PoolerId: &clustermetadatapb.ID{Cell: "cell1", Name: "def-1"}, ReservationReasons: protoutil.ReasonTempTable,
+			})
+
+			requireSessionEnded(t, tc.run(r))
+			require.Nil(t, r.state.GetMatchingShardState(r.stale), "the stale reservation is forgotten")
+			require.Equal(t, []uint64{9}, tc.ids(r.gw), "the other reservation is still reached")
+		})
+	}
+}
+
+// TestScatterConn_AnAutonomousStatementIgnoresTheSessionsTransaction: what a transaction
+// sends after it has committed (its NOTIFYs) runs on a pooled connection, as control
+// traffic, whatever the session's transaction status is, and reserves nothing.
+func TestScatterConn_AnAutonomousStatementIgnoresTheSessionsTransaction(t *testing.T) {
+	gw := &mockGateway{callbackResult: &sqltypes.Result{CommandTag: "SELECT"}}
+	sc := NewScatterConn(gw, slog.Default())
+	state := handler.NewMultigatewayConnectionState()
+	conn := newTestConn()
+	conn.SetTxnStatus(protocol.TxnStatusInBlock)
+
+	require.NoError(t, sc.StreamExecute(context.Background(), conn, "default", "", "SELECT pg_notify('a', 'b')", nil, state,
+		engine.PlanExecInfo{Control: true, Autonomous: true}, false, func(context.Context, *sqltypes.Result) error { return nil }))
+	require.True(t, gw.streamExecuteCalled)
+	require.True(t, gw.streamExecuteTarget.GetControl())
+	require.Nil(t, gw.streamExecuteReservationOps, "no reservation, in a transaction or not")
+	require.Empty(t, state.ShardStates)
+}
+
+// TestScatterConn_AnAutonomousStatementDoesNotEndOrDisturbAStaleSession: a deferred
+// NOTIFY is delivered after the transaction committed, possibly after routing moved. Its
+// statement must neither drop the session's stale reservations nor return the error
+// that ends the session, which the delivery would turn into a warning and the session
+// would carry on without its state. The session's next request ends it.
+func TestScatterConn_AnAutonomousStatementDoesNotEndOrDisturbAStaleSession(t *testing.T) {
+	r := newRoutedSession(t, "migrateTG", protoutil.ReasonSessionAdvisoryLock)
+	noop := func(context.Context, *sqltypes.Result) error { return nil }
+
+	require.NoError(t, r.sc.StreamExecute(context.Background(), r.conn, "default", "", "SELECT pg_notify('a', 'b')", nil, r.state,
+		engine.PlanExecInfo{Control: true, Autonomous: true}, false, noop))
+	require.NotNil(t, r.state.GetMatchingShardState(r.stale), "the stale reservation is still there for the session's next request")
+
+	requireSessionEnded(t, r.sc.StreamExecute(context.Background(), r.conn, "default", "", "SELECT 1", nil, r.state, engine.PlanExecInfo{}, false, noop))
+	require.Nil(t, r.state.GetMatchingShardState(r.stale))
+}
+
+// TestScatterConn_ControlStatementsAreMarkedControl: a statement the planner marks
+// as control reaches the gateway on a control target; others do not.
+func TestScatterConn_ControlStatementsAreMarkedControl(t *testing.T) {
+	gw := &mockGateway{callbackResult: &sqltypes.Result{CommandTag: "NOTIFY"}}
+	sc := NewScatterConn(gw, slog.Default())
+	state := handler.NewMultigatewayConnectionState()
+	conn := newTestConn()
+	noop := func(context.Context, *sqltypes.Result) error { return nil }
+
+	require.NoError(t, sc.StreamExecute(context.Background(), conn, "default", "", "NOTIFY c", nil, state, engine.PlanExecInfo{Control: true}, false, noop))
+	require.True(t, gw.streamExecuteTarget.GetControl())
+	require.NoError(t, sc.StreamExecute(context.Background(), conn, "default", "", "SELECT 1", nil, state, engine.PlanExecInfo{}, false, noop))
+	require.False(t, gw.streamExecuteTarget.GetControl())
+}
+
+// TestScatterConn_RoutingMoveOnlyAffectsTheRoutedDatabase: reservations of another
+// database are not application traffic of this routing.
+func TestScatterConn_RoutingMoveOnlyAffectsTheRoutedDatabase(t *testing.T) {
+	r := newRoutedSession(t, "migrateTG", protoutil.ReasonTempTable)
+	r.sc.SetStaleApplicationTargetCheck(func(db, tg string) bool { return db == "appdb" && tg == "migrateTG" })
+	// The session's database is not appdb.
+	require.NoError(t, r.sc.StreamExecute(context.Background(), r.conn, "destTG", "", "SELECT 1", nil, r.state, engine.PlanExecInfo{}, false,
+		func(context.Context, *sqltypes.Result) error { return nil }))
+	require.NotNil(t, r.state.GetMatchingShardState(r.stale))
+}
+
+// TestScatterConn_CopyAbortForgetsTheCopyTargetEvenWhenAlreadyCleanedUp.
+func TestScatterConn_CopyAbortForgetsTheCopyTargetEvenWhenAlreadyCleanedUp(t *testing.T) {
+	gw := &mockGateway{}
+	sc := NewScatterConn(gw, slog.Default())
+	state := handler.NewMultigatewayConnectionState()
+	conn := newTestConn()
+	state.SetCopyTarget(protoutil.NewTarget("", "tg1", "", querypb.Mode_MODE_WRITABLE))
+
+	require.NoError(t, sc.CopyAbort(context.Background(), conn, "tg1", "", state))
+	require.Nil(t, state.CopyTarget())
 }

@@ -145,6 +145,12 @@ func (l admissionLifecycle) OnStateChange(_ context.Context, s servingstate.Stat
 		if g, err := pm.applicationGate(); err == nil {
 			g.CloseApplication()
 		}
+		// The health stream's admission_closed is not touched: it reports an applied
+		// decision to fence. A gate that is only closed until the state is read
+		// again is the failover it follows, and says so as admission_pending, so that
+		// gateways do not select the pooler, or release the requests they buffered for
+		// the failover, into a closed gate.
+		pm.healthStreamer.setAdmissionPending(true)
 	}
 	a.mu.Unlock()
 	if changed {
@@ -315,6 +321,8 @@ func (pm *MultipoolerManager) enforceAdmission(ctx context.Context, expected mul
 	if settled == multipoolerservicepb.AdmissionState_ADMISSION_STATE_FENCED {
 		// Close, drain, and only then acknowledge. A failed drain leaves the gate
 		// closed and the call failing, never a false acknowledgment.
+		// Tell gateways the gate is closing before the drain, which can be long.
+		pm.announceClosingGate()
 		if _, err := g.FenceApplication(ctx, pm.admissionDrainTimeout()); err != nil {
 			return nil, err
 		}
@@ -344,9 +352,32 @@ func (pm *MultipoolerManager) enforceAdmission(ctx context.Context, expected mul
 	} else if !g.OpenApplication(generation) {
 		return nil, mterrors.New(mtrpcpb.Code_ABORTED, "pooler lifecycle changed while reading admission; retry")
 	}
+	// Reported to gateways under the same lock, so a lifecycle close that follows
+	// cannot be overwritten by this open.
+	pm.healthStreamer.setAdmission(settled == multipoolerservicepb.AdmissionState_ADMISSION_STATE_FENCED, false)
 	applied := &appliedAdmission{state: settled, requestID: row.GetRequestId(), generation: generation}
 	a.applied = applied
 	return applied, nil
+}
+
+// announceClosingGate tells gateways, through the health stream, that the gate is
+// closing. A test can hold that back (--admission-health-delay) to open the window in
+// which a gateway still believes the pooler admits while its gate is already closed, the
+// window in which the pooler's own rejection, not the gateway's selection, is what holds
+// a request.
+func (pm *MultipoolerManager) announceClosingGate() {
+	if pm.config != nil && pm.config.AdmissionHealthDelay > 0 {
+		time.AfterFunc(pm.config.AdmissionHealthDelay, func() {
+			// What the immediate report would be now: closed while the gate still is, so
+			// a fence that has since failed and an unfence that has reopened the gate
+			// are not overwritten.
+			if g, err := pm.applicationGate(); err == nil && !g.ApplicationOpen() {
+				pm.healthStreamer.setAdmissionClosed(true)
+			}
+		})
+		return
+	}
+	pm.healthStreamer.setAdmissionClosed(true)
 }
 
 // mayOpenLater reports whether the pooler may acknowledge an unfence before its

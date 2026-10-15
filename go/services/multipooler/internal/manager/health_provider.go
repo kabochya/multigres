@@ -74,6 +74,18 @@ type healthStreamer struct {
 	// poolers.
 	backendReady bool
 
+	// admissionClosed mirrors the application gate of an admission-controlled
+	// pooler so gateways can steer around a closed pooler.
+	admissionClosed bool
+
+	// admissionPending is true while the gate is closed with no admission decision
+	// applied since the pooler started or its role or serving status changed.
+	admissionPending bool
+
+	// admissionControlled is set once, at construction, on a pooler whose application
+	// admission is decided by the persisted admission state.
+	admissionControlled bool
+
 	// metrics publishes replication lag and serving-state transitions as OTel
 	// metrics. Always non-nil after newHealthStreamer.
 	metrics *healthMetrics
@@ -156,6 +168,14 @@ func (hs *healthStreamer) OnStateChange(ctx context.Context, state servingstate.
 	defer hs.mu.Unlock()
 
 	prev := hs.servingStatus
+	// A controlled pooler whose role or serving status changes has its application gate
+	// closed until it has read the admission state again, and says so in this same
+	// broadcast: a gateway that saw PRIMARY and SERVING first, and pending only
+	// afterwards, would release the requests it buffered for the failover into a
+	// closed gate.
+	if hs.admissionControlled && (prev != state.ServingStatus || hs.routingState.GetRole() != state.Routing.ToProto().GetRole()) {
+		hs.admissionPending = true
+	}
 	// The routing_state is published verbatim and is always set — role PRIMARY
 	// (with the committed rule) iff writable, else REPLICA (with the highest-known
 	// rule). A leader mid-promotion is not yet routing PRIMARY, so it advertises
@@ -189,6 +209,8 @@ func (hs *healthStreamer) SetReplicationLag(lagNs int64) {
 func (hs *healthStreamer) buildStateLocked() *poolerserver.HealthState {
 	return &poolerserver.HealthState{
 		BackendReady:                hs.backendReady,
+		AdmissionClosed:             hs.admissionClosed,
+		AdmissionPending:            hs.admissionPending,
 		PoolerID:                    hs.poolerID,
 		ServingStatus:               hs.servingStatus,
 		RoutingState:                hs.routingState,
@@ -371,5 +393,34 @@ func (hs *healthStreamer) setBackendReady(ready bool) {
 		return
 	}
 	hs.backendReady = ready
+	hs.broadcastLocked()
+}
+
+// setAdmissionClosed records the application gate's state, an applied decision to
+// fence or not, and broadcasts a change so gateways learn immediately. An applied
+// decision settles the pending state too.
+func (hs *healthStreamer) setAdmissionClosed(closed bool) {
+	hs.setAdmission(closed, false)
+}
+
+// setAdmissionPending records that the gate is closed until an admission decision is
+// read, and broadcasts a change.
+func (hs *healthStreamer) setAdmissionPending(pending bool) {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	if hs.admissionPending == pending {
+		return
+	}
+	hs.admissionPending = pending
+	hs.broadcastLocked()
+}
+
+func (hs *healthStreamer) setAdmission(closed, pending bool) {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	if hs.admissionClosed == closed && hs.admissionPending == pending {
+		return
+	}
+	hs.admissionClosed, hs.admissionPending = closed, pending
 	hs.broadcastLocked()
 }

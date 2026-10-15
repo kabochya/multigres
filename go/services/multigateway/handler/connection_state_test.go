@@ -629,3 +629,34 @@ func TestReparsePendingEndsWithTransaction(t *testing.T) {
 		assert.False(t, state.ConsumeReparsePending("stmt"), "a later transaction must not inherit an unused rewrite refresh")
 	}
 }
+
+// TestPendingNotificationsFollowTheTransaction: the NOTIFYs of a transaction wait for
+// its commit, a ROLLBACK TO discards those recorded after the savepoint, RELEASE keeps
+// them, and a repeat of a channel and payload within the transaction is delivered once.
+func TestPendingNotificationsFollowTheTransaction(t *testing.T) {
+	s := NewMultigatewayConnectionState()
+	s.BeginTransaction()
+	s.AddPendingNotification("a", "1")
+	s.PushSavepoint("sp1")
+	s.AddPendingNotification("b", "2")
+	s.PushSavepoint("sp2")
+	s.AddPendingNotification("c", "3")
+
+	s.RollbackToSavepoint("sp2")
+	require.True(t, s.HasPendingNotifications())
+	s.AddPendingNotification("b", "2") // a repeat
+	s.RollbackToSavepoint("sp1")
+	s.AddPendingNotification("d", "4")
+	s.PushSavepoint("sp3")
+	s.AddPendingNotification("e", "5")
+	s.AddPendingNotification("d", "4")
+	s.ReleaseSavepoint("sp3")
+
+	require.Equal(t, []PendingNotification{{"a", "1"}, {"d", "4"}, {"e", "5"}}, s.TakePendingNotifications(),
+		"in order, without what was rolled back and without the repeat")
+	require.False(t, s.HasPendingNotifications())
+
+	s.AddPendingNotification("x", "")
+	s.DiscardPendingListens()
+	require.False(t, s.HasPendingNotifications(), "a rollback discards them")
+}

@@ -197,9 +197,15 @@ func TestAdmissionBackendUnavailableNeverOpens(t *testing.T) {
 
 func TestRefreshFenceThenUnfence(t *testing.T) {
 	h := newAdmissionHarness(t, true)
+	closed := func() bool { return h.pm.healthStreamer.getState().AdmissionClosed }
+	pending := func() bool { return h.pm.healthStreamer.getState().AdmissionPending }
+	require.True(t, pending(), "gateways are told a controlled pooler starts closed, until it has read its state")
+	require.False(t, closed(), "which is no decision to fence")
 	_, err := h.pm.enforceAdmission(t.Context(), multipoolerservicepb.AdmissionState_ADMISSION_STATE_UNSPECIFIED, "")
 	require.NoError(t, err)
 	require.True(t, h.gate.ApplicationOpen())
+	require.False(t, closed(), "and that it opened")
+	require.False(t, pending())
 
 	// The coordinator persists FENCING, then asks the pooler to refresh.
 	h.setRow(fencingState, "fence-1", "src")
@@ -208,6 +214,7 @@ func TestRefreshFenceThenUnfence(t *testing.T) {
 	require.Equal(t, fencedState, resp.AppliedState, "a fence is acknowledged as FENCED")
 	require.Equal(t, "fence-1", resp.RequestId)
 	require.False(t, h.gate.ApplicationOpen())
+	require.True(t, closed(), "gateways are told the pooler is fenced")
 	require.Equal(t, h.pm.record.Snapshot().GetId().GetName(), resp.PoolerId.GetName())
 
 	// A repeat of the same refresh is acknowledged without another read.
@@ -223,6 +230,7 @@ func TestRefreshFenceThenUnfence(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, unfencedState, resp.AppliedState)
 	require.True(t, h.gate.ApplicationOpen())
+	require.False(t, closed())
 }
 
 func TestRefreshExpectationIsNeverPermission(t *testing.T) {
@@ -321,6 +329,8 @@ func TestLifecycleChangeWithdrawsAdmission(t *testing.T) {
 	down.ServingStatus = clustermetadatapb.PoolerServingStatus_DISABLED
 	require.NoError(t, lifecycle.OnStateChange(t.Context(), down))
 	require.False(t, h.gate.ApplicationOpen())
+	require.False(t, h.pm.healthStreamer.getState().AdmissionClosed,
+		"health reports an applied decision to fence, not a gate closed until admission is read again")
 	require.NoError(t, lifecycle.OnStateChange(t.Context(), state))
 	require.False(t, h.gate.ApplicationOpen(), "recovery of the backend alone never reopens admission")
 
@@ -618,4 +628,50 @@ func TestReplicaWithADownBackendAcknowledgesAnUnfenceAndOpensLater(t *testing.T)
 	require.NoError(t, u.pm.healthStreamer.OnStateChange(t.Context(), servingstate.State{ServingStatus: clustermetadatapb.PoolerServingStatus_DISABLED}))
 	_, err = u.refresh(unfencingState, "unfence-2")
 	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+}
+
+// TestALifecycleCloseIsPendingNotAFence: a failover closes the gate of an
+// admission-controlled pooler until it has read the admission state again. Gateways are
+// told so, as pending, and not as a fence, so that they keep it unselected and the
+// requests they buffered for the failover held, without exempting the wait from the
+// buffer's timing guard.
+func TestALifecycleCloseIsPendingNotAFence(t *testing.T) {
+	h := newAdmissionHarness(t, true)
+	_, err := h.pm.enforceAdmission(t.Context(), multipoolerservicepb.AdmissionState_ADMISSION_STATE_UNSPECIFIED, "")
+	require.NoError(t, err)
+	state := func() *poolerserver.HealthState { return h.pm.healthStreamer.getState() }
+	require.False(t, state().AdmissionPending)
+
+	require.NoError(t, admissionLifecycle{pm: h.pm}.OnStateChange(t.Context(), servingstate.State{
+		ServingStatus: clustermetadatapb.PoolerServingStatus_SERVING,
+		Routing:       servingstate.RoutingState{Role: servingstate.RoutingRolePrimary},
+	}))
+	require.False(t, h.gate.ApplicationOpen(), "the lifecycle close closes the gate")
+	require.True(t, state().AdmissionPending, "and says it is waiting to read the admission state")
+	require.False(t, state().AdmissionClosed, "which is not a fence")
+
+	// Reading the state again settles it.
+	_, err = h.pm.enforceAdmission(t.Context(), multipoolerservicepb.AdmissionState_ADMISSION_STATE_UNSPECIFIED, "")
+	require.NoError(t, err)
+	require.False(t, state().AdmissionPending)
+}
+
+// TestRoleChangeIsBroadcastWithThePendingGate: the broadcast that carries a role change of
+// a controlled pooler already says its gate is closed until the admission state is
+// read. A gateway that saw PRIMARY and SERVING first, and pending afterwards, would release
+// the requests it buffered for the failover into a closed gate.
+func TestRoleChangeIsBroadcastWithThePendingGate(t *testing.T) {
+	h := newAdmissionHarness(t, true)
+	_, err := h.pm.enforceAdmission(t.Context(), multipoolerservicepb.AdmissionState_ADMISSION_STATE_UNSPECIFIED, "")
+	require.NoError(t, err)
+	require.False(t, h.pm.healthStreamer.getState().AdmissionPending)
+
+	require.NoError(t, h.pm.healthStreamer.OnStateChange(t.Context(), servingstate.State{
+		ServingStatus: clustermetadatapb.PoolerServingStatus_SERVING,
+		Routing:       servingstate.RoutingState{Role: servingstate.RoutingRolePrimary},
+	}))
+	got := h.pm.healthStreamer.getState()
+	require.Equal(t, clustermetadatapb.RoutingRole_ROUTING_ROLE_PRIMARY, got.RoutingState.GetRole())
+	require.True(t, got.AdmissionPending, "in the same state the role change is published in")
+	require.False(t, got.AdmissionClosed)
 }

@@ -103,6 +103,10 @@ type Config struct {
 	// connection for the pooler to apply that tablegroup's admission state.
 	BackingConnectionName string
 
+	// AdmissionHealthDelay holds back the health stream's report of a closing gate by
+	// this long. A test hook (--admission-health-delay): zero reports it at once.
+	AdmissionHealthDelay time.Duration
+
 	// DefaultPrimaryTransport resolves the gRPC transport used to reach the
 	// default primary pooler for admission reads. It is called on first use, so a
 	// cluster that never uses admission control or the serving-control RPCs never

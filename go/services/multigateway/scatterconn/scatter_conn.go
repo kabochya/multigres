@@ -57,7 +57,49 @@ type ScatterConn struct {
 	// gateway is used for executing queries (typically a PoolerGateway)
 	gateway poolergateway.Gateway
 
+	// isStaleApplicationTarget reports whether a tablegroup of a database was the
+	// application tablegroup that application routing has since moved traffic away
+	// from; nil when routing is not followed.
+	isStaleApplicationTarget func(database, tablegroup string) bool
+
 	metrics *ScatterMetrics
+}
+
+// SetStaleApplicationTargetCheck tells the ScatterConn which tablegroups application
+// routing has moved traffic away from. Without it routing never ends a session.
+func (sc *ScatterConn) SetStaleApplicationTargetCheck(isStale func(database, tablegroup string) bool) {
+	sc.isStaleApplicationTarget = isStale
+}
+
+// checkRoutingMove closes the connection of a session that holds a reservation on an
+// application tablegroup that has lost the traffic. It is checked on every request a
+// session makes, whatever its kind: statements, Describe, COPY, COMMIT, ROLLBACK and
+// DISCARD.
+//
+// Moving the traffic fences the old tablegroup, which ends every connection that
+// was still reserved on it: a transaction is rolled back, temp tables and session
+// advisory locks are gone. Whatever the reservation was for, carrying on against
+// the new tablegroup would make the session look intact while some of what it did,
+// or all of its session state, is missing, and a COMMIT or ROLLBACK would hide the
+// loss by reporting an outcome. One rule covers all of it: the next request ends
+// the session with a FATAL error, and the client reconnects with a clean one.
+// Sessions with no reservation on the old tablegroup are untouched; their requests
+// are held and re-routed. So are sessions whose reservations are control-only (a
+// NOTIFY's, say): control traffic does not follow application routing.
+func (sc *ScatterConn) checkRoutingMove(conn *server.Conn, state *handler.MultigatewayConnectionState) error {
+	if sc.isStaleApplicationTarget == nil {
+		return nil
+	}
+	database := conn.Database()
+	stale := state.DropReservationsWhere(func(ss *handler.ShardState) bool {
+		t := ss.Target
+		return !ss.ControlOnly && t.GetShardKey().GetDatabase() == database &&
+			sc.isStaleApplicationTarget(database, t.GetShardKey().GetTableGroup())
+	})
+	if len(stale) == 0 {
+		return nil
+	}
+	return mterrors.NewSessionStateLostAtRouteChange()
 }
 
 // NewScatterConn creates a new ScatterConn instance.
@@ -238,6 +280,7 @@ func (sc *ScatterConn) StreamExecute(
 		"in_transaction", conn.IsInTransaction())
 
 	target := sc.buildTarget(conn.Database(), tableGroup, shard, state)
+	target.Control = info.Control
 
 	eo := &querypb.ExecuteOptions{
 		UserAuth:                    userAuthFrom(conn),
@@ -248,7 +291,20 @@ func (sc *ScatterConn) StreamExecute(
 		PassthroughRow:              wantPassthroughRow(keepStructured),
 	}
 
-	ss := state.GetMatchingShardState(target)
+	// An autonomous statement is not part of the session: it neither uses nor changes
+	// its reservations, so the check that drops the reservations a routing move left
+	// stale, and ends the session for it, is not its business. The session's own next
+	// request makes that check; running it here would end the session in the middle
+	// of a deferred NOTIFY's delivery, where the error is only a warning.
+	if !info.Autonomous {
+		if err := sc.checkRoutingMove(conn, state); err != nil {
+			return err
+		}
+	}
+	var ss *handler.ShardState
+	if !info.Autonomous {
+		ss = state.GetMatchingShardState(target)
+	}
 
 	// This statement may touch a session-level advisory lock (acquire or
 	// release). When it does, ask the multipooler to re-probe pg_locks afterward
@@ -380,7 +436,7 @@ func (sc *ScatterConn) StreamExecute(
 	// Case 2: Need a new reserved connection — for transaction, temp table,
 	// portal pin (DECLARE WITH HOLD), or any combination.
 	pinPortalNames := info.PinPortals
-	if conn.IsInTransaction() || conn.UnsafeConnection() || info.TempTable || info.AdvisoryLock || info.LogicalReplicationSlot || info.SetSeed || len(pinPortalNames) > 0 {
+	if !info.Autonomous && (conn.IsInTransaction() || conn.UnsafeConnection() || info.TempTable || info.AdvisoryLock || info.LogicalReplicationSlot || info.SetSeed || len(pinPortalNames) > 0) {
 		reasons := reservationReasonsForExecInfo(info)
 		if conn.IsInTransaction() {
 			reasons |= protoutil.ReasonTransaction
@@ -493,6 +549,7 @@ func (sc *ScatterConn) PortalStreamExecute(
 
 	// Create target for routing
 	target := sc.buildTarget(conn.Database(), tableGroup, shard, state)
+	target.Control = info.Control
 
 	eo := &querypb.ExecuteOptions{
 		UserAuth:           userAuthFrom(conn),
@@ -526,6 +583,9 @@ func (sc *ScatterConn) PortalStreamExecute(
 	// reservation path below is chosen (see the end of the if/else).
 	recheckAdvisory := info.RecheckAdvisoryLocks
 
+	if err := sc.checkRoutingMove(conn, state); err != nil {
+		return err
+	}
 	ss := state.GetMatchingShardState(target)
 	// If we have a reserved connection, we have to ensure
 	// we are routing the query to the pooler where we got the reserved
@@ -670,6 +730,9 @@ func (sc *ScatterConn) Describe(
 	portalInfo *preparedstatement.PortalInfo,
 	preparedStatementInfo *preparedstatement.PreparedStatementInfo,
 ) (*querypb.StatementDescription, error) {
+	if err := sc.checkRoutingMove(conn, state); err != nil {
+		return nil, err
+	}
 	sc.logger.DebugContext(ctx, "scatter conn describing",
 		"tablegroup", tableGroup,
 		"shard", shard,
@@ -752,6 +815,12 @@ func (sc *ScatterConn) ConcludeTransaction(
 		),
 	)
 	defer span.End()
+
+	// COMMIT and ROLLBACK are requests like any other: a session whose reservation
+	// was lost across a routing move must not be told that its transaction ended.
+	if err := sc.checkRoutingMove(conn, state); err != nil {
+		return err
+	}
 
 	// Collect shard state updates to apply after iteration.
 	// We cannot call ClearReservedConnection during iteration because it
@@ -897,13 +966,22 @@ func (sc *ScatterConn) DiscardTempTables(
 	conn *server.Conn,
 	state *handler.MultigatewayConnectionState,
 	callback func(context.Context, *sqltypes.Result) error,
-) error {
+) (retErr error) {
 	ctx, span := telemetry.Tracer().Start(ctx, "shard.discard_temp_tables",
 		trace.WithAttributes(
 			attribute.String("db.namespace", conn.Database()),
 		),
 	)
 	defer span.End()
+
+	// A stale reservation is forgotten and ends the session, but DISCARD still reaches
+	// the others: the error is reported after it has, not instead of it.
+	moveErr := sc.checkRoutingMove(conn, state)
+	defer func() {
+		if moveErr != nil {
+			retErr = moveErr
+		}
+	}()
 
 	// Collect shard state updates to apply after iteration.
 	type shardUpdate struct {
@@ -1030,6 +1108,9 @@ func (sc *ScatterConn) CopyOutInitiate(
 	// BEGIN options so the new connection enters the transaction before
 	// starting COPY. Mirrors CopyInitiate (FROM STDIN).
 	var reservationOpts *querypb.ReservationOptions
+	if err := sc.checkRoutingMove(conn, state); err != nil {
+		return 0, nil, nil, err
+	}
 	ss := state.GetMatchingShardState(target)
 	if ss != nil && ss.ReservedState.GetReservedConnectionId() != 0 {
 		execOptions.ReservedConnectionId = ss.ReservedState.GetReservedConnectionId()
@@ -1069,6 +1150,7 @@ func (sc *ScatterConn) CopyOutInitiate(
 	}
 
 	sc.applyReservedState(conn, state, target, reservedState)
+	state.SetCopyTarget(target)
 	return format, columnFormats, notices, nil
 }
 
@@ -1095,10 +1177,7 @@ func (sc *ScatterConn) CopyOutStream(
 	)
 	defer span.End()
 
-	target := &querypb.Target{
-		ShardKey: &clustermetadatapb.ShardKey{Database: conn.Database(), TableGroup: tableGroup, Shard: shard},
-		Mode:     querypb.Mode_MODE_WRITABLE,
-	}
+	target := copyDataTarget(conn, tableGroup, shard, state)
 
 	ss := state.GetMatchingShardState(target)
 	if ss == nil || ss.ReservedState.GetReservedConnectionId() == 0 {
@@ -1113,7 +1192,12 @@ func (sc *ScatterConn) CopyOutStream(
 		ReservedConnectionId: ss.ReservedState.GetReservedConnectionId(),
 	}
 
-	result, reservedState, err := sc.gateway.CopyOutStream(ctx, target, copyOptions, onMessage)
+	defer state.ClearCopyTarget()
+	svc, err := sc.copyService(ctx, ss, target)
+	if err != nil {
+		return nil, err
+	}
+	result, reservedState, err := svc.CopyOutStream(ctx, target, copyOptions, onMessage)
 	sc.applyReservedState(conn, state, target, reservedState)
 	if err != nil {
 		return nil, err
@@ -1197,6 +1281,9 @@ func (sc *ScatterConn) CopyInitiate(
 	// If we're in a transaction but no reserved connection exists yet (deferred BEGIN),
 	// pass ReservationOptions so CopyReady creates a connection with the pending BEGIN.
 	var reservationOpts *querypb.ReservationOptions
+	if err := sc.checkRoutingMove(conn, state); err != nil {
+		return 0, nil, err
+	}
 	ss := state.GetMatchingShardState(target)
 	if ss != nil && ss.ReservedState.GetReservedConnectionId() != 0 {
 		execOptions.ReservedConnectionId = ss.ReservedState.GetReservedConnectionId()
@@ -1248,6 +1335,9 @@ func (sc *ScatterConn) CopyInitiate(
 
 	// Use authoritative state from multipooler (reasons already include copy + transaction if applicable)
 	sc.applyReservedState(conn, state, target, reservedState)
+	// Routing may have re-resolved the target while the COPY waited to start: the
+	// data phase follows the target the reservation was recorded under.
+	state.SetCopyTarget(target)
 
 	sc.logger.DebugContext(ctx, "COPY initiated successfully",
 		"reserved_conn_id", reservedState.GetReservedConnectionId(),
@@ -1255,6 +1345,29 @@ func (sc *ScatterConn) CopyInitiate(
 		"num_columns", len(columnFormats))
 
 	return format, columnFormats, nil
+}
+
+// copyDataTarget is the target of an active COPY's data phase: the one the COPY
+// was established on, else one built from the statement's tablegroup and shard.
+func copyDataTarget(conn *server.Conn, tableGroup, shard string, state *handler.MultigatewayConnectionState) *querypb.Target {
+	if t := state.CopyTarget(); t != nil {
+		return t
+	}
+	return &querypb.Target{
+		ShardKey: &clustermetadatapb.ShardKey{Database: conn.Database(), TableGroup: tableGroup, Shard: shard},
+		Mode:     querypb.Mode_MODE_WRITABLE,
+	}
+}
+
+// copyService returns the query service for an active COPY's data phase. The
+// COPY stream lives on the pooler that started it, so the phase is pinned to
+// that pooler by id rather than selected again: a shard served by several
+// interchangeable poolers would otherwise pick one without the stream.
+func (sc *ScatterConn) copyService(ctx context.Context, ss *handler.ShardState, target *querypb.Target) (queryservice.QueryService, error) {
+	if id := ss.ReservedState.GetPoolerId(); id != nil {
+		return sc.gateway.QueryServiceByID(ctx, id, target)
+	}
+	return sc.gateway, nil
 }
 
 // CopySendData sends a chunk of COPY data via bidirectional stream.
@@ -1272,11 +1385,8 @@ func (sc *ScatterConn) CopySendData(
 		"tablegroup", tableGroup,
 		"shard", shard)
 
-	// Create target for routing
-	target := &querypb.Target{
-		ShardKey: &clustermetadatapb.ShardKey{Database: conn.Database(), TableGroup: tableGroup, Shard: shard},
-		Mode:     querypb.Mode_MODE_WRITABLE,
-	}
+	// The target the COPY was established on
+	target := copyDataTarget(conn, tableGroup, shard, state)
 
 	// Get the reserved connection ID from shard state
 	ss := state.GetMatchingShardState(target)
@@ -1293,8 +1403,12 @@ func (sc *ScatterConn) CopySendData(
 		ReservedConnectionId: ss.ReservedState.GetReservedConnectionId(),
 	}
 
-	// Send data via gateway
-	if err := sc.gateway.CopySendData(ctx, target, data, copyOptions); err != nil {
+	// Send data via the pooler that holds the COPY stream
+	svc, err := sc.copyService(ctx, ss, target)
+	if err != nil {
+		return err
+	}
+	if err := svc.CopySendData(ctx, target, data, copyOptions); err != nil {
 		// Surface PG errors un-wrapped — see CopyInitiate comment above.
 		return err
 	}
@@ -1329,11 +1443,8 @@ func (sc *ScatterConn) CopyFinalize(
 		"tablegroup", tableGroup,
 		"shard", shard)
 
-	// Create target for routing
-	target := &querypb.Target{
-		ShardKey: &clustermetadatapb.ShardKey{Database: conn.Database(), TableGroup: tableGroup, Shard: shard},
-		Mode:     querypb.Mode_MODE_WRITABLE,
-	}
+	// The target the COPY was established on
+	target := copyDataTarget(conn, tableGroup, shard, state)
 
 	// Get the reserved connection ID from shard state
 	ss := state.GetMatchingShardState(target)
@@ -1350,8 +1461,14 @@ func (sc *ScatterConn) CopyFinalize(
 		ReservedConnectionId: ss.ReservedState.GetReservedConnectionId(),
 	}
 
-	// Finalize the COPY operation via gateway
-	result, reservedState, err := sc.gateway.CopyFinalize(ctx, target, finalData, copyOptions)
+	// Finalize the COPY operation on the pooler that holds the stream. The COPY is
+	// over whatever the outcome, so its target is forgotten.
+	defer state.ClearCopyTarget()
+	svc, err := sc.copyService(ctx, ss, target)
+	if err != nil {
+		return err
+	}
+	result, reservedState, err := svc.CopyFinalize(ctx, target, finalData, copyOptions)
 	if err != nil {
 		// Forward notices PostgreSQL sent before the ErrorResponse, so clients see
 		// NOTICE before ERROR like they would against PostgreSQL directly.
@@ -1403,13 +1520,12 @@ func (sc *ScatterConn) CopyAbort(
 		"tablegroup", tableGroup,
 		"shard", shard)
 
-	// Create target for routing
-	target := &querypb.Target{
-		ShardKey: &clustermetadatapb.ShardKey{Database: conn.Database(), TableGroup: tableGroup, Shard: shard},
-		Mode:     querypb.Mode_MODE_WRITABLE,
-	}
+	// The target the COPY was established on
+	target := copyDataTarget(conn, tableGroup, shard, state)
 
 	// Get the reserved connection ID from shard state
+	// Whatever follows, the COPY is over: forget its target on every path.
+	defer state.ClearCopyTarget()
 	ss := state.GetMatchingShardState(target)
 	if ss == nil || ss.ReservedState.GetReservedConnectionId() == 0 {
 		// Already cleaned up
@@ -1426,8 +1542,12 @@ func (sc *ScatterConn) CopyAbort(
 		ReservedConnectionId: ss.ReservedState.GetReservedConnectionId(),
 	}
 
-	// Abort the COPY operation via gateway
-	reservedState, err := sc.gateway.CopyAbort(ctx, target, "operation aborted by client", copyOptions)
+	// Abort the COPY operation on the pooler that holds the stream
+	var reservedState *querypb.ReservedState
+	svc, err := sc.copyService(ctx, ss, target)
+	if err == nil {
+		reservedState, err = svc.CopyAbort(ctx, target, "operation aborted by client", copyOptions)
+	}
 	if err != nil {
 		sc.logger.WarnContext(ctx, "error during COPY abort", "error", err)
 	}
@@ -1452,7 +1572,15 @@ func (sc *ScatterConn) ReleaseAllReservedConnections(
 	conn *server.Conn,
 	state *handler.MultigatewayConnectionState,
 	keepStickyReservations bool,
-) error {
+) (retErr error) {
+	// A stale reservation is forgotten and ends the session, but the others are
+	// still released: the error is reported after they are, not instead of them.
+	moveErr := sc.checkRoutingMove(conn, state)
+	defer func() {
+		if moveErr != nil {
+			retErr = moveErr
+		}
+	}()
 	type shardUpdate struct {
 		target        *querypb.Target
 		clear         bool

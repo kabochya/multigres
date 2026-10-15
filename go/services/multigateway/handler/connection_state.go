@@ -99,6 +99,12 @@ type MultigatewayConnectionState struct {
 	// so it genuinely belongs to connection state.
 	PendingBeginQuery string
 
+	// copyTarget is the target the active COPY was established on. Routing can
+	// re-resolve a COPY's target while it waits to start (application routing
+	// moving), so the data phase must use the target the reservation was recorded
+	// under, not rebuild one from the statement's plan. Guarded by mu.
+	copyTarget *query.Target
+
 	// ActiveTransactionBeginQuery stores the BEGIN/START statement that describes
 	// the current transaction's characteristics. PendingBeginQuery is consumed when
 	// the first backend reservation starts the transaction; this copy survives that
@@ -126,6 +132,11 @@ type MultigatewayConnectionState struct {
 	// pendingActions tracks LISTEN/UNLISTEN operations inside transactions,
 	// preserving the order they were issued. Processed at COMMIT by CommitPendingListens.
 	pendingActions []pendingListenAction
+
+	// pendingNotifications are the NOTIFYs of the open transaction that are sent to
+	// the default cohort after it commits (see engine.NotifyPrimitive), in the order
+	// they were issued. A savepoint remembers how many there were when it was set.
+	pendingNotifications []PendingNotification
 
 	// NotifCh receives notifications from the PubSubListener.
 	NotifCh chan *sqltypes.Notification
@@ -200,6 +211,15 @@ type savepointFrame struct {
 	// multipooler — PG closes those cursors server-side on
 	// ROLLBACK TO, and our reservation bookkeeping must follow.
 	openHoldCursors map[string]bool
+	// notificationCount is how many notifications were pending when the frame was
+	// pushed; ROLLBACK TO the savepoint discards the later ones.
+	notificationCount int
+}
+
+// PendingNotification is a NOTIFY waiting for its transaction to commit.
+type PendingNotification struct {
+	Channel string
+	Payload string
 }
 
 type ShardState struct {
@@ -209,6 +229,13 @@ type ShardState struct {
 	// ReservedState holds the authoritative reservation state from the multipooler,
 	// including the pooler ID, reserved connection ID, and reservation reasons bitmask.
 	ReservedState *query.ReservedState
+
+	// ControlOnly is true while every request that used this reservation was
+	// control traffic (PROTOTYPE STUB: application routing). A reservation that an
+	// application request created or used is not control-only: it belongs to the
+	// application, and a routing move that takes the tablegroup away from the
+	// application ends the session that holds it.
+	ControlOnly bool
 }
 
 // NewMultigatewayConnectionState creates a new MultigatewayConnectionState.
@@ -383,12 +410,60 @@ func NewShardState(target *query.Target) *ShardState {
 	}
 }
 
-// GetMatchingShardState gets the shardState (if any) that matches the target specified.
+// DropReservationsWhere forgets every shard state that holds a reserved
+// connection and for which drop returns true, and returns what it held.
+// It only edits the gateway's bookkeeping: nothing is sent to a pooler.
+func (m *MultigatewayConnectionState) DropReservationsWhere(drop func(*ShardState) bool) []*query.ReservedState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var dropped []*query.ReservedState
+	kept := m.ShardStates[:0]
+	for _, ss := range m.ShardStates {
+		if ss.ReservedState.GetReservedConnectionId() != 0 && drop(ss) {
+			dropped = append(dropped, ss.ReservedState)
+			continue
+		}
+		kept = append(kept, ss)
+	}
+	for i := len(kept); i < len(m.ShardStates); i++ {
+		m.ShardStates[i] = nil
+	}
+	m.ShardStates = kept
+	return dropped
+}
+
+// SetCopyTarget records the target the active COPY was established on.
+func (m *MultigatewayConnectionState) SetCopyTarget(t *query.Target) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.copyTarget = t
+}
+
+// CopyTarget returns the target the active COPY was established on, or nil.
+func (m *MultigatewayConnectionState) CopyTarget() *query.Target {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.copyTarget
+}
+
+// ClearCopyTarget forgets the active COPY's target.
+func (m *MultigatewayConnectionState) ClearCopyTarget() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.copyTarget = nil
+}
+
+// GetMatchingShardState gets the shardState (if any) that matches the target
+// specified. Using it for an application request makes the reservation an
+// application one, even if control traffic created it.
 func (m *MultigatewayConnectionState) GetMatchingShardState(target *query.Target) *ShardState {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, ss := range m.ShardStates {
 		if protoutil.TargetEquals(ss.Target, target) {
+			if !target.GetControl() {
+				ss.ControlOnly = false
+			}
 			return ss
 		}
 	}
@@ -404,11 +479,15 @@ func (m *MultigatewayConnectionState) SetReservedConnection(target *query.Target
 	for _, ss := range m.ShardStates {
 		if protoutil.TargetEquals(ss.Target, target) {
 			ss.ReservedState = rs
+			if !target.GetControl() {
+				ss.ControlOnly = false
+			}
 			return
 		}
 	}
 	ss := NewShardState(target)
 	ss.ReservedState = rs
+	ss.ControlOnly = target.GetControl()
 	m.ShardStates = append(m.ShardStates, ss)
 }
 
@@ -631,6 +710,8 @@ func (m *MultigatewayConnectionState) pushFrameLocked(name string) {
 		name:            name,
 		sessionSettings: m.snapshotSessionSettingsLocked(),
 		openHoldCursors: m.snapshotOpenHoldCursorsLocked(),
+
+		notificationCount: len(m.pendingNotifications),
 	})
 	for _, gmv := range m.gatewayManagedVariablesLocked() {
 		gmv.Snapshot()
@@ -763,6 +844,9 @@ func (m *MultigatewayConnectionState) RollbackToSavepoint(name string) {
 	}
 	m.OpenHoldCursors = surviving
 	m.savepoints = m.savepoints[:idx+1]
+	if n := m.savepoints[idx].notificationCount; n < len(m.pendingNotifications) {
+		m.pendingNotifications = m.pendingNotifications[:n]
+	}
 	for _, gmv := range m.gatewayManagedVariablesLocked() {
 		gmv.RestoreFromDepth(idx)
 	}
@@ -1173,8 +1257,70 @@ func (m *MultigatewayConnectionState) CommitPendingListens() (subscribes []strin
 	return subscribes, unsubscribes, unsubscribeAll
 }
 
-// DiscardPendingListens discards pending listen/unlisten state on rollback.
+// MaxPendingNotifications caps the NOTIFYs a transaction can have recorded for after
+// its commit.
+const MaxPendingNotifications = 10_000
+
+// AddPendingNotification records a NOTIFY of the open transaction, to be sent after
+// the transaction commits. It reports false, recording nothing, when the transaction
+// already has MaxPendingNotifications.
+func (m *MultigatewayConnectionState) AddPendingNotification(channel, payload string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := PendingNotification{Channel: channel, Payload: payload}
+	// PostgreSQL delivers a channel and payload pair once per transaction, at the
+	// position of its first occurrence. Collapsing them here, not only when they are
+	// sent, keeps a repeat that would land in another chunk from being delivered twice.
+	if slices.Contains(m.pendingNotifications, n) {
+		return true
+	}
+	if len(m.pendingNotifications) >= MaxPendingNotifications {
+		return false
+	}
+	m.pendingNotifications = append(m.pendingNotifications, n)
+	return true
+}
+
+// TakePendingNotifications returns the recorded NOTIFYs in the order they were issued,
+// without the repeats of a channel and payload pair that PostgreSQL would collapse
+// within a transaction, and forgets them.
+func (m *MultigatewayConnectionState) TakePendingNotifications() []PendingNotification {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	taken := m.pendingNotifications
+	m.pendingNotifications = nil
+	seen := make(map[PendingNotification]struct{}, len(taken))
+	out := taken[:0]
+	for _, n := range taken {
+		if _, dup := seen[n]; dup {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	return out
+}
+
+// DiscardPendingNotifications forgets the recorded NOTIFYs: the transaction that
+// issued them did not commit.
+func (m *MultigatewayConnectionState) DiscardPendingNotifications() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pendingNotifications = nil
+}
+
+// HasPendingNotifications reports whether the open transaction has NOTIFYs waiting
+// for its commit.
+func (m *MultigatewayConnectionState) HasPendingNotifications() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.pendingNotifications) > 0
+}
+
+// DiscardPendingListens discards pending listen/unlisten state on rollback, and the
+// NOTIFYs recorded for after the commit with it.
 func (m *MultigatewayConnectionState) DiscardPendingListens() {
+	m.DiscardPendingNotifications()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pendingActions = nil

@@ -468,6 +468,8 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 	if unmanaged || config.AdmissionControl {
 		if gate, ok := pm.qsc.(poolerserver.ApplicationGate); ok {
 			gate.EnableAdmissionControl(unmanaged)
+			pm.healthStreamer.admissionControlled = true
+			pm.healthStreamer.admissionPending = true
 		}
 	}
 

@@ -96,6 +96,8 @@ type Multipooler struct {
 	admissionControl viperutil.Value[bool]
 	// admissionDrainTimeout bounds how long a fence waits for application work.
 	admissionDrainTimeout viperutil.Value[time.Duration]
+	// admissionHealthDelay is a test hook: see manager.Config.AdmissionHealthDelay.
+	admissionHealthDelay viperutil.Value[time.Duration]
 	// backingConnection names the connection an unmanaged pooler fronts. Setting
 	// it makes the pooler unmanaged (see managementModeFor).
 	backingConnection   viperutil.Value[string]
@@ -236,6 +238,11 @@ func NewMultipooler(telemetry *telemetry.Telemetry, opts ...Option) *Multipooler
 			FlagName: "admission-control",
 			Dynamic:  false,
 		}),
+		admissionHealthDelay: viperutil.Configure(reg, "admission-health-delay", viperutil.Options[time.Duration]{
+			Default:  0,
+			FlagName: "admission-health-delay",
+			Dynamic:  false,
+		}),
 		admissionDrainTimeout: viperutil.Configure(reg, "admission-drain-timeout", viperutil.Options[time.Duration]{
 			Default:  3 * time.Second,
 			FlagName: "admission-drain-timeout",
@@ -366,6 +373,8 @@ func (mp *Multipooler) consensusEnabled() bool {
 func (mp *Multipooler) RegisterFlags(flags *pflag.FlagSet) {
 	flags.Bool("admission-control", mp.admissionControl.Default(), "start closed and open application admission only after reading an UNFENCED admission state for this tablegroup from the default primary; unmanaged poolers always do (prototype)")
 	flags.Duration("admission-drain-timeout", mp.admissionDrainTimeout.Default(), "how long a fence waits for in-flight application work to drain before it closes idle sessions or, if work is still running, reports busy so that the fence is aborted. Keep it well under the gateway buffer window (default 10s), so that an aborted attempt costs clients a latency blip, not errors")
+	flags.Duration("admission-health-delay", mp.admissionHealthDelay.Default(), "test hook: hold back the health stream's report of a closing admission gate by this long")
+	_ = flags.MarkHidden("admission-health-delay")
 	flags.String("backing-connection", mp.backingConnection.Default(), "Name of the connection of an external postgres to front. Setting it makes this an unmanaged pooler: no pgctld, backups or consensus")
 	flags.String("pgctld-addr", mp.pgctldAddr.Default(), "Address of pgctld gRPC service")
 	flags.String("cell", mp.cell.Default(), "cell to use")
@@ -393,6 +402,7 @@ func (mp *Multipooler) RegisterFlags(flags *pflag.FlagSet) {
 		flags,
 		mp.admissionControl,
 		mp.admissionDrainTimeout,
+		mp.admissionHealthDelay,
 		mp.backingConnection,
 		mp.pgctldAddr,
 		mp.cell,
@@ -754,6 +764,7 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context) error {
 
 		AdmissionControl:        mp.admissionControl.Get(),
 		AdmissionDrainTimeout:   mp.admissionDrainTimeout.Get(),
+		AdmissionHealthDelay:    mp.admissionHealthDelay.Get(),
 		BackingConnectionName:   mp.backingConnection.Get(),
 		DefaultPrimaryTransport: defaultPrimaryTransport,
 		ExternalBackend:         externalBackend,

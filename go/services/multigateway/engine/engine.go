@@ -95,6 +95,19 @@ type PlanExecInfo struct {
 	// ALL and is released only at the connection's real teardown.
 	SetSeed bool
 
+	// Control marks the statement as cluster control traffic rather than
+	// application work (PROTOTYPE STUB: application routing). It is sent to the
+	// default tablegroup whatever tablegroup application statements are routed to, is
+	// served by a pooler whose application admission gate is closed, and is never
+	// rewritten by application routing. A reservation it creates is control-only
+	// until an application statement uses it. Set for NOTIFY.
+	Control bool
+
+	// Autonomous runs the statement outside the session's transaction: it never
+	// creates or joins a reservation, whatever the session is in the middle of. Used
+	// for the notifications a transaction sends after it has committed.
+	Autonomous bool
+
 	// Exchange is a per-execution channel for handing runtime-computed data from
 	// one primitive in a Sequence to a later sibling (e.g. ValidateSetting →
 	// ApplySessionState). Sequence creates one per execution and threads the same

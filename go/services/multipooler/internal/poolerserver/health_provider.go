@@ -49,6 +49,14 @@ type HealthState struct {
 	// BackendReady is true while an unmanaged pooler's external backend is
 	// reachable, writable and the intended source. False on managed poolers.
 	BackendReady bool
+
+	// AdmissionClosed is true while an admission-controlled pooler's application
+	// gate is closed.
+	AdmissionClosed bool
+
+	// AdmissionPending is true while the gate is closed with no admission decision
+	// applied since the pooler started or its role or serving status changed.
+	AdmissionPending bool
 }
 
 // HealthProvider provides health information for the pooler.

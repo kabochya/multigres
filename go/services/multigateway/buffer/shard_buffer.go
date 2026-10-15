@@ -97,6 +97,11 @@ func (sb *shardBuffer) waitIfAlreadyBuffering(ctx context.Context) (RetryDoneFun
 // an existing buffer (already BUFFERING). Returns (nil, nil) if buffering
 // is not applicable for this request.
 func (sb *shardBuffer) waitForFailoverEnd(ctx context.Context) (RetryDoneFunc, error) {
+	// A request that is already cancelled must not start a buffer: nobody would
+	// wait on it, and it would stay open until a drain or the max duration.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Fast path: if draining or idle with recent failover, skip.
 	sb.mu.Lock()
 	switch sb.state {
@@ -110,7 +115,7 @@ func (sb *shardBuffer) waitForFailoverEnd(ctx context.Context) (RetryDoneFunc, e
 		// Check timing guard: don't start buffering again too soon.
 		if !sb.lastEnd.IsZero() {
 			minGap := sb.buf.config.MinTimeBetweenFailovers.Get()
-			if sb.buf.now().Sub(sb.lastEnd) < minGap {
+			if !ignoresMinGap(ctx) && sb.buf.now().Sub(sb.lastEnd) < minGap {
 				sb.mu.Unlock()
 				sb.buf.stats.recordSkipped(ctx, "min_time_between_failovers")
 				sb.logger.DebugContext(ctx, "skipping buffering: too soon since last failover",
