@@ -60,7 +60,7 @@ func startExternalPostgres(t *testing.T) int {
 
 	port := utils.GetFreePort(t)
 	// A valid locale keeps postgres single-threaded at startup on macOS.
-	startTestProcessEnv(t, []string{"LC_ALL=en_US.UTF-8"}, "postgres", "-D", data, "-h", "127.0.0.1", "-p", strconv.Itoa(port), "-k", sockDir)
+	_, _, _, _ = startTestProcessEnv(t, []string{"LC_ALL=en_US.UTF-8"}, "postgres", "-D", data, "-h", "127.0.0.1", "-p", strconv.Itoa(port), "-k", sockDir)
 	require.Eventually(t, func() bool {
 		conn, err := pgx.Connect(ctx, externalDSN(port))
 		if err != nil {
@@ -79,23 +79,23 @@ func externalDSN(port int) string {
 // startTestProcessEnv runs a binary with extra environment variables for the
 // lifetime of the test. It returns a function that stops the process early and a
 // channel that closes when the process has exited.
-func startTestProcessEnv(t *testing.T, env []string, binary string, args ...string) (func(), <-chan struct{}) {
+func startTestProcessEnv(t *testing.T, env []string, binary string, args ...string) (stop func(), exited <-chan struct{}, logPath string, cmd *executil.Cmd) {
 	t.Helper()
-	logPath := filepath.Join(t.TempDir(), binary+".log")
+	logPath = filepath.Join(t.TempDir(), binary+".log")
 	logFile, err := os.Create(logPath)
 	require.NoError(t, err)
-	cmd := executil.Command(context.Background(), binary, args...).WithProcessGroup()
+	cmd = executil.Command(context.Background(), binary, args...).WithProcessGroup()
 	cmd.SetStdout(logFile)
 	cmd.SetStderr(logFile)
 	cmd.SetEnv(append(utils.BaseTestEnv(), env...))
 	require.NoError(t, cmd.Start())
-	exited := make(chan struct{})
+	exitedCh := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
-		close(exited)
+		close(exitedCh)
 	}()
 	stopped := false
-	stop := func() {
+	stop = func() {
 		if stopped {
 			return
 		}
@@ -112,7 +112,7 @@ func startTestProcessEnv(t *testing.T, env []string, binary string, args ...stri
 			t.Logf("%s log:\n%s", binary, data)
 		}
 	})
-	return stop, exited
+	return stop, exitedCh, logPath, cmd
 }
 
 // externalSystemIdentifier reads the external database's system identifier.
@@ -151,7 +151,15 @@ type unmanagedPooler struct {
 	grpcPort int
 	stop     func()
 	exited   <-chan struct{}
+	logPath  string
+	cmd      *executil.Cmd
 }
+
+// suspend stops the pooler process without ending it, so that it stays registered in
+// topology and cannot answer; resume lets it run again.
+func (p *unmanagedPooler) suspend() { _ = p.cmd.Suspend() }
+
+func (p *unmanagedPooler) resume() { _ = p.cmd.Resume() }
 
 func startUnmanagedPooler(t *testing.T, s *ShardSetup, name, database, connection string, extraArgs ...string) *unmanagedPooler {
 	t.Helper()
@@ -164,8 +172,8 @@ func startUnmanagedPooler(t *testing.T, s *ShardSetup, name, database, connectio
 		"--service-map=grpc-pooler,grpc-poolermanager,grpc-consensus",
 		"--topo-global-server-addresses=" + s.EtcdClientAddr, "--topo-global-root=/multigres/global",
 	}
-	stop, exited := startTestProcessEnv(t, nil, "multipooler", append(args, extraArgs...)...)
-	return &unmanagedPooler{name: name, grpcPort: grpcPort, stop: stop, exited: exited}
+	stop, exited, logPath, cmd := startTestProcessEnv(t, nil, "multipooler", append(args, extraArgs...)...)
+	return &unmanagedPooler{name: name, grpcPort: grpcPort, stop: stop, exited: exited, logPath: logPath, cmd: cmd}
 }
 
 // firstHealth reads one message from the pooler's health stream.

@@ -88,3 +88,46 @@ func TestDefaultCohortAdmissionSurvivesFailover(t *testing.T) {
 	}, 30*time.Second, time.Second)
 	requireAdmits(t, newPrimary.Multipooler.GrpcPort, "the new primary did not open after the unfence")
 }
+
+// TestManagedPoolerRestartedAcrossAFenceComesBackClosed: a pooler of the default cohort that was
+// open, announced shutdown, and was restarted after its cohort was fenced without
+// it must come back closed, register, take part in the next operation, and open
+// only when the cohort is unfenced.
+func TestManagedPoolerRestartedAcrossAFenceComesBackClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires built binaries, etcd and PostgreSQL")
+	}
+	ctx := t.Context()
+
+	def := startControlledDefaultCohort(t)
+	dest := def
+	primary := dest.GetPrimary(t)
+	var restarted *MultipoolerInstance
+	for name, inst := range dest.Multipoolers {
+		if name != primary.Name {
+			restarted = inst
+			break
+		}
+	}
+	require.NotNil(t, restarted)
+	requireAdmits(t, restarted.Multipooler.GrpcPort, "the replica must be open before it is restarted")
+
+	// It announces shutdown, so no membership snapshot waits for it.
+	restarted.Multipooler.TerminateGracefully(t.Logf, 15*time.Second)
+
+	ctl := newControlClient(t, def.PrimaryMultipooler(t).GrpcPort)
+	resp, err := ctl.fence(ctx, "default", "fence-restart-1")
+	require.NoError(t, err)
+	require.Len(t, resp.Acks, 2, "only the two running poolers are asked")
+	require.Equal(t, multipoolerservicepb.AdmissionState_ADMISSION_STATE_FENCED, resp.State.AdmissionState)
+
+	// The restarted pooler reads FENCED and stays closed.
+	require.NoError(t, restarted.Multipooler.Start(ctx, t))
+	requireStaysClosed(t, restarted.Multipooler.GrpcPort, 6*time.Second, "a pooler restarted into a fenced cohort must stay closed")
+
+	// It is registered, so the unfence includes it, and it opens.
+	resp, err = ctl.unfence(ctx, "default", "unfence-restart-1", "fence-restart-1")
+	require.NoError(t, err)
+	require.Len(t, resp.Acks, 3, "the restarted pooler is part of the unfence")
+	requireAdmits(t, restarted.Multipooler.GrpcPort, "the restarted pooler did not open after the unfence")
+}

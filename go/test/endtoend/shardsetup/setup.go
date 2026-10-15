@@ -1241,9 +1241,12 @@ func checkBootstrapStatus(ctx context.Context, t *testing.T, setup *ShardSetup) 
 		queryable := queryErr == nil
 		// A pooler run with admission control starts closed and rejects application
 		// queries until its tablegroup's admission row opens it, which a test seeds only
-		// once the cohort exists. Its own status says whether postgres is up.
+		// once the cohort exists. Until it has read that state it says so as a failover
+		// does (MTF01); once a fence closes it, as MTF02. Its own status says whether
+		// postgres is up.
 		if !queryable && status != nil && status.PostgresReady && status.IsInitialized &&
-			strings.Contains(queryErr.Error(), "application admission is closed") {
+			(strings.Contains(queryErr.Error(), "application admission is closed") ||
+				strings.Contains(queryErr.Error(), "planned failover in progress")) {
 			queryable = true
 		}
 

@@ -45,8 +45,13 @@ func newControlClient(t *testing.T, grpcPort int) *controlClient {
 }
 
 func (c *controlClient) fence(ctx context.Context, tg, requestID string) (*multipoolerservicepb.UpdatePoolerAdmissionResponse, error) {
+	return c.fenceWithin(ctx, tg, requestID, 40*time.Second)
+}
+
+// fenceWithin is fence with the coordinator's own deadline for the call.
+func (c *controlClient) fenceWithin(ctx context.Context, tg, requestID string, timeout time.Duration) (*multipoolerservicepb.UpdatePoolerAdmissionResponse, error) {
 	return c.UpdatePoolerAdmission(ctx, &multipoolerservicepb.UpdatePoolerAdmissionRequest{
-		Database: "postgres", Tablegroup: tg, Target: stateOf("FENCED"), RequestId: requestID, Timeout: durationpb.New(40 * time.Second),
+		Database: "postgres", Tablegroup: tg, Target: stateOf("FENCED"), RequestId: requestID, Timeout: durationpb.New(timeout),
 	})
 }
 
@@ -68,6 +73,12 @@ func (c *controlClient) state(ctx context.Context, tgs ...string) *multipoolerse
 		panic(err)
 	}
 	return resp
+}
+
+// tryState is state that reports a failure instead of panicking, for polling
+// across a failover.
+func (c *controlClient) tryState(ctx context.Context, tgs ...string) (*multipoolerservicepb.GetServingStateResponse, error) {
+	return c.GetServingState(ctx, &multipoolerservicepb.GetServingStateRequest{Database: "postgres", Tablegroups: tgs})
 }
 
 // seedRouting sets the routing pointer, as the prototype's setup does.
