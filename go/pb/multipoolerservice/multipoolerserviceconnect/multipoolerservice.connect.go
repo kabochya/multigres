@@ -91,6 +91,18 @@ const (
 	// MultipoolerServiceGetBackingConnectionProcedure is the fully-qualified name of the
 	// MultipoolerService's GetBackingConnection RPC.
 	MultipoolerServiceGetBackingConnectionProcedure = "/multipoolerservice.MultipoolerService/GetBackingConnection"
+	// MultipoolerServiceGetServingStateProcedure is the fully-qualified name of the
+	// MultipoolerService's GetServingState RPC.
+	MultipoolerServiceGetServingStateProcedure = "/multipoolerservice.MultipoolerService/GetServingState"
+	// MultipoolerServiceUpdatePoolerAdmissionProcedure is the fully-qualified name of the
+	// MultipoolerService's UpdatePoolerAdmission RPC.
+	MultipoolerServiceUpdatePoolerAdmissionProcedure = "/multipoolerservice.MultipoolerService/UpdatePoolerAdmission"
+	// MultipoolerServiceUpdateMigrationRoutingProcedure is the fully-qualified name of the
+	// MultipoolerService's UpdateMigrationRouting RPC.
+	MultipoolerServiceUpdateMigrationRoutingProcedure = "/multipoolerservice.MultipoolerService/UpdateMigrationRouting"
+	// MultipoolerServiceRefreshAdmissionProcedure is the fully-qualified name of the
+	// MultipoolerService's RefreshAdmission RPC.
+	MultipoolerServiceRefreshAdmissionProcedure = "/multipoolerservice.MultipoolerService/RefreshAdmission"
 )
 
 // MultipoolerServiceClient is a client for the multipoolerservice.MultipoolerService service.
@@ -168,6 +180,39 @@ type MultipoolerServiceClient interface {
 	// PROTOTYPE STUB: the connection comes from a plaintext prototype table. The
 	// message shape and the transport authentication are placeholders.
 	GetBackingConnection(context.Context, *connect.Request[multipoolerservice.GetBackingConnectionRequest]) (*connect.Response[multipoolerservice.GetBackingConnectionResponse], error)
+	// GetServingState returns the authoritative routing and admission metadata.
+	// Use it for preflight and to reconcile an interrupted operation, including
+	// after the migration controller itself changes leader.
+	GetServingState(context.Context, *connect.Request[multipoolerservice.GetServingStateRequest]) (*connect.Response[multipoolerservice.GetServingStateResponse], error)
+	// UpdatePoolerAdmission closes (FENCED) or opens (UNFENCED) application query
+	// admission on every pooler of one tablegroup, and returns only once the
+	// change is complete on all of them.
+	//
+	// A fence that cannot complete is aborted rather than left half done. Poolers
+	// drain the application's work for a short deadline and then close the sessions
+	// that have nothing running; a pooler that still has work running, or may have
+	// a backend it lost track of, reports that it is busy and the fence aborts, as
+	// it does when a pooler is unreachable, when the time runs out, or when a pooler
+	// disappears without acknowledging. An abort moves the tablegroup to UNFENCING
+	// under the request_id "abort-<request_id>", records the fence's request_id in
+	// the history so that a delayed retry of it cannot fence again, asks every
+	// pooler to reopen, commits UNFENCED, and fails with ABORTED. That is safe
+	// because routing has not changed. Once FENCED is committed and routing has
+	// moved, nothing reopens automatically.
+	//
+	// To finish an abort that was interrupted (the tablegroup reads UNFENCING under
+	// "abort-<request_id>"), call again with target UNFENCED and that request_id.
+	// To abort a fence that is still FENCING (its coordinator died), call with target
+	// UNFENCED, a new request_id, and expected_request_id set to the fence's.
+	UpdatePoolerAdmission(context.Context, *connect.Request[multipoolerservice.UpdatePoolerAdmissionRequest]) (*connect.Response[multipoolerservice.UpdatePoolerAdmissionResponse], error)
+	// UpdateMigrationRouting atomically moves the database's application traffic
+	// from one tablegroup to another. Both must already be FENCED.
+	UpdateMigrationRouting(context.Context, *connect.Request[multipoolerservice.UpdateMigrationRoutingRequest]) (*connect.Response[multipoolerservice.UpdateMigrationRoutingResponse], error)
+	// RefreshAdmission is called by the default primary on each pooler of a
+	// tablegroup while it runs UpdatePoolerAdmission. The pooler re-reads the
+	// authoritative state from the default primary and applies it. Migration
+	// controllers do not call this.
+	RefreshAdmission(context.Context, *connect.Request[multipoolerservice.RefreshAdmissionRequest]) (*connect.Response[multipoolerservice.RefreshAdmissionResponse], error)
 }
 
 // NewMultipoolerServiceClient constructs a client for the multipoolerservice.MultipoolerService
@@ -265,6 +310,30 @@ func NewMultipoolerServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			connect.WithSchema(multipoolerServiceMethods.ByName("GetBackingConnection")),
 			connect.WithClientOptions(opts...),
 		),
+		getServingState: connect.NewClient[multipoolerservice.GetServingStateRequest, multipoolerservice.GetServingStateResponse](
+			httpClient,
+			baseURL+MultipoolerServiceGetServingStateProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("GetServingState")),
+			connect.WithClientOptions(opts...),
+		),
+		updatePoolerAdmission: connect.NewClient[multipoolerservice.UpdatePoolerAdmissionRequest, multipoolerservice.UpdatePoolerAdmissionResponse](
+			httpClient,
+			baseURL+MultipoolerServiceUpdatePoolerAdmissionProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("UpdatePoolerAdmission")),
+			connect.WithClientOptions(opts...),
+		),
+		updateMigrationRouting: connect.NewClient[multipoolerservice.UpdateMigrationRoutingRequest, multipoolerservice.UpdateMigrationRoutingResponse](
+			httpClient,
+			baseURL+MultipoolerServiceUpdateMigrationRoutingProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("UpdateMigrationRouting")),
+			connect.WithClientOptions(opts...),
+		),
+		refreshAdmission: connect.NewClient[multipoolerservice.RefreshAdmissionRequest, multipoolerservice.RefreshAdmissionResponse](
+			httpClient,
+			baseURL+MultipoolerServiceRefreshAdmissionProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("RefreshAdmission")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -284,6 +353,10 @@ type multipoolerServiceClient struct {
 	streamPoolerHealth        *connect.Client[multipoolerservice.StreamPoolerHealthRequest, multipoolerservice.StreamPoolerHealthResponse]
 	notificationStream        *connect.Client[multipoolerservice.NotificationStreamRequest, multipoolerservice.NotificationStreamResponse]
 	getBackingConnection      *connect.Client[multipoolerservice.GetBackingConnectionRequest, multipoolerservice.GetBackingConnectionResponse]
+	getServingState           *connect.Client[multipoolerservice.GetServingStateRequest, multipoolerservice.GetServingStateResponse]
+	updatePoolerAdmission     *connect.Client[multipoolerservice.UpdatePoolerAdmissionRequest, multipoolerservice.UpdatePoolerAdmissionResponse]
+	updateMigrationRouting    *connect.Client[multipoolerservice.UpdateMigrationRoutingRequest, multipoolerservice.UpdateMigrationRoutingResponse]
+	refreshAdmission          *connect.Client[multipoolerservice.RefreshAdmissionRequest, multipoolerservice.RefreshAdmissionResponse]
 }
 
 // ExecuteQuery calls multipoolerservice.MultipoolerService.ExecuteQuery.
@@ -354,6 +427,26 @@ func (c *multipoolerServiceClient) NotificationStream(ctx context.Context) *conn
 // GetBackingConnection calls multipoolerservice.MultipoolerService.GetBackingConnection.
 func (c *multipoolerServiceClient) GetBackingConnection(ctx context.Context, req *connect.Request[multipoolerservice.GetBackingConnectionRequest]) (*connect.Response[multipoolerservice.GetBackingConnectionResponse], error) {
 	return c.getBackingConnection.CallUnary(ctx, req)
+}
+
+// GetServingState calls multipoolerservice.MultipoolerService.GetServingState.
+func (c *multipoolerServiceClient) GetServingState(ctx context.Context, req *connect.Request[multipoolerservice.GetServingStateRequest]) (*connect.Response[multipoolerservice.GetServingStateResponse], error) {
+	return c.getServingState.CallUnary(ctx, req)
+}
+
+// UpdatePoolerAdmission calls multipoolerservice.MultipoolerService.UpdatePoolerAdmission.
+func (c *multipoolerServiceClient) UpdatePoolerAdmission(ctx context.Context, req *connect.Request[multipoolerservice.UpdatePoolerAdmissionRequest]) (*connect.Response[multipoolerservice.UpdatePoolerAdmissionResponse], error) {
+	return c.updatePoolerAdmission.CallUnary(ctx, req)
+}
+
+// UpdateMigrationRouting calls multipoolerservice.MultipoolerService.UpdateMigrationRouting.
+func (c *multipoolerServiceClient) UpdateMigrationRouting(ctx context.Context, req *connect.Request[multipoolerservice.UpdateMigrationRoutingRequest]) (*connect.Response[multipoolerservice.UpdateMigrationRoutingResponse], error) {
+	return c.updateMigrationRouting.CallUnary(ctx, req)
+}
+
+// RefreshAdmission calls multipoolerservice.MultipoolerService.RefreshAdmission.
+func (c *multipoolerServiceClient) RefreshAdmission(ctx context.Context, req *connect.Request[multipoolerservice.RefreshAdmissionRequest]) (*connect.Response[multipoolerservice.RefreshAdmissionResponse], error) {
+	return c.refreshAdmission.CallUnary(ctx, req)
 }
 
 // MultipoolerServiceHandler is an implementation of the multipoolerservice.MultipoolerService
@@ -432,6 +525,39 @@ type MultipoolerServiceHandler interface {
 	// PROTOTYPE STUB: the connection comes from a plaintext prototype table. The
 	// message shape and the transport authentication are placeholders.
 	GetBackingConnection(context.Context, *connect.Request[multipoolerservice.GetBackingConnectionRequest]) (*connect.Response[multipoolerservice.GetBackingConnectionResponse], error)
+	// GetServingState returns the authoritative routing and admission metadata.
+	// Use it for preflight and to reconcile an interrupted operation, including
+	// after the migration controller itself changes leader.
+	GetServingState(context.Context, *connect.Request[multipoolerservice.GetServingStateRequest]) (*connect.Response[multipoolerservice.GetServingStateResponse], error)
+	// UpdatePoolerAdmission closes (FENCED) or opens (UNFENCED) application query
+	// admission on every pooler of one tablegroup, and returns only once the
+	// change is complete on all of them.
+	//
+	// A fence that cannot complete is aborted rather than left half done. Poolers
+	// drain the application's work for a short deadline and then close the sessions
+	// that have nothing running; a pooler that still has work running, or may have
+	// a backend it lost track of, reports that it is busy and the fence aborts, as
+	// it does when a pooler is unreachable, when the time runs out, or when a pooler
+	// disappears without acknowledging. An abort moves the tablegroup to UNFENCING
+	// under the request_id "abort-<request_id>", records the fence's request_id in
+	// the history so that a delayed retry of it cannot fence again, asks every
+	// pooler to reopen, commits UNFENCED, and fails with ABORTED. That is safe
+	// because routing has not changed. Once FENCED is committed and routing has
+	// moved, nothing reopens automatically.
+	//
+	// To finish an abort that was interrupted (the tablegroup reads UNFENCING under
+	// "abort-<request_id>"), call again with target UNFENCED and that request_id.
+	// To abort a fence that is still FENCING (its coordinator died), call with target
+	// UNFENCED, a new request_id, and expected_request_id set to the fence's.
+	UpdatePoolerAdmission(context.Context, *connect.Request[multipoolerservice.UpdatePoolerAdmissionRequest]) (*connect.Response[multipoolerservice.UpdatePoolerAdmissionResponse], error)
+	// UpdateMigrationRouting atomically moves the database's application traffic
+	// from one tablegroup to another. Both must already be FENCED.
+	UpdateMigrationRouting(context.Context, *connect.Request[multipoolerservice.UpdateMigrationRoutingRequest]) (*connect.Response[multipoolerservice.UpdateMigrationRoutingResponse], error)
+	// RefreshAdmission is called by the default primary on each pooler of a
+	// tablegroup while it runs UpdatePoolerAdmission. The pooler re-reads the
+	// authoritative state from the default primary and applies it. Migration
+	// controllers do not call this.
+	RefreshAdmission(context.Context, *connect.Request[multipoolerservice.RefreshAdmissionRequest]) (*connect.Response[multipoolerservice.RefreshAdmissionResponse], error)
 }
 
 // NewMultipoolerServiceHandler builds an HTTP handler from the service implementation. It returns
@@ -525,6 +651,30 @@ func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect
 		connect.WithSchema(multipoolerServiceMethods.ByName("GetBackingConnection")),
 		connect.WithHandlerOptions(opts...),
 	)
+	multipoolerServiceGetServingStateHandler := connect.NewUnaryHandler(
+		MultipoolerServiceGetServingStateProcedure,
+		svc.GetServingState,
+		connect.WithSchema(multipoolerServiceMethods.ByName("GetServingState")),
+		connect.WithHandlerOptions(opts...),
+	)
+	multipoolerServiceUpdatePoolerAdmissionHandler := connect.NewUnaryHandler(
+		MultipoolerServiceUpdatePoolerAdmissionProcedure,
+		svc.UpdatePoolerAdmission,
+		connect.WithSchema(multipoolerServiceMethods.ByName("UpdatePoolerAdmission")),
+		connect.WithHandlerOptions(opts...),
+	)
+	multipoolerServiceUpdateMigrationRoutingHandler := connect.NewUnaryHandler(
+		MultipoolerServiceUpdateMigrationRoutingProcedure,
+		svc.UpdateMigrationRouting,
+		connect.WithSchema(multipoolerServiceMethods.ByName("UpdateMigrationRouting")),
+		connect.WithHandlerOptions(opts...),
+	)
+	multipoolerServiceRefreshAdmissionHandler := connect.NewUnaryHandler(
+		MultipoolerServiceRefreshAdmissionProcedure,
+		svc.RefreshAdmission,
+		connect.WithSchema(multipoolerServiceMethods.ByName("RefreshAdmission")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/multipoolerservice.MultipoolerService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case MultipoolerServiceExecuteQueryProcedure:
@@ -555,6 +705,14 @@ func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect
 			multipoolerServiceNotificationStreamHandler.ServeHTTP(w, r)
 		case MultipoolerServiceGetBackingConnectionProcedure:
 			multipoolerServiceGetBackingConnectionHandler.ServeHTTP(w, r)
+		case MultipoolerServiceGetServingStateProcedure:
+			multipoolerServiceGetServingStateHandler.ServeHTTP(w, r)
+		case MultipoolerServiceUpdatePoolerAdmissionProcedure:
+			multipoolerServiceUpdatePoolerAdmissionHandler.ServeHTTP(w, r)
+		case MultipoolerServiceUpdateMigrationRoutingProcedure:
+			multipoolerServiceUpdateMigrationRoutingHandler.ServeHTTP(w, r)
+		case MultipoolerServiceRefreshAdmissionProcedure:
+			multipoolerServiceRefreshAdmissionHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -618,4 +776,20 @@ func (UnimplementedMultipoolerServiceHandler) NotificationStream(context.Context
 
 func (UnimplementedMultipoolerServiceHandler) GetBackingConnection(context.Context, *connect.Request[multipoolerservice.GetBackingConnectionRequest]) (*connect.Response[multipoolerservice.GetBackingConnectionResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.GetBackingConnection is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) GetServingState(context.Context, *connect.Request[multipoolerservice.GetServingStateRequest]) (*connect.Response[multipoolerservice.GetServingStateResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.GetServingState is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) UpdatePoolerAdmission(context.Context, *connect.Request[multipoolerservice.UpdatePoolerAdmissionRequest]) (*connect.Response[multipoolerservice.UpdatePoolerAdmissionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.UpdatePoolerAdmission is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) UpdateMigrationRouting(context.Context, *connect.Request[multipoolerservice.UpdateMigrationRoutingRequest]) (*connect.Response[multipoolerservice.UpdateMigrationRoutingResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.UpdateMigrationRouting is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) RefreshAdmission(context.Context, *connect.Request[multipoolerservice.RefreshAdmissionRequest]) (*connect.Response[multipoolerservice.RefreshAdmissionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.RefreshAdmission is not implemented"))
 }
