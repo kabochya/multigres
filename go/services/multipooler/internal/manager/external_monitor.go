@@ -30,8 +30,7 @@ const (
 	externalReadinessQuery = "SELECT NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off'"
 	// externalIdentityQuery reports the physical identity of the endpoint.
 	externalIdentityQuery = "SELECT system_identifier::text, current_database() FROM pg_control_system()"
-
-	externalProbeTimeout = 2 * time.Second
+	externalProbeTimeout  = 2 * time.Second
 )
 
 // errExternalIdentityMismatch means the endpoint answered but is not the source

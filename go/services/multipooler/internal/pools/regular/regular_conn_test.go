@@ -816,3 +816,78 @@ func TestPool_ClosedConnectionRecycled_CapacityPreserved(t *testing.T) {
 	stats = pool.Stats()
 	assert.Equal(t, int64(2), stats.Capacity, "capacity should still be unchanged")
 }
+
+// newTestAdminPoolWithList is newTestAdminPool with a list of abandoned backends to look in.
+func newTestAdminPoolWithList(t *testing.T, server *fakepgserver.Server, list *admin.Abandoned) *admin.Pool {
+	t.Helper()
+	pool := admin.NewPool(context.Background(), &admin.PoolConfig{
+		ClientConfig:   server.ClientConfig(),
+		ConnPoolConfig: &connpool.Config{Capacity: 2, MaxIdleCount: 2},
+		Abandoned:      list,
+	})
+	pool.Open()
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+// TestAbandon_ACancelThatFailsRecordsTheBackend: the socket is closed on a statement the
+// cancel did not reach, so it may still be running; a fence looks for it.
+func TestAbandon_ACancelThatFailsRecordsTheBackend(t *testing.T) {
+	server := fakepgserver.New(t)
+	t.Cleanup(server.Close)
+	server.AddQueryPattern(`SELECT pg_cancel_backend\(\d+\)`, fakepgserver.MakeResult(
+		[]string{"pg_cancel_backend"}, [][]any{{"f"}}))
+	list := admin.NewAbandoned()
+	conn := newTestDirectConnWithAdmin(t, server, newTestAdminPoolWithList(t, server, list))
+
+	conn.handleContextCancellation()
+
+	assert.True(t, conn.IsClosed())
+	assert.Equal(t, 1, list.Len(), "the backend is on the list")
+}
+
+// TestAbandon_ACancelThatSucceedsRecordsNothing.
+func TestAbandon_ACancelThatSucceedsRecordsNothing(t *testing.T) {
+	server := fakepgserver.New(t)
+	t.Cleanup(server.Close)
+	server.AddQueryPattern(`SELECT pg_cancel_backend\(\d+\)`, fakepgserver.MakeResult(
+		[]string{"pg_cancel_backend"}, [][]any{{"t"}}))
+	list := admin.NewAbandoned()
+	conn := newTestDirectConnWithAdmin(t, server, newTestAdminPoolWithList(t, server, list))
+	defer conn.Close()
+
+	conn.handleContextCancellation()
+
+	assert.False(t, conn.IsClosed())
+	assert.Zero(t, list.Len())
+}
+
+// TestAbandon_ClosingWithAnOperationInFlightRecordsTheBackend: closing the socket does not
+// stop a statement that is running.
+func TestAbandon_ClosingWithAnOperationInFlightRecordsTheBackend(t *testing.T) {
+	server := fakepgserver.New(t)
+	t.Cleanup(server.Close)
+	list := admin.NewAbandoned()
+	idle := newTestDirectConnWithAdmin(t, server, newTestAdminPoolWithList(t, server, list))
+	require.NoError(t, idle.Close())
+	assert.Zero(t, list.Len(), "an idle connection closes without a trace")
+
+	busy := newTestDirectConnWithAdmin(t, server, newTestAdminPoolWithList(t, server, list))
+	busy.opsInFlight.Add(1)
+	require.NoError(t, busy.Close())
+	assert.Equal(t, 1, list.Len())
+}
+
+// TestAbandon_ReplacingASessionRecordsTheOldBackend: a reconnect after a connection error
+// replaces the session, it does not stop what ran on it.
+func TestAbandon_ReplacingASessionRecordsTheOldBackend(t *testing.T) {
+	server := fakepgserver.New(t)
+	t.Cleanup(server.Close)
+	server.SetNeverFail(true)
+	list := admin.NewAbandoned()
+	conn := newTestDirectConnWithAdmin(t, server, newTestAdminPoolWithList(t, server, list))
+	defer conn.Close()
+
+	require.NoError(t, conn.Reconnect(t.Context()))
+	assert.Equal(t, 1, list.Len())
+}

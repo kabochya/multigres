@@ -110,6 +110,16 @@ type PoolManager interface {
 	// Used during graceful shutdown to wait for in-flight queries to complete.
 	WaitForDrain(ctx context.Context) error
 
+	// WaitForApplicationDrain blocks until no reserved connection that is client work
+	// is left. Used by a fence, together with the admission permits of the requests
+	// in flight.
+	WaitForApplicationDrain(ctx context.Context) error
+
+	// AbandonedBackends looks, on the server, for the backends the pooler gave up on
+	// while they might still have been running, and returns how many are still there.
+	// An error means it cannot be said that none are.
+	AbandonedBackends(ctx context.Context) (int, error)
+
 	// WaitForReservedDrain blocks until all RESERVED connections (transactions,
 	// temp tables, portals, COPY) have been released or ctx is cancelled. It
 	// ignores transient single-query borrows, so the first stage of a graceful
@@ -120,6 +130,13 @@ type PoolManager interface {
 	// Used after drain grace period expires to prevent reserved connections from being
 	// used in a non-serving state.
 	CloseReservedConnections(ctx context.Context) int
+
+	// EndApplicationReservations closes the reserved connections that are client work,
+	// leaving infrastructure connections (the pubsub listener's LISTEN connection)
+	// alone, by closing their sockets, and returns their ids. A fence calls it only when
+	// no request is in flight. willEnd, if set, is called with the ids before any is
+	// closed.
+	EndApplicationReservations(willEnd func(ids []int64)) []int64
 
 	// --- Stats ---
 

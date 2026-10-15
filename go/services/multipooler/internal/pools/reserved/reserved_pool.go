@@ -56,6 +56,16 @@ type PoolConfig struct {
 	SettingsCache *connstate.SettingsCache
 }
 
+// nextConnID generates reserved connection IDs for the whole process, so that an ID
+// identifies one reservation whichever user's pool holds it: the pooler remembers the
+// reservations a fence killed by ID alone. Seeded with the current Unix nanoseconds so
+// IDs do not collide with those of a previous process.
+var nextConnID = func() *atomic.Int64 {
+	var n atomic.Int64
+	n.Store(time.Now().UnixNano())
+	return &n
+}()
+
 // Pool manages reserved connections with ID-based tracking.
 // It wraps a regular connection pool and adds:
 //   - Unique connection IDs for client-side tracking
@@ -75,10 +85,6 @@ type Pool struct {
 
 	// active tracks reserved connections by their unique ID.
 	active map[int64]*Conn
-
-	// lastID generates unique connection IDs. Initialized with current Unix nanoseconds
-	// to prevent ID collisions after multipooler restarts.
-	lastID atomic.Int64
 
 	// closed indicates whether the pool has been closed.
 	closed bool
@@ -132,11 +138,6 @@ func NewPool(ctx context.Context, config *PoolConfig) *Pool {
 		txnMetrics: newTxnMetrics(),
 	}
 
-	// Initialize lastID with current Unix nanoseconds to prevent ID collisions
-	// after multipooler restarts. Sequential IDs from this starting point
-	// won't collide with IDs from previous pool instances.
-	p.lastID.Store(time.Now().UnixNano())
-
 	// Start background killer goroutine.
 	// Ticker interval is 1/10th the idle timeout (like Vitess).
 	interval := p.config.InactivityTimeout / 10
@@ -189,10 +190,11 @@ func (p *Pool) NewConn(ctx context.Context, settings *connstate.Settings, opts .
 
 	// Generate unique ID. Since lastID is initialized with Unix nanoseconds,
 	// IDs won't collide with previous pool instances after restarts.
-	connID := p.lastID.Add(1)
+	connID := nextConnID.Add(1)
 
 	// Create reserved connection.
 	rc := newConn(pooled, connID, p, o.releaseCleanups)
+	rc.uncounted = o.uncounted
 	rc.SetInactivityTimeout(p.config.InactivityTimeout)
 
 	// Register in active map.
@@ -201,7 +203,7 @@ func (p *Pool) NewConn(ctx context.Context, settings *connstate.Settings, opts .
 	p.mu.Unlock()
 
 	p.reserveCount.Add(1)
-	if p.config.OnReserve != nil {
+	if p.config.OnReserve != nil && !rc.uncounted {
 		p.config.OnReserve()
 	}
 
@@ -389,6 +391,11 @@ func (p *Pool) release(rc *Conn, reason ReleaseReason, gatewaySessionSettings ma
 	// here rather than by rewriting the caller's reason so the metrics switch
 	// and the debug log keep the true release reason.
 	if reason.preventsReuse() || rc.closeOnRelease.Load() {
+		if !rc.endedDeliberately.Load() {
+			// The connection is closed because something about it is uncertain, and a
+			// statement may still be running on its backend: a fence looks for it.
+			rc.pooled.Conn.Abandon("reserved connection released as " + reason.String())
+		}
 		rc.pooled.Taint()
 	} else if !p.runReleaseCleanups(rc, reason, cleanups) {
 		rc.pooled.Taint()
@@ -410,7 +417,7 @@ func (p *Pool) release(rc *Conn, reason ReleaseReason, gatewaySessionSettings ma
 	// was tainted above.
 	rc.pooled.Recycle()
 
-	if p.config.OnRelease != nil {
+	if p.config.OnRelease != nil && !rc.uncounted {
 		p.config.OnRelease()
 	}
 
@@ -454,10 +461,16 @@ func (p *Pool) Close() {
 	p.active = make(map[int64]*Conn)
 	p.mu.Unlock()
 
-	// Taint all connections since they may be in an inconsistent state.
+	// Taint all connections since they may be in an inconsistent state. A connection
+	// closed with an operation in flight is recorded as abandoned by Close. They are
+	// released here: nothing else will release them, and a drain that counts them must
+	// be able to reach zero.
 	for _, rc := range conns {
 		rc.pooled.Taint()
 		rc.pooled.Close()
+		if rc.released.CompareAndSwap(false, true) && p.config.OnRelease != nil && !rc.uncounted {
+			p.config.OnRelease()
+		}
 	}
 
 	// Close the underlying regular pool.
@@ -607,6 +620,42 @@ func (p *Pool) KillAll(ctx context.Context) int {
 	}
 
 	return len(ids)
+}
+
+// EndCounted closes the active reserved connections that are client work, by closing
+// their sockets, and returns their ids. Infrastructure connections (see
+// WithoutDrainAccounting) are left alone. It is for a fence that has seen that no
+// request is in flight on any of them: no statement is running and no COMMIT was sent,
+// so closing the socket loses nothing but the session, and an open transaction aborts.
+// These backends are not recorded as abandoned, since nothing of theirs can still be
+// running. willEnd, if set, is called with the ids before any is closed, so that a
+// request that arrives meanwhile can already be told what happened to its reservation.
+func (p *Pool) EndCounted(willEnd func(ids []int64)) []int64 {
+	p.mu.Lock()
+	ids := make([]int64, 0, len(p.active))
+	for id, rc := range p.active {
+		if !rc.uncounted {
+			ids = append(ids, id)
+		}
+	}
+	p.mu.Unlock()
+
+	if willEnd != nil && len(ids) > 0 {
+		willEnd(ids)
+	}
+	for _, id := range ids {
+		p.mu.Lock()
+		rc, ok := p.active[id]
+		delete(p.active, id)
+		p.mu.Unlock()
+		if !ok {
+			continue
+		}
+		rc.endedDeliberately.Store(true)
+		rc.pooled.Taint()
+		rc.Release(ReleaseKill, nil)
+	}
+	return ids
 }
 
 // KillTimedOut kills all connections that have exceeded their timeout.

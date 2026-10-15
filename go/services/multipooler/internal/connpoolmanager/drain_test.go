@@ -224,3 +224,20 @@ func TestWaitForReservedDrain_BlocksUntilReservedZero(t *testing.T) {
 	// Combined drain is also satisfied now.
 	require.NoError(t, m.WaitForDrain(t.Context()))
 }
+
+// TestWaitForApplicationDrain_IgnoresRegularBorrows: a fence does not wait for the
+// single-query borrows of the regular pool. Control traffic keeps them nonzero, and
+// waiting for the instant at which none is borrowed could miss it for ever; the
+// admission permit of an application request already covers its borrow.
+func TestWaitForApplicationDrain_IgnoresRegularBorrows(t *testing.T) {
+	m := newDrainTestManager()
+	m.regularAdd(1) // steady control traffic
+	require.NoError(t, m.WaitForApplicationDrain(t.Context()), "a regular borrow is not waited for")
+
+	m.reservedAdd(1)
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, m.WaitForApplicationDrain(ctx), context.DeadlineExceeded, "a reserved connection is")
+	m.reservedAdd(-1)
+	require.NoError(t, m.WaitForApplicationDrain(t.Context()))
+}

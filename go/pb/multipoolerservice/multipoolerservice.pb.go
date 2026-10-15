@@ -3484,10 +3484,12 @@ type RefreshAdmissionResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// pooler_id identifies the responding pooler.
 	PoolerId *clustermetadata.ID `protobuf:"bytes,1,opt,name=pooler_id,json=poolerId,proto3" json:"pooler_id,omitempty"`
-	// applied_state is the state the pooler now enforces. For FENCING it is only
-	// returned once the gate is closed and no application work is running; a pooler
-	// that has work running, or may have a backend it lost track of, fails the call
-	// with a "busy" error instead, and the fence is aborted.
+	// applied_state is the settled state the pooler now enforces: FENCED once the
+	// gate is closed and no application work is running (the answer to a FENCING or
+	// FENCED request), UNFENCED once it admits application work (the answer to an
+	// UNFENCING or UNFENCED request). A pooler that has work running, or may have a
+	// backend it lost track of, fails a FENCING refresh with a "busy" error instead,
+	// and the fence is aborted.
 	AppliedState AdmissionState `protobuf:"varint,2,opt,name=applied_state,json=appliedState,proto3,enum=multipoolerservice.AdmissionState" json:"applied_state,omitempty"`
 	// request_id echoes the request the pooler applied.
 	RequestId     string `protobuf:"bytes,3,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`

@@ -906,7 +906,13 @@ type Target struct {
 	ShardKey *clustermetadata.ShardKey `protobuf:"bytes,4,opt,name=shard_key,json=shardKey,proto3" json:"shard_key,omitempty"`
 	// mode expresses the caller's writability / consistency needs.
 	// See Mode for the semantics of each value.
-	Mode          Mode `protobuf:"varint,5,opt,name=mode,proto3,enum=query.Mode" json:"mode,omitempty"`
+	Mode Mode `protobuf:"varint,5,opt,name=mode,proto3,enum=query.Mode" json:"mode,omitempty"`
+	// control marks the request as cluster control traffic rather than application
+	// work: a pooler's application admission gate does not apply to it, so it is
+	// served while the tablegroup is fenced. Only a request that reserves no
+	// connection is exempt; one that would start a reservation is still gated.
+	// Poolers trust the gateway for this marking.
+	Control       bool `protobuf:"varint,6,opt,name=control,proto3" json:"control,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -953,6 +959,13 @@ func (x *Target) GetMode() Mode {
 		return x.Mode
 	}
 	return Mode_MODE_UNSPECIFIED
+}
+
+func (x *Target) GetControl() bool {
+	if x != nil {
+		return x.Control
+	}
+	return false
 }
 
 // PreparedStatement represents a prepared statement in the extended query protocol.
@@ -1704,10 +1717,11 @@ const file_query_proto_rawDesc = "" +
 	"\n" +
 	"has_fields\x18\x03 \x01(\bR\thasFields\":\n" +
 	"\x14ParameterDescription\x12\"\n" +
-	"\rdata_type_oid\x18\x01 \x01(\rR\vdataTypeOid\"a\n" +
+	"\rdata_type_oid\x18\x01 \x01(\rR\vdataTypeOid\"{\n" +
 	"\x06Target\x126\n" +
 	"\tshard_key\x18\x04 \x01(\v2\x19.clustermetadata.ShardKeyR\bshardKey\x12\x1f\n" +
-	"\x04mode\x18\x05 \x01(\x0e2\v.query.ModeR\x04mode\"\x83\x01\n" +
+	"\x04mode\x18\x05 \x01(\x0e2\v.query.ModeR\x04mode\x12\x18\n" +
+	"\acontrol\x18\x06 \x01(\bR\acontrol\"\x83\x01\n" +
 	"\x11PreparedStatement\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05query\x18\x02 \x01(\tR\x05query\x12\x1f\n" +

@@ -29,6 +29,11 @@ type PoolConfig struct {
 
 	// ConnPoolConfig is the connection pool configuration.
 	ConnPoolConfig *connpool.Config
+
+	// Abandoned is the pooler's list of backends it gave up on. It outlives the pool:
+	// the manager passes the same list to every admin pool it creates. Nil gives the
+	// pool a list of its own.
+	Abandoned *Abandoned
 }
 
 // PooledConn is an alias for a pooled admin connection.
@@ -43,6 +48,9 @@ type PooledConn = *connpool.Pooled[*Conn]
 type Pool struct {
 	pool   *connpool.Pool[*Conn]
 	config *PoolConfig
+
+	// abandoned lists the backends the pooler gave up on; see Abandoned.
+	abandoned *Abandoned
 }
 
 // NewPool creates a new admin connection pool.
@@ -51,9 +59,14 @@ type Pool struct {
 func NewPool(ctx context.Context, config *PoolConfig) *Pool {
 	pool := connpool.NewPool[*Conn](ctx, config.ConnPoolConfig)
 
+	abandoned := config.Abandoned
+	if abandoned == nil {
+		abandoned = NewAbandoned()
+	}
 	return &Pool{
-		pool:   pool,
-		config: config,
+		pool:      pool,
+		config:    config,
+		abandoned: abandoned,
 	}
 }
 

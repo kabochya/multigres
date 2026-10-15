@@ -339,6 +339,13 @@ func (p *UserPool) CloseReservedConnections(ctx context.Context) int {
 	return p.reservedPool.KillAll(ctx)
 }
 
+// EndCountedReservedConnections closes the active reserved connections that are
+// client work, leaving infrastructure connections (see
+// reserved.WithoutDrainAccounting) alone. Used by a fence.
+func (p *UserPool) EndCountedReservedConnections(willEnd func(ids []int64)) []int64 {
+	return p.reservedPool.EndCounted(willEnd)
+}
+
 // Close closes both regular and reserved pools.
 func (p *UserPool) Close() {
 	p.mu.Lock()

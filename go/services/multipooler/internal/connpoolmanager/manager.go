@@ -106,6 +106,7 @@ type Manager struct {
 
 	ctx           context.Context          // Manager lifecycle context, used for lazy pool creation
 	adminPool     *admin.Pool              // Shared admin pool for kill operations
+	abandoned     *admin.Abandoned         // Backends the pooler gave up on; survives a reopen
 	settingsCache *connstate.SettingsCache // Shared settings cache for all users
 	metrics       *Metrics                 // OpenTelemetry metrics
 
@@ -239,6 +240,7 @@ func (m *Manager) Open(ctx context.Context, connConfig *ConnectionConfig) {
 	m.adminPool = admin.NewPool(ctx, &admin.PoolConfig{
 		ClientConfig:   adminClientConfig,
 		ConnPoolConfig: adminPoolConfig,
+		Abandoned:      m.abandoned,
 	})
 	m.adminPool.Open()
 
@@ -1079,6 +1081,28 @@ func (m *Manager) WaitForDrain(ctx context.Context) error {
 	}
 }
 
+// WaitForApplicationDrain blocks until no reserved connection that is client work is
+// left. It does not wait for the single-query borrows of the regular pool, which a
+// request's admission permit already covers, and which control traffic (NOTIFY,
+// credential lookups) keeps nonzero for as long as it runs: waiting for the instant
+// at which none is borrowed could miss it forever.
+func (m *Manager) WaitForApplicationDrain(ctx context.Context) error {
+	return m.WaitForReservedDrain(ctx)
+}
+
+// AbandonedBackends looks, on the server, for the backends the pooler gave up on
+// (see admin.Abandoned) and returns how many are still there. An error, including
+// an overflow of the list, means it cannot be said that none are.
+func (m *Manager) AbandonedBackends(ctx context.Context) (int, error) {
+	m.createMu.Lock()
+	adminPool := m.adminPool
+	m.createMu.Unlock()
+	if adminPool == nil {
+		return 0, errors.New("no admin pool to look for abandoned backends with")
+	}
+	return adminPool.PresentAbandoned(ctx)
+}
+
 // WaitForReservedDrain blocks until all RESERVED connections (transactions, temp
 // tables, portals, COPY, etc.) have been released or ctx is cancelled. Unlike
 // WaitForDrain it ignores transient single-query borrows, so the first stage of
@@ -1115,6 +1139,25 @@ func (m *Manager) CloseReservedConnections(ctx context.Context) int {
 		total += pool.CloseReservedConnections(ctx)
 	}
 	return total
+}
+
+// EndApplicationReservations closes the reserved connections that are client work, by
+// closing their sockets, and returns their ids. It is for a fence, which calls it only
+// when no request is in flight: nothing is running on them, no COMMIT was sent, and an
+// open transaction aborts when its socket closes. Infrastructure connections, such as
+// the LISTEN connection of the pubsub listener, are left alone: they are not
+// application work, and ending them would drop notifications for the cohort. willEnd,
+// if set, is called with the ids before any is closed.
+func (m *Manager) EndApplicationReservations(willEnd func(ids []int64)) []int64 {
+	pools := m.userPoolsSnapshot.Load()
+	if pools == nil {
+		return nil
+	}
+	var ids []int64
+	for _, pool := range *pools {
+		ids = append(ids, pool.EndCountedReservedConnections(willEnd)...)
+	}
+	return ids
 }
 
 // IsClosed reports whether the manager is terminally closed. It returns false

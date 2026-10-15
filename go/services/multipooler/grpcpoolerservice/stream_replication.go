@@ -72,10 +72,12 @@ func (s *poolerService) StreamReplication(stream multipoolerpb.MultipoolerServic
 
 	// A replication stream opens a fresh, dedicated, session-pinned backend, so
 	// it is admitted like a new reservation (rejected during graceful drain).
-	if err := s.pooler.StartRequest(init.GetTarget(), admissionKind(0, true)); err != nil {
+	release, admissionErr := s.pooler.BeginRequest(init.GetTarget(), admissionKind(0, true))
+	if admissionErr != nil {
 		s.pooler.ReplicationMetrics().RecordSetupError(replication.SetupErrorAdmissionRejected)
-		return mterrors.ToGRPC(err)
+		return mterrors.ToGRPC(admissionErr)
 	}
+	defer release()
 
 	pm := s.pooler.PoolManager()
 	if pm == nil {

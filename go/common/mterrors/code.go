@@ -72,6 +72,21 @@ func NewIdleSessionTimeout() *PgDiagnostic {
 		"terminating connection due to idle-session timeout", "")
 }
 
+// PgSSAdminShutdown is SQLSTATE 57P01 (admin_shutdown).
+const PgSSAdminShutdown = "57P01"
+
+// NewReservationEndedByFence creates a PgDiagnostic for a request on a reserved
+// connection that an admission fence terminated. SQLSTATE 57P01 (admin_shutdown),
+// severity FATAL, so the client connection is closed: an error the client could retry
+// from would let it carry on believing it still holds state that is gone, such as a
+// session advisory lock that another session can now take on the tablegroup that
+// has the traffic.
+func NewReservationEndedByFence() *PgDiagnostic {
+	return NewPgError("FATAL", PgSSAdminShutdown,
+		"terminating connection: the application's backends were closed by a migration fence",
+		"The backends that held the session's transaction, temporary tables or locks were closed when application traffic was fenced. Reconnect to start a clean session.")
+}
+
 // NewReservedConnectionTerminated creates a PgDiagnostic for a reserved
 // connection that was terminated before its in-flight work could continue or
 // be concluded. This fires for several distinct, unrelated reasons — most
@@ -225,6 +240,17 @@ var (
 		ID: "MTF01", Severity: "ERROR",
 		Format:      "planned failover in progress",
 		Description: "The pooler is transitioning during a planned failover. The query will be retried automatically.",
+	}
+
+	// MTF02 is returned by a multipooler whose application admission gate is
+	// closed (a fence during a migration, or a pooler that has not yet read its
+	// admission state). Like MTF01 it is bufferable, but the closure is deliberate,
+	// not a failover, so the gateway does not apply the guard against buffering
+	// again soon after the last failover cycle.
+	MTF02 = &MTError{
+		ID: "MTF02", Severity: "ERROR",
+		Format:      "application admission is closed",
+		Description: "The pooler is not admitting application queries. The query will be retried automatically.",
 	}
 )
 

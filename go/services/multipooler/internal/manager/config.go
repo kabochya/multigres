@@ -18,6 +18,9 @@ package manager
 import (
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
 	"github.com/multigres/multigres/go/common/backup"
 	"github.com/multigres/multigres/go/common/topoclient"
 	"github.com/multigres/multigres/go/services/multipooler/internal/connpoolmanager"
@@ -83,6 +86,30 @@ type Config struct {
 	// monitor starts postgres as a primary rather than a standby.
 	StaticLeader bool
 
+	// AdmissionControl makes application admission follow the persisted admission
+	// state of the pooler's tablegroup: the pooler starts closed and opens only
+	// after it has read an UNFENCED state from the default primary. Unmanaged
+	// poolers are always admission controlled.
+	AdmissionControl bool
+
+	// AdmissionDrainTimeout bounds how long a fence waits for application work to
+	// drain before it closes idle sessions or, if work is still running, reports busy
+	// so that the fence is aborted. Zero selects the default, which is well under the
+	// gateway's buffer window.
+	AdmissionDrainTimeout time.Duration
+
+	// BackingConnectionName is the backing connection an unmanaged pooler fronts.
+	// Empty for managed poolers. It must equal the tablegroup's backing
+	// connection for the pooler to apply that tablegroup's admission state.
+	BackingConnectionName string
+
+	// DefaultPrimaryTransport resolves the gRPC transport used to reach the
+	// default primary pooler for admission reads. It is called on first use, so a
+	// cluster that never uses admission control or the serving-control RPCs never
+	// builds it (and never logs its TLS warning). Nil means insecure, which matches
+	// the existing internal gRPC default.
+	DefaultPrimaryTransport func() (grpc.DialOption, error)
+
 	// ExternalBackend is the external PostgreSQL an unmanaged pooler fronts.
 	// Nil for managed poolers. It is the resolved form of --backing-connection.
 	ExternalBackend *ExternalBackend
@@ -96,4 +123,12 @@ type ExternalBackend struct {
 	// ExpectedSystemIdentifier is the pg_control_system() identifier the
 	// endpoint must report. The monitor withdraws readiness on any other value.
 	ExpectedSystemIdentifier string
+}
+
+// DefaultPrimaryDialOption returns the transport to the default primary pooler.
+func (c *Config) DefaultPrimaryDialOption() (grpc.DialOption, error) {
+	if c == nil || c.DefaultPrimaryTransport == nil {
+		return grpc.WithTransportCredentials(insecure.NewCredentials()), nil
+	}
+	return c.DefaultPrimaryTransport()
 }

@@ -105,6 +105,14 @@ func requireMTF01(t *testing.T, err error) {
 	assert.True(t, mterrors.IsErrorCode(err, mterrors.MTF01.ID), "expected MTF01 error, got: %v", err)
 }
 
+// requireMTF02 asserts that err is the MTF02 (application admission closed)
+// gateway-buffering signal.
+func requireMTF02(t *testing.T, err error) {
+	t.Helper()
+	require.Error(t, err)
+	assert.True(t, mterrors.IsErrorCode(err, mterrors.MTF02.ID), "expected MTF02 error, got: %v", err)
+}
+
 func TestStartRequest_Serving(t *testing.T) {
 	s := newStartRequestTestServer()
 	s.servingStatus = clustermetadatapb.PoolerServingStatus_SERVING
@@ -285,6 +293,9 @@ type drainMockPoolManager struct {
 
 	closeReservedCount int
 	closeReservedCalls int
+	// onCloseReserved, when set, runs when the reserved connections are closed,
+	// letting a test model the closed connections returning to the pool.
+	onCloseReserved func()
 }
 
 func newDrainMockPoolManager() *drainMockPoolManager {
@@ -341,6 +352,11 @@ func (m *drainMockPoolManager) WaitForDrain(ctx context.Context) error {
 	}
 }
 
+// WaitForApplicationDrain: the mock's reserved connections are the application's.
+func (m *drainMockPoolManager) WaitForApplicationDrain(ctx context.Context) error {
+	return m.WaitForReservedDrain(ctx)
+}
+
 func (m *drainMockPoolManager) WaitForReservedDrain(ctx context.Context) error {
 	m.mu.Lock()
 	ch := m.reservedZeroCh
@@ -357,9 +373,35 @@ func (m *drainMockPoolManager) WaitForReservedDrain(ctx context.Context) error {
 func (m *drainMockPoolManager) CloseReservedConnections(ctx context.Context) int {
 	m.mu.Lock()
 	m.closeReservedCalls++
+	hook := m.onCloseReserved
 	m.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return m.closeReservedCount
 }
+
+// EndApplicationReservations is what a fence uses to close idle sessions; the mock
+// counts it as a close of the reserved connections.
+func (m *drainMockPoolManager) EndApplicationReservations(willEnd func([]int64)) []int64 {
+	m.mu.Lock()
+	none := m.reservedCount == 0
+	m.mu.Unlock()
+	if none {
+		return nil
+	}
+	ids := make([]int64, m.CloseReservedConnections(context.Background()))
+	for i := range ids {
+		ids[i] = int64(1000 + i)
+	}
+	if willEnd != nil {
+		willEnd(ids)
+	}
+	return ids
+}
+
+// AbandonedBackends: the mock's server has none.
+func (m *drainMockPoolManager) AbandonedBackends(context.Context) (int, error) { return 0, nil }
 
 func (m *drainMockPoolManager) closeReservedCallCount() int {
 	m.mu.Lock()

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	"github.com/multigres/multigres/go/common/protoutil"
 	"github.com/multigres/multigres/go/common/sqltypes"
 	"github.com/multigres/multigres/go/services/multipooler/internal/connstate"
+	"github.com/multigres/multigres/go/services/multipooler/internal/pools/admin"
 	"github.com/multigres/multigres/go/services/multipooler/internal/pools/connpool"
 	"github.com/multigres/multigres/go/services/multipooler/internal/pools/regular"
 )
@@ -1151,4 +1153,160 @@ func TestPool_NewConnAfterCloseReturnsErrPoolClosed(t *testing.T) {
 
 	_, err := pool.NewConn(context.Background(), nil)
 	require.ErrorIs(t, err, connpool.ErrPoolClosed, "must be retryable by the manager's closed-pool path")
+}
+
+// TestPool_ConnectionsWithoutDrainAccounting: infrastructure connections, such as a
+// LISTEN connection, are not counted by the reserve and release callbacks, so a
+// drain does not wait for them, and KillAllCounted leaves them alone while KillAll,
+// which shutdown uses, still ends them.
+func TestPool_ConnectionsWithoutDrainAccounting(t *testing.T) {
+	server := fakepgserver.New(t)
+	defer server.Close()
+	server.SetNeverFail(true)
+
+	var reserves, releases atomic.Int64
+	pool := NewPool(context.Background(), &PoolConfig{
+		InactivityTimeout: 5 * time.Second,
+		OnReserve:         func() { reserves.Add(1) },
+		OnRelease:         func() { releases.Add(1) },
+		RegularPoolConfig: &regular.PoolConfig{
+			ClientConfig:   server.ClientConfig(),
+			ConnPoolConfig: &connpool.Config{Capacity: 4, MaxIdleCount: 4},
+		},
+	})
+	defer pool.Close()
+	ctx := context.Background()
+
+	infra, err := pool.NewConn(ctx, nil, WithoutDrainAccounting())
+	require.NoError(t, err)
+	client, err := pool.NewConn(ctx, nil)
+	require.NoError(t, err)
+	assert.True(t, infra.Uncounted())
+	assert.False(t, client.Uncounted())
+	assert.EqualValues(t, 1, reserves.Load(), "only the client's connection is counted")
+
+	assert.Equal(t, []int64{client.ConnID()}, pool.EndCounted(nil), "only client work is ended")
+	assert.EqualValues(t, 1, releases.Load())
+	_, stillThere := pool.Get(infra.ConnID())
+	assert.True(t, stillThere, "the infrastructure connection survives a fence")
+	_, gone := pool.Get(client.ConnID())
+	assert.False(t, gone)
+
+	infra.Release(ReleaseError, nil)
+	assert.EqualValues(t, 1, releases.Load(), "releasing an uncounted connection is not counted either")
+
+	again, err := pool.NewConn(ctx, nil, WithoutDrainAccounting())
+	require.NoError(t, err)
+	assert.Equal(t, 1, pool.KillAll(ctx), "shutdown still ends it")
+	_, gone = pool.Get(again.ConnID())
+	assert.False(t, gone)
+}
+
+// TestPool_EndCountedClosesIdleReservationsWithoutAbandoningThem: a fence closes the
+// reservations that are client work by closing their sockets. Nothing of theirs is
+// running, so they are not recorded as abandoned backends, while one released because
+// it failed is.
+func TestPool_EndCountedClosesIdleReservationsWithoutAbandoningThem(t *testing.T) {
+	server := fakepgserver.New(t)
+	defer server.Close()
+	server.SetNeverFail(true)
+	abandoned := admin.NewAbandoned()
+	adminPool := admin.NewPool(context.Background(), &admin.PoolConfig{
+		ClientConfig:   server.ClientConfig(),
+		ConnPoolConfig: &connpool.Config{Capacity: 2, MaxIdleCount: 2},
+		Abandoned:      abandoned,
+	})
+	adminPool.Open()
+	defer adminPool.Close()
+
+	var releases atomic.Int64
+	pool := NewPool(context.Background(), &PoolConfig{
+		InactivityTimeout: 5 * time.Second,
+		OnRelease:         func() { releases.Add(1) },
+		RegularPoolConfig: &regular.PoolConfig{
+			ClientConfig:   server.ClientConfig(),
+			ConnPoolConfig: &connpool.Config{Capacity: 4, MaxIdleCount: 4},
+			AdminPool:      adminPool,
+		},
+	})
+	defer pool.Close()
+	ctx := context.Background()
+
+	infra, err := pool.NewConn(ctx, nil, WithoutDrainAccounting())
+	require.NoError(t, err)
+	idle, err := pool.NewConn(ctx, nil)
+	require.NoError(t, err)
+	failed, err := pool.NewConn(ctx, nil)
+	require.NoError(t, err)
+
+	var announced []int64
+	ended := pool.EndCounted(func(ids []int64) { announced = ids })
+	require.ElementsMatch(t, []int64{idle.ConnID(), failed.ConnID()}, ended)
+	require.ElementsMatch(t, ended, announced, "announced before they are closed")
+	require.EqualValues(t, 2, releases.Load())
+	require.Zero(t, abandoned.Len(), "an idle session closed on purpose has nothing running")
+	_, stillThere := pool.Get(infra.ConnID())
+	require.True(t, stillThere, "the infrastructure connection survives")
+
+	other, err := pool.NewConn(ctx, nil)
+	require.NoError(t, err)
+	other.Release(ReleaseError, nil)
+	require.Equal(t, 1, abandoned.Len(), "a connection released because it failed may have something running")
+}
+
+// TestPool_CloseReleasesTheReservationsItDrops: a drain that counts reservations must be
+// able to reach zero after the pool is closed (a reopen, an eviction) with some open.
+func TestPool_CloseReleasesTheReservationsItDrops(t *testing.T) {
+	server := fakepgserver.New(t)
+	defer server.Close()
+	server.SetNeverFail(true)
+	var reserves, releases atomic.Int64
+	pool := NewPool(context.Background(), &PoolConfig{
+		InactivityTimeout: 5 * time.Second,
+		OnReserve:         func() { reserves.Add(1) },
+		OnRelease:         func() { releases.Add(1) },
+		RegularPoolConfig: &regular.PoolConfig{
+			ClientConfig:   server.ClientConfig(),
+			ConnPoolConfig: &connpool.Config{Capacity: 4, MaxIdleCount: 4},
+		},
+	})
+	rc, err := pool.NewConn(context.Background(), nil)
+	require.NoError(t, err)
+	_, err = pool.NewConn(context.Background(), nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, reserves.Load())
+
+	pool.Close()
+	require.EqualValues(t, 2, releases.Load(), "every dropped reservation is released")
+	rc.Release(ReleaseError, nil)
+	require.EqualValues(t, 2, releases.Load(), "and not released twice")
+}
+
+// TestPools_ShareOneIDSpace: the pooler remembers the reservations a fence killed by
+// ID alone, so IDs must be unique across the pools of different users.
+func TestPools_ShareOneIDSpace(t *testing.T) {
+	server := fakepgserver.New(t)
+	defer server.Close()
+	server.SetNeverFail(true)
+	newPool := func() *Pool {
+		return NewPool(context.Background(), &PoolConfig{
+			InactivityTimeout: 5 * time.Second,
+			RegularPoolConfig: &regular.PoolConfig{
+				ClientConfig:   server.ClientConfig(),
+				ConnPoolConfig: &connpool.Config{Capacity: 4, MaxIdleCount: 4},
+			},
+		})
+	}
+	a, b := newPool(), newPool()
+	defer a.Close()
+	defer b.Close()
+	seen := map[int64]bool{}
+	for range 3 {
+		for _, p := range []*Pool{a, b} {
+			rc, err := p.NewConn(context.Background(), nil)
+			require.NoError(t, err)
+			require.False(t, seen[rc.ConnID()], "reservation id %d was issued twice", rc.ConnID())
+			seen[rc.ConnID()] = true
+		}
+	}
 }

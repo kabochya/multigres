@@ -28,6 +28,7 @@ import (
 	"github.com/multigres/multigres/go/common/constants"
 	"github.com/multigres/multigres/go/common/pgprotocol/client"
 	"github.com/multigres/multigres/go/common/pgsecret"
+	"github.com/multigres/multigres/go/services/multipooler/internal/pools/admin"
 	"github.com/multigres/multigres/go/tools/viperutil"
 )
 
@@ -722,9 +723,10 @@ func (c *Config) NewManager(logger *slog.Logger) *Manager {
 	}
 
 	mgr := &Manager{
-		config:  c,
-		logger:  logger,
-		metrics: metrics,
+		config:    c,
+		logger:    logger,
+		metrics:   metrics,
+		abandoned: admin.NewAbandoned(),
 	}
 	mgr.setLifecycle(lifecycleClosed) // Manager is closed until Open() is called
 	return mgr

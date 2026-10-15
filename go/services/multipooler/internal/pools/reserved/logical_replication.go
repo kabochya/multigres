@@ -112,7 +112,7 @@ func (p *Pool) NewLogicalReplicationConn(ctx context.Context) (*Conn, error) {
 
 	// Generated before dialing (unlike NewConn's ordinary path) so it can be
 	// tagged into application_name for replicationstats correlation.
-	connID := p.lastID.Add(1)
+	connID := nextConnID.Add(1)
 
 	cfg := logicalReplicationClientConfig(*p.config.RegularPoolConfig.ClientConfig, connID)
 	clientConn, err := client.Connect(ctx, p.ctx, &cfg)

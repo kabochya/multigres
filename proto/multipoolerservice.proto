@@ -947,10 +947,12 @@ message RefreshAdmissionResponse {
   // pooler_id identifies the responding pooler.
   clustermetadata.ID pooler_id = 1;
 
-  // applied_state is the state the pooler now enforces. For FENCING it is only
-  // returned once the gate is closed and no application work is running; a pooler
-  // that has work running, or may have a backend it lost track of, fails the call
-  // with a "busy" error instead, and the fence is aborted.
+  // applied_state is the settled state the pooler now enforces: FENCED once the
+  // gate is closed and no application work is running (the answer to a FENCING or
+  // FENCED request), UNFENCED once it admits application work (the answer to an
+  // UNFENCING or UNFENCED request). A pooler that has work running, or may have a
+  // backend it lost track of, fails a FENCING refresh with a "busy" error instead,
+  // and the fence is aborted.
   AdmissionState applied_state = 2;
 
   // request_id echoes the request the pooler applied.

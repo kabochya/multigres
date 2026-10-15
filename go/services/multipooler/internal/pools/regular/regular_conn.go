@@ -19,8 +19,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/multigres/multigres/go/common/constants"
@@ -54,6 +56,10 @@ type Conn struct {
 	// adminPool is used for kill operations.
 	// This allows the connection to terminate itself if needed.
 	adminPool *admin.Pool
+
+	// opsInFlight counts operations that run on the backend in another goroutine, so
+	// that closing the connection under one is known to abandon its backend.
+	opsInFlight atomic.Int32
 }
 
 // NewConn creates a new regular connection wrapping the given client connection.
@@ -89,6 +95,10 @@ func (c *Conn) IsClosed() bool {
 
 // Close closes the underlying connection.
 func (c *Conn) Close() error {
+	if c.opsInFlight.Load() > 0 {
+		// Closing the socket does not stop a statement that is already running.
+		c.Abandon("closed with an operation in flight")
+	}
 	// Clean up state.
 	if state := c.State(); state != nil {
 		state.Close()
@@ -438,7 +448,23 @@ func (c *Conn) Kill(ctx context.Context) error {
 		return errors.New("cannot kill connection: admin pool not configured")
 	}
 	_, err := c.adminPool.TerminateBackend(ctx, c.ProcessID())
+	if err != nil {
+		// Not known to be gone.
+		c.Abandon("a kill that failed")
+	}
 	return err
+}
+
+// Abandon records this connection's backend as one the pooler is giving up on while
+// something may still be running on it: a fence looks for it on the server before it
+// is acknowledged (see admin.Abandoned). Call it before the socket is closed or the
+// session replaced. It costs one append and is safe on a connection with no admin
+// pool, which records nothing.
+func (c *Conn) Abandon(reason string) {
+	if c.adminPool != nil {
+		slog.Debug("recording an abandoned backend", "pid", c.ProcessID(), "reason", reason)
+		c.adminPool.RecordAbandoned(c.ProcessID())
+	}
 }
 
 // --- Underlying connection access ---
@@ -457,6 +483,9 @@ func (c *Conn) RawConn() *client.Conn {
 // session settings are re-applied. Prepared statements are cleared since
 // they don't survive a PostgreSQL session reset.
 func (c *Conn) Reconnect(ctx context.Context) error {
+	// The old session is replaced, not stopped: the statement that failed on it may
+	// still be running on its backend.
+	c.Abandon("session replaced after a connection error")
 	// Save settings before reconnecting. The PostgreSQL session will be
 	// brand new, so we need to re-apply them after startup.
 	settings := c.State().GetSettings()
@@ -557,6 +586,7 @@ func (c *Conn) QueryStreamingWithRetry(ctx context.Context, sql string, callback
 	// diagnostic (with the reconnect failure as context) — the client caused
 	// the statement error and must see it, not a connection error.
 	if reconnectErr := c.Reconnect(ctx); reconnectErr != nil {
+		c.Abandon("reconnect failed after a connection error")
 		c.conn.Close()
 		return mterrors.Wrapf(err, "backend replacement after temp_buffers contamination failed: %v", reconnectErr)
 	}
@@ -754,11 +784,13 @@ func retryOnConnectionError[T any](c *Conn, ctx context.Context, op func() (T, e
 			return val, nil
 		case !mterrors.IsConnectionError(err):
 			if mterrors.IsConnectionDead(err) {
+				c.Abandon("connection dead")
 				c.conn.Close()
 			}
 			var zero T
 			return zero, err
 		case attempt == constants.MaxConnPoolRetryAttempts:
+			c.Abandon("connection error budget exhausted")
 			c.conn.Close()
 			var zero T
 			return zero, err
@@ -807,6 +839,9 @@ func (c *Conn) handleContextCancellation() {
 	defer cancel()
 	ok, err := c.adminPool.CancelBackend(cancelCtx, c.ProcessID())
 	if err != nil || !ok {
+		// The cancel did not reach the statement, and the socket is closed on it:
+		// it may still be running.
+		c.Abandon("cancel did not reach the statement")
 		c.conn.ForceClose()
 	}
 }
@@ -834,6 +869,9 @@ func drainOpAfterCancel[T any](c *Conn, ch <-chan T) T {
 	case res := <-ch:
 		return res
 	case <-timer.C:
+		// The cancel was delivered and did not take effect in time, and the socket
+		// is closed on the statement: it may still be running.
+		c.Abandon("cancel did not take effect in time")
 		c.conn.ForceClose()
 		return <-ch
 	}
@@ -849,8 +887,12 @@ func execOnce[T any](c *Conn, ctx context.Context, op func() (T, error)) (T, err
 	}
 
 	ch := make(chan result, 1)
+	c.opsInFlight.Add(1)
 	go func() {
 		val, err := op()
+		// Counted out before the result is published, so that whoever reads the
+		// result and closes the connection does not see an operation still in flight.
+		c.opsInFlight.Add(-1)
 		ch <- result{val: val, err: err}
 	}()
 
@@ -883,8 +925,12 @@ func execWithContextCancel[T any](c *Conn, ctx context.Context, op func() (T, er
 	}
 
 	ch := make(chan result, 1)
+	c.opsInFlight.Add(1)
 	go func() {
 		val, err := op()
+		// Counted out before the result is published, so that whoever reads the
+		// result and closes the connection does not see an operation still in flight.
+		c.opsInFlight.Add(-1)
 		ch <- result{val: val, err: err}
 	}()
 
@@ -898,6 +944,7 @@ func execWithContextCancel[T any](c *Conn, ctx context.Context, op func() (T, er
 		res := drainOpAfterCancel(c, ch)
 		// If the operation killed the session, close the connection.
 		if mterrors.IsConnectionDead(res.err) {
+			c.Abandon("connection dead after the operation")
 			c.conn.Close()
 		}
 		var zero T
@@ -905,6 +952,7 @@ func execWithContextCancel[T any](c *Conn, ctx context.Context, op func() (T, er
 	case res := <-ch:
 		// Operation completed - discard dead sessions.
 		if mterrors.IsConnectionDead(res.err) {
+			c.Abandon("connection dead after the operation (cancelled)")
 			c.conn.Close()
 		}
 		return res.val, res.err
