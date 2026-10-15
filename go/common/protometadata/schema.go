@@ -45,8 +45,25 @@ var Statements = []string{
     CHECK (admission_state IN ('UNFENCED','FENCING','FENCED','UNFENCING')),
   request_id TEXT NOT NULL DEFAULT '',
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  request_history TEXT[] NOT NULL DEFAULT '{}',
   PRIMARY KEY (database, tablegroup)
 )`,
+	// A table created before request_history existed gets it added. ADD COLUMN
+	// IF NOT EXISTS would take an ACCESS EXCLUSIVE lock even when the column is
+	// there, so the column is looked up first and the lock is taken only when the
+	// table really needs altering. The ALTER is still IF NOT EXISTS: two poolers
+	// that start together can both see the column missing, and the second ALTER
+	// must find it already added rather than fail.
+	`DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'multigres' AND table_name = 'proto_tablegroup_serving' AND column_name = 'request_history'
+  ) THEN
+    ALTER TABLE multigres.proto_tablegroup_serving ADD COLUMN IF NOT EXISTS request_history TEXT[] NOT NULL DEFAULT '{}';
+  END IF;
+END
+$$`,
 	// Whole-database application tablegroup pointer that gateways poll.
 	`CREATE TABLE IF NOT EXISTS multigres.proto_routing (
   database TEXT PRIMARY KEY,

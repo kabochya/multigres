@@ -62,3 +62,31 @@ func (s *poolerService) RefreshAdmission(ctx context.Context, req *multipoolerpb
 	}
 	return resp, nil
 }
+
+// UpdatePoolerAdmission fences or unfences a tablegroup. Only the default
+// primary serves it.
+func (s *poolerService) UpdatePoolerAdmission(ctx context.Context, req *multipoolerpb.UpdatePoolerAdmissionRequest) (*multipoolerpb.UpdatePoolerAdmissionResponse, error) {
+	p, err := s.pooler.MetadataProvider()
+	if err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
+	resp, err := p.UpdatePoolerAdmission(ctx, req)
+	if err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
+	return resp, nil
+}
+
+// UpdateMigrationRouting moves application traffic between two fenced
+// tablegroups. Only the default primary serves it.
+func (s *poolerService) UpdateMigrationRouting(ctx context.Context, req *multipoolerpb.UpdateMigrationRoutingRequest) (*multipoolerpb.UpdateMigrationRoutingResponse, error) {
+	p, err := s.pooler.MetadataProvider()
+	if err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
+	resp, err := p.UpdateMigrationRouting(ctx, req)
+	if err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
+	return resp, nil
+}

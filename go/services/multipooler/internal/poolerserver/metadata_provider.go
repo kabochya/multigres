@@ -30,6 +30,8 @@ import (
 type MetadataProvider interface {
 	GetBackingConnection(ctx context.Context, req *multipoolerservicepb.GetBackingConnectionRequest) (*multipoolerservicepb.GetBackingConnectionResponse, error)
 	GetServingState(ctx context.Context, req *multipoolerservicepb.GetServingStateRequest) (*multipoolerservicepb.GetServingStateResponse, error)
+	UpdatePoolerAdmission(ctx context.Context, req *multipoolerservicepb.UpdatePoolerAdmissionRequest) (*multipoolerservicepb.UpdatePoolerAdmissionResponse, error)
+	UpdateMigrationRouting(ctx context.Context, req *multipoolerservicepb.UpdateMigrationRoutingRequest) (*multipoolerservicepb.UpdateMigrationRoutingResponse, error)
 }
 
 // AdmissionProvider re-reads and applies a pooler's application admission. Like
