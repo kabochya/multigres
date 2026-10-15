@@ -46,6 +46,9 @@ func RegisterConsensusServices(senv *servenv.ServEnv, grpc *servenv.GrpcServer) 
 
 // Promote sends a role assignment to this pooler: promote to primary or point replication at the new primary.
 func (s *consensusService) Promote(ctx context.Context, req *consensusdata.PromoteRequest) (*consensusdata.PromoteResponse, error) {
+	if err := s.manager.RejectIfUnmanaged("Promote"); err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
 	resp, err := s.manager.Promote(ctx, req)
 	if err != nil {
 		return nil, mterrors.ToGRPC(err)
@@ -55,6 +58,9 @@ func (s *consensusService) Promote(ctx context.Context, req *consensusdata.Promo
 
 // Recruit stops this pooler's replication participation and records a TermRevocation.
 func (s *consensusService) Recruit(ctx context.Context, req *consensusdata.RecruitRequest) (*consensusdata.RecruitResponse, error) {
+	if err := s.manager.RejectIfUnmanaged("Recruit"); err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
 	resp, err := s.manager.Recruit(ctx, req)
 	if err != nil {
 		return nil, mterrors.ToGRPC(err)
@@ -64,6 +70,9 @@ func (s *consensusService) Recruit(ctx context.Context, req *consensusdata.Recru
 
 // UpdateConsensusRule applies a cohort-membership change on the primary.
 func (s *consensusService) UpdateConsensusRule(ctx context.Context, req *multipoolermanagerdatapb.UpdateConsensusRuleRequest) (*multipoolermanagerdatapb.UpdateConsensusRuleResponse, error) {
+	if err := s.manager.RejectIfUnmanaged("UpdateConsensusRule"); err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
 	pos, err := s.manager.UpdateConsensusRule(ctx,
 		req.Operation,
 		req.StandbyIds,
@@ -78,6 +87,9 @@ func (s *consensusService) UpdateConsensusRule(ctx context.Context, req *multipo
 // SetPrimary updates this pooler's replication settings to point at the supplied
 // primary, gated on a position comparison. See manager.SetPrimary for details.
 func (s *consensusService) SetPrimary(ctx context.Context, req *consensusdata.SetPrimaryRequest) (*consensusdata.SetPrimaryResponse, error) {
+	if err := s.manager.RejectIfUnmanaged("SetPrimary"); err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
 	resp, err := s.manager.SetPrimary(ctx, req)
 	if err != nil {
 		return nil, mterrors.ToGRPC(err)

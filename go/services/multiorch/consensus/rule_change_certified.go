@@ -150,7 +150,7 @@ func (c *Coordinator) refreshShardConsensusStatuses(
 			return nil, mterrors.Wrapf(err, "failed to list poolers in cell %s during shard status refresh", cell)
 		}
 		for _, info := range infos {
-			if info.Multipooler != nil {
+			if info.Multipooler != nil && isManagedPooler(info.Multipooler) {
 				poolers = append(poolers, info.Multipooler)
 			}
 		}

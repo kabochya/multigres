@@ -729,3 +729,22 @@ func (c *Config) NewManager(logger *slog.Logger) *Manager {
 	mgr.setLifecycle(lifecycleClosed) // Manager is closed until Open() is called
 	return mgr
 }
+
+// SetBackingCredentials installs the credentials and TLS settings of an
+// unmanaged pooler's external backend. It is a startup-only hook: the password
+// stays in the existing in-memory cache and never becomes a flag or config
+// value. An empty mode, root cert or negotiation keeps the configured default.
+func (c *Config) SetBackingCredentials(user, password, sslMode, sslRootCert, sslNegotiation string) {
+	c.pgUser.Set(user)
+	c.pgPasswordCached = password
+	c.pgPasswordSource = pwSourceFile
+	if sslMode != "" {
+		c.pgSSLMode.Set(sslMode)
+	}
+	if sslRootCert != "" {
+		c.pgSSLRootCert.Set(sslRootCert)
+	}
+	if sslNegotiation != "" {
+		c.pgSSLNegotiation.Set(sslNegotiation)
+	}
+}
