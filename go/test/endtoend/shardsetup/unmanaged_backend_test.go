@@ -153,17 +153,18 @@ type unmanagedPooler struct {
 	exited   <-chan struct{}
 }
 
-func startUnmanagedPooler(t *testing.T, s *ShardSetup, name, database, connection string) *unmanagedPooler {
+func startUnmanagedPooler(t *testing.T, s *ShardSetup, name, database, connection string, extraArgs ...string) *unmanagedPooler {
 	t.Helper()
 	grpcPort := utils.GetFreePort(t)
-	stop, exited := startTestProcessEnv(t, nil, "multipooler",
-		"--backing-connection="+connection,
-		"--database="+database, "--table-group=migrateTG", "--shard=0-inf",
-		"--cell="+s.CellName, "--service-id="+name, "--hostname=localhost",
-		"--grpc-port="+strconv.Itoa(grpcPort), "--http-port="+strconv.Itoa(utils.GetFreePort(t)),
+	args := []string{
+		"--backing-connection=" + connection,
+		"--database=" + database, "--table-group=migrateTG", "--shard=0-inf",
+		"--cell=" + s.CellName, "--service-id=" + name, "--hostname=localhost",
+		"--grpc-port=" + strconv.Itoa(grpcPort), "--http-port=" + strconv.Itoa(utils.GetFreePort(t)),
 		"--service-map=grpc-pooler,grpc-poolermanager,grpc-consensus",
-		"--topo-global-server-addresses="+s.EtcdClientAddr, "--topo-global-root=/multigres/global",
-	)
+		"--topo-global-server-addresses=" + s.EtcdClientAddr, "--topo-global-root=/multigres/global",
+	}
+	stop, exited := startTestProcessEnv(t, nil, "multipooler", append(args, extraArgs...)...)
 	return &unmanagedPooler{name: name, grpcPort: grpcPort, stop: stop, exited: exited}
 }
 
@@ -197,6 +198,7 @@ func TestUnmanagedPoolerServesExternalPostgres(t *testing.T) {
 	s := getSharedSetup(t)
 	extPort := startExternalPostgres(t)
 	seedBackingConnection(t, s, "serves-queries", externalDSN(extPort), externalSystemIdentifier(t, extPort))
+	setServingRow(t, s, "migrateTG", "serves-queries", "UNFENCED", "r0")
 
 	const name = "unmanaged-serves"
 	p := startUnmanagedPooler(t, s, name, "postgres", "serves-queries")
@@ -256,6 +258,7 @@ func TestUnmanagedPoolerRefusesIdentityMismatch(t *testing.T) {
 	s := getSharedSetup(t)
 	extPort := startExternalPostgres(t)
 	seedBackingConnection(t, s, "identifier-mismatch", externalDSN(extPort), "1234567890")
+	setServingRow(t, s, "migrateTG", "identifier-mismatch", "UNFENCED", "r0")
 
 	p := startUnmanagedPooler(t, s, "unmanaged-mismatch", "postgres", "identifier-mismatch")
 
