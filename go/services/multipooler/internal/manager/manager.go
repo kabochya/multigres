@@ -119,10 +119,14 @@ type MultipoolerManager struct {
 	state        ManagerState
 	stateError   error
 	consensusMgr *consensus.ConsensusManager
-	topoLoaded   bool
-	ctx          context.Context
-	cancel       context.CancelFunc
-	loadTimeout  time.Duration
+
+	// metadataSchema tracks whether the prototype metadata tables are known to
+	// exist; PROTOTYPE STUB (see proto_metadata.go).
+	metadataSchema metadataSchemaReady
+	topoLoaded     bool
+	ctx            context.Context
+	cancel         context.CancelFunc
+	loadTimeout    time.Duration
 
 	// shutdownCtx is cancelled at the end of GracefulShutdown to signal
 	// long-lived subscribers (currently the health-stream gRPC handlers via
@@ -565,6 +569,12 @@ func (pm *MultipoolerManager) adminExecArgs(ctx context.Context, sql string, arg
 // ctx must carry an action lock. The state transition publishes through
 // pm.record.Mutate, which asserts the lock.
 func (pm *MultipoolerManager) Open(ctx context.Context) {
+	// An unmanaged pooler starts closed. Its external-backend monitor opens it
+	// once the backend is reachable, writable and the intended source.
+	if pm.IsUnmanaged() {
+		pm.openLocked(ctx, clustermetadatapb.PoolerServingStatus_DISABLED)
+		return
+	}
 	pm.openLocked(ctx, clustermetadatapb.PoolerServingStatus_SERVING)
 }
 
@@ -605,8 +615,10 @@ func (pm *MultipoolerManager) openLocked(ctx context.Context, targetServingStatu
 	pm.logger.InfoContext(pm.ctx, "MultipoolerManager opened database connection") //nolint:sloglint // message intentionally starts with an operation name or proper noun
 
 	// The postgres monitor repairs, restarts and rewinds a managed postgres. An
-	// external endpoint is never repaired by us.
-	if !pm.IsUnmanaged() {
+	// external endpoint is only observed, never repaired by us.
+	if pm.IsUnmanaged() {
+		pm.startExternalMonitorLocked()
+	} else {
 		pm.startPostgresMonitorPollerLocked()
 	}
 

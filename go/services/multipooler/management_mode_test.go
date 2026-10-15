@@ -60,23 +60,38 @@ func TestBackingConnectionValidate(t *testing.T) {
 	}
 }
 
-func TestResolveBackingConnectionStub(t *testing.T) {
-	t.Setenv(stubBackingConnectionEnv, "postgres://alice:s3cret@db.example.com:6543/app?sslmode=verify-full&sslrootcert=/ca.pem&sslnegotiation=direct")
-	got, err := resolveBackingConnectionStub("src")
+func TestParseBackingURL(t *testing.T) {
+	got, err := parseBackingURL("src", "postgres://alice:s3cret@db.example.com:6543/app?sslmode=verify-full&sslrootcert=/ca.pem&sslnegotiation=direct")
 	require.NoError(t, err)
 	require.Equal(t, &backingConnection{
 		Name: "src", Host: "db.example.com", Port: 6543, Database: "app", User: "alice", Password: "s3cret",
 		SSLMode: "verify-full", SSLRootCert: "/ca.pem", SSLNegotiation: "direct",
 	}, got)
 
-	t.Setenv(stubBackingConnectionEnv, "postgres://alice@db.example.com/app")
-	got, err = resolveBackingConnectionStub("src")
+	got, err = parseBackingURL("src", "postgres://alice@db.example.com/app")
 	require.NoError(t, err)
 	require.Equal(t, 5432, got.Port)
 
 	for _, bad := range []string{"", "mysql://u@h/db", "postgres://u@h:notaport/db", "postgres://h/db", "postgres://u@h"} {
-		t.Setenv(stubBackingConnectionEnv, bad)
-		_, err := resolveBackingConnectionStub("src")
+		_, err := parseBackingURL("src", bad)
+		require.Error(t, err, bad)
+	}
+}
+
+// TestParseBackingURLRequiresASingleServer: fence safety looks at the backends of
+// the server the pooler's admin connection reaches, so a URL that could send the
+// admin connection and the application connections to different servers is
+// refused.
+func TestParseBackingURLRequiresASingleServer(t *testing.T) {
+	for _, bad := range []string{
+		"postgres://u@h1:5432,h2:5432/db",
+		"postgres://u@h1/db?host=h2",
+		"postgres://u@h1/db?hostaddr=10.0.0.1",
+		"postgres://u@h1/db?port=5433",
+		"postgres://u@h1/db?target_session_attrs=read-write",
+		"postgres://u@h1/db?load_balance_hosts=random",
+	} {
+		_, err := parseBackingURL("src", bad)
 		require.Error(t, err, bad)
 	}
 }

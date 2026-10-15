@@ -18,33 +18,38 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"strconv"
+	"strings"
 )
 
-// PROTOTYPE STUB: resolving --backing-connection from the environment.
+// PROTOTYPE STUB: backing connections are stored as postgres:// URLs.
 //
-// The real resolution (fetch the named row from the default primary over gRPC)
-// lands with the metadata stub. Until then a name resolves to the single URL in
-// this environment variable, so an unmanaged pooler can be started against a
-// plain external PostgreSQL. Delete this file when the RPC-backed resolver
-// exists.
-const stubBackingConnectionEnv = "MULTIPOOLER_PROTOTYPE_BACKING_URL"
+// The prototype connection table keeps one plaintext URL per connection. Delete
+// this file when connections move to the encrypted catalog, which stores their
+// fields separately.
 
-// resolveBackingConnectionStub parses a postgres:// URL from the environment:
+// parseBackingURL parses a stored connection URL:
 //
 //	postgres://user:password@host:port/database?sslmode=...&sslrootcert=...&sslnegotiation=...
-func resolveBackingConnectionStub(name string) (*backingConnection, error) {
-	raw, ok := os.LookupEnv(stubBackingConnectionEnv)
-	if !ok || raw == "" {
-		return nil, fmt.Errorf("backing connection %q: prototype resolver requires %s", name, stubBackingConnectionEnv)
-	}
+func parseBackingURL(name, raw string) (*backingConnection, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return nil, errors.New("backing connection URL is not valid")
 	}
 	if u.Scheme != "postgres" && u.Scheme != "postgresql" {
 		return nil, errors.New("backing connection URL must use the postgres scheme")
+	}
+	// The pooler's admin connection must reach the same server as its application
+	// connections: fence safety looks at the backends of that one server. A list of
+	// hosts, a host given as a parameter, or a target_session_attrs choice could
+	// send the two to different servers.
+	if strings.Contains(u.Host, ",") {
+		return nil, errors.New("backing connection URL names more than one host; a single server is required")
+	}
+	for _, param := range []string{"host", "hostaddr", "port", "target_session_attrs", "load_balance_hosts"} {
+		if u.Query().Has(param) {
+			return nil, fmt.Errorf("backing connection URL sets %q as a parameter; a single server given in the URL authority is required", param)
+		}
 	}
 	port := 5432
 	if p := u.Port(); p != "" {

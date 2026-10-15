@@ -93,4 +93,7 @@ type ExternalBackend struct {
 	Host     string
 	Port     int
 	Database string
+	// ExpectedSystemIdentifier is the pg_control_system() identifier the
+	// endpoint must report. The monitor withdraws readiness on any other value.
+	ExpectedSystemIdentifier string
 }
