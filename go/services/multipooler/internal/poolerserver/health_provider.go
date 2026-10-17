@@ -45,6 +45,10 @@ type HealthState struct {
 	// ReplicationLagNs is the current replication lag in nanoseconds,
 	// measured via heartbeat timestamps. Zero on the primary or when unknown.
 	ReplicationLagNs int64
+
+	// BackendReady is true while an unmanaged pooler's external backend is
+	// reachable, writable and the intended source. False on managed poolers.
+	BackendReady bool
 }
 
 // HealthProvider provides health information for the pooler.

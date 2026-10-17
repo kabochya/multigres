@@ -30,6 +30,7 @@ import (
 
 	"github.com/multigres/multigres/go/common/backup"
 	"github.com/multigres/multigres/go/common/constants"
+	"github.com/multigres/multigres/go/common/rpcclient"
 	"github.com/multigres/multigres/go/common/servenv"
 	"github.com/multigres/multigres/go/common/topoclient"
 	"github.com/multigres/multigres/go/services/multipooler/grpcmanagerservice"
@@ -140,8 +141,18 @@ type Multipooler struct {
 	telemetry  *telemetry.Telemetry
 	// connPoolConfig holds connection pool configuration (manager created inside MultipoolerManager)
 	connPoolConfig *connpoolmanager.Config
-	// connections is where an unmanaged pooler gets its backing connection from.
+	// connections, when set, replaces the default source of an unmanaged pooler's backing
+	// connection, which is the default primary of its database.
 	connections connectionSource
+	// defaultPrimaryConn configures the gRPC transport an unmanaged pooler uses
+	// to reach the default primary pooler (the existing multipooler gRPC TLS
+	// flags). Nil in single-process mode, which never runs unmanaged.
+	defaultPrimaryConn *rpcclient.ConnConfig
+
+	// preparing is the topology record an unmanaged pooler registered while it
+	// bootstrapped. If startup fails afterwards, Init marks it stopped so it does
+	// not linger as a DISABLED pooler.
+	preparing *clustermetadatapb.Multipooler
 
 	ts            topoclient.Store
 	poolerManager *manager.MultipoolerManager
@@ -183,8 +194,7 @@ func NewMultipooler(telemetry *telemetry.Telemetry, opts ...Option) *Multipooler
 	}
 	reg := viperutil.NewRegistry()
 	mp := &Multipooler{
-		reg:         reg,
-		connections: unconfiguredSource{},
+		reg: reg,
 		pgctldAddr: viperutil.Configure(reg, "pgctld-addr", viperutil.Options[string]{
 			Default:  "localhost:15200",
 			FlagName: "pgctld-addr",
@@ -400,6 +410,8 @@ func (mp *Multipooler) RegisterFlags(flags *pflag.FlagSet) {
 // registerProcessFlags registers the flags of the process-level pieces the
 // multipooler owns when it runs as its own process.
 func (mp *Multipooler) registerProcessFlags(flags *pflag.FlagSet) {
+	mp.defaultPrimaryConn = rpcclient.NewConnConfig(mp.reg)
+	mp.defaultPrimaryConn.RegisterFlags(flags)
 	mp.grpcServer.RegisterFlags(flags)
 	mp.senv.RegisterFlags(flags)
 	mp.topoConfig.RegisterFlags(flags)
@@ -482,6 +494,24 @@ func (mp *Multipooler) resolveManagementMode() (clustermetadatapb.PoolerManageme
 // or if some connections fail, it launches goroutines that retry
 // until successful.
 func (mp *Multipooler) Init(startCtx context.Context) error {
+	err := mp.initMultipooler(startCtx)
+	if err != nil && mp.preparing != nil {
+		mp.markPreparingStopped(startCtx)
+	}
+	return err
+}
+
+// markPreparingStopped records that an unmanaged pooler that registered while
+// bootstrapping failed later in startup and will exit.
+func (mp *Multipooler) markPreparingStopped(ctx context.Context) {
+	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := manager.MarkPreparingFailed(markCtx, mp.ts, mp.preparing); err != nil {
+		mp.senv.GetLogger().WarnContext(ctx, "could not mark the failed pooler as stopped", "error", err)
+	}
+}
+
+func (mp *Multipooler) initMultipooler(startCtx context.Context) error {
 	startCtx, span := telemetry.Tracer().Start(startCtx, "Init")
 	defer span.End()
 
@@ -531,10 +561,41 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 		cipherKey backup.CipherKeys
 	)
 	if unmanaged {
-		backing, err = fetchBackingConnection(startCtx, mp.connections, mp.backingConnection.Get())
-		if err != nil {
-			return fmt.Errorf("resolve backing connection: %w", err)
+		if mp.tableGroup.Get() == "" || mp.shard.Get() == "" {
+			return errors.New("table group and shard are required")
 		}
+		// Refused before anything is registered: an unmanaged pooler fronts an
+		// external database, never the default cohort that holds cluster metadata,
+		// and registering first would leave a record behind for a pooler that exits.
+		if mp.tableGroup.Get() == constants.DefaultTableGroup {
+			return errors.New("an unmanaged pooler cannot serve the default tablegroup")
+		}
+		// Register as DISABLED/UNMANAGED, find the default primary and fetch
+		// the named connection before anything can serve.
+		transport, err := mp.defaultPrimaryConn.TransportCredentials(logger)
+		if err != nil {
+			return fmt.Errorf("default primary transport: %w", err)
+		}
+		initial := topoclient.NewMultipooler(serviceID, cell, mp.senv.GetHostname())
+		initial.ManagementMode = mode
+		initial.ShardKey = &clustermetadatapb.ShardKey{
+			Database:   mp.database.Get(),
+			TableGroup: mp.tableGroup.Get(),
+			Shard:      mp.shard.Get(),
+		}
+		initial.PortMap["grpc"] = int32(mp.grpcServer.Port())
+		initial.PortMap["http"] = int32(mp.senv.GetHTTPPort())
+		initial.ServingStatus = clustermetadatapb.PoolerServingStatus_DISABLED
+		source := mp.connections
+		if source == nil {
+			source = &defaultPrimarySource{ts: mp.ts, database: mp.database.Get(), transport: transport}
+		}
+		backing, err = bootstrapBackingConnection(startCtx, mp.ts, initial, mp.backingConnection.Get(), source, logger)
+		if err != nil {
+			return err
+		}
+		// From here on a startup failure must not leave the registration behind.
+		mp.preparing = initial
 		mp.connPoolConfig.SetBackingCredentials(backing.User, backing.Password, backing.SSLMode, backing.SSLRootCert, backing.SSLNegotiation)
 	} else {
 		if err := mp.connPoolConfig.ResolvePgPassword(); err != nil {
@@ -621,7 +682,12 @@ func (mp *Multipooler) Init(startCtx context.Context) error {
 		// No local data or pooler directory exists for an external postgres.
 		multipooler.PoolerDir = ""
 		multipooler.PgDataDir = ""
-		externalBackend = &manager.ExternalBackend{Host: backing.Host, Port: backing.Port, Database: backing.Database}
+		externalBackend = &manager.ExternalBackend{
+			Host:                     backing.Host,
+			Port:                     backing.Port,
+			Database:                 backing.Database,
+			ExpectedSystemIdentifier: backing.ExpectedSystemIdentifier,
+		}
 	}
 
 	minAttempts := mp.postgresUnrecoverableMinAttempts.Get()
@@ -737,8 +803,37 @@ func (mp *Multipooler) ServiceIdentity() servenv.ServiceIdentity {
 	}
 }
 
+// RunDefault runs the server until it is stopped. When the server fails to start,
+// Run returns without firing the close hooks, so what they would have done for
+// the topology record is done here.
 func (mp *Multipooler) RunDefault() error {
-	return mp.senv.RunDefault(mp.grpcServer)
+	err := mp.senv.RunDefault(mp.grpcServer)
+	if err != nil {
+		mp.abandonStartup()
+	}
+	return err
+}
+
+// abandonStartup closes the topology record of a pooler whose server failed to
+// start. A failure after Init but before the manager's registration has landed
+// would otherwise leave the DISABLED record that bootstrapping wrote, which
+// membership snapshots of the tablegroup would wait on for a pooler that is gone.
+func (mp *Multipooler) abandonStartup() {
+	// The server never started, so there is no context to derive this from.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second) //nolint:gocritic // entry point after a failed start
+	defer cancel()
+	if mp.poolerManager != nil {
+		mp.poolerManager.StopTopoRegistration(ctx)
+	}
+	if mp.preparing == nil {
+		return
+	}
+	// The manager's shutdown write, if it registered, already says SHUTDOWN.
+	if info, err := mp.ts.GetMultipooler(ctx, mp.preparing.GetId()); err == nil &&
+		info.GetLifecycleStatus().GetStatus() == clustermetadatapb.PoolerLifecycleStatus_LIFECYCLE_SHUTDOWN {
+		return
+	}
+	mp.markPreparingStopped(ctx)
 }
 
 func (mp *Multipooler) Shutdown(ctx context.Context) {

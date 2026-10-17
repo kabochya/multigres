@@ -108,6 +108,14 @@ service MultipoolerService {
   // session. Subscription updates and notification delivery share one stream so
   // notifications across channels preserve PostgreSQL delivery order.
   rpc NotificationStream(stream NotificationStreamRequest) returns (stream NotificationStreamResponse);
+
+  // GetBackingConnection returns the named backing connection. It is served only
+  // by the default primary pooler, which owns the connection metadata; unmanaged
+  // poolers call it at bootstrap to learn the external endpoint they front. The
+  // reply carries the credential, so the call should travel over TLS; it is
+  // protected only by the transport's authentication, and there is no
+  // per-call authorization.
+  rpc GetBackingConnection(GetBackingConnectionRequest) returns (GetBackingConnectionResponse);
 }
 
 // ExecuteQueryRequest represents a request to execute a SQL query
@@ -646,6 +654,60 @@ message StreamPoolerHealthResponse {
   // replication_lag_ns is the current replication lag in nanoseconds,
   // measured via heartbeat timestamps. Zero on a leader or when unknown.
   int64 replication_lag_ns = 6;
+
+  // backend_ready is true while an unmanaged pooler's external backend is
+  // reachable, writable, and matches the identity of its backing connection.
+  // It is false while unverified, on an identity mismatch, and on any managed
+  // pooler (whose readiness is reported through serving_status and
+  // routing_state).
+  bool backend_ready = 7;
+}
+
+// BackingConnection is the configuration of an external PostgreSQL. It names one
+// server: the pooler's admin and application connections must reach the same one.
+message BackingConnection {
+  // name identifies the connection within a database.
+  string name = 1;
+
+  // host is the hostname or IP address of the server. A host list is refused.
+  string host = 2;
+
+  // port is the TCP port of the server.
+  int32 port = 3;
+
+  // database is the database the pooler connects to.
+  string database = 4;
+
+  // user is the role the pooler connects as.
+  string user = 5;
+
+  // password is the credential of user. It is never logged.
+  string password = 6;
+
+  // ssl_mode, ssl_root_cert and ssl_negotiation are the TLS settings of the
+  // connection; empty keeps the pooler's configured default.
+  string ssl_mode = 7;
+  string ssl_root_cert = 8;
+  string ssl_negotiation = 9;
+
+  // expected_system_identifier is the pg_control_system() system identifier the
+  // endpoint must report. An endpoint that reports another identifier is not
+  // the intended source.
+  string expected_system_identifier = 10;
+}
+
+// GetBackingConnectionRequest asks the default primary for a named connection.
+message GetBackingConnectionRequest {
+  // database is the database the connection belongs to.
+  string database = 1;
+
+  // connection_name is the name of the requested connection.
+  string connection_name = 2;
+}
+
+// GetBackingConnectionResponse carries the requested connection.
+message GetBackingConnectionResponse {
+  BackingConnection connection = 1;
 }
 
 // NotificationStreamRequest updates the subscribed channels for one gateway
