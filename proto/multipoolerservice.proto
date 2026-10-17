@@ -22,6 +22,7 @@ package multipoolerservice;
 
 import "clustermetadata.proto";
 import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
 import "google/rpc/status.proto";
 import "mtrpc.proto";
 import "query.proto";
@@ -116,6 +117,173 @@ service MultipoolerService {
   // protected only by the transport's authentication, and there is no
   // per-call authorization.
   rpc GetBackingConnection(GetBackingConnectionRequest) returns (GetBackingConnectionResponse);
+
+  // ---- Serving control (migration cutover) ----------------------------------
+  //
+  // The RPCs below are the control-plane interface used by a migration controller
+  // to move application traffic between tablegroups. Each is served only by the
+  // leader of the control home (the default tablegroup), which owns the routing
+  // and admission metadata; every other pooler answers FAILED_PRECONDITION and the
+  // caller must rediscover it from topology. The protocol is generic over the
+  // tablegroup: a tablegroup is named in each call, and nothing here is specific to
+  // the control home itself.
+  //
+  // The RPCs are primitives that are safe by construction and report facts; the
+  // migration controller owns policy. Policy is anything whose misuse can only
+  // cost availability: how long to wait, whether to retry or give up, when to
+  // reopen, what to catch the destination up to, which preflight checks to run.
+  // Anything whose misuse could cost correctness stays here.
+  //
+  // Admission and routing are separate. A tablegroup's admission row is a state,
+  // UNFENCED, FENCING or FENCED, and a version that goes up by one every time the
+  // tablegroup is fenced or unfenced: it serves application work only while it is
+  // UNFENCED. FENCING means a fence was decided and its members are not all
+  // confirmed clean; FENCED means every member answered clean. The routing pointer
+  // says which tablegroup gateways send application queries to. The only rule that
+  // links them is that a flip requires both of its tablegroups to be FENCED, a
+  // completed fence, so a migrator that mistakes an incomplete fence for a complete
+  // one cannot move the traffic. A cutover is: fence the source, fence the
+  // destination, read the source's WAL position (pg_current_wal_insert_lsn() on the
+  // source, once it is fenced) and catch the destination up to it, flip, unfence the
+  // destination. A rollback is the same with the sides exchanged.
+  //
+  // Every change is a compare-and-set on the version the caller read, so a delayed
+  // or replayed call cannot undo what came after it; a caller that is unsure what
+  // happened reads GetServingState and decides. Only the coordinator's own
+  // compare-and-set changes a version; callers pass back what they read.
+  //
+  // Fence and unfence are safe to repeat: each recognizes the exact state its own
+  // success, or a retry of it, leaves, and rejects every other. A tablegroup that
+  // has never been fenced has no row and is UNFENCED at version zero.
+  //
+  // Nothing here undoes a fence by itself: a fence that cannot complete stays
+  // FENCING, and the controller decides whether to retry it or to unfence. The
+  // controller's policy on any error from these calls, a timeout or a lost reply
+  // included, is decided relative to the move in progress (the traffic leaves a side
+  // and goes to another): first, a flip whose outcome is unknown (a timeout, a lost
+  // connection) is repeated until it answers definitively, which is safe since a
+  // flip that committed succeeds when asked again; nothing is unfenced before then,
+  // because the state read while a flip is committing could still change. Then read
+  // GetServingState. If the traffic is still on the side it leaves (the move did not
+  // happen), either retry the fence at the version read or unfence the sides this
+  // move fenced at that version, and nothing else: a side that was fenced before,
+  // by an earlier cutover or by someone else, is not this move's to reopen (a
+  // rollback leaves the source fenced by the cutover as it was). If the traffic is on
+  // the side it goes to, unfence that side, which holds the traffic and has to
+  // serve, and leave the side the traffic left fenced, since reopening it would let
+  // a gateway that has not seen the move write there. Retry later with a fresh
+  // expected_version. A controller that is lost, with the coordinator, leaves the
+  // tablegroup FENCING or FENCED for a person to unfence.
+  //
+  // Error contract shared by the RPCs:
+  //   INVALID_ARGUMENT     malformed request.
+  //   FAILED_PRECONDITION  the persisted version or state is not the one the call
+  //                        expects. A definitive answer about the state: read
+  //                        GetServingState and decide; do not retry blindly.
+  //   ABORTED              the call could not complete: for a fence, some member
+  //                        is not clean (see FenceTablegroup), and the row is as
+  //                        the call left it; for a flip, the routing or an
+  //                        admission state changed between its check and its
+  //                        write (it did not commit: definitive).
+  //   UNAVAILABLE          transient. This includes "this pooler is not the
+  //                        default primary" (the control home's leader): rediscover
+  //                        it from topology and retry. It is not a definitive
+  //                        answer, since a call that may have committed through a
+  //                        pooler that has just lost its place must not look
+  //                        definitive.
+  //   UNKNOWN, INTERNAL,   the outcome of a call that writes is uncertain: it may
+  //   DEADLINE_EXCEEDED    or may not have committed (a lost connection after the
+  //                        commit, an uncertain commit). Every call is safe to
+  //                        repeat; a controller repeats it until it gets a
+  //                        definitive answer before it decides anything.
+  //
+  // The calls below are authenticated by the gRPC transport only. Where the
+  // state is persisted is the default primary's business and not part of this
+  // contract; the routing pointer is one per database for now, and the sharding
+  // design's placement mechanism will replace it.
+
+  // GetServingState returns the authoritative routing and admission metadata.
+  // Use it to decide which version to pass, and to reconcile an interrupted
+  // operation, including after the migration controller itself changes leader.
+  // A tablegroup with no row is UNFENCED at version zero. The state tells an
+  // incomplete fence (FENCING) from a completed one (FENCED).
+  rpc GetServingState(GetServingStateRequest) returns (GetServingStateResponse);
+
+  // FenceTablegroup closes application admission on every member of one
+  // tablegroup and returns OK only once all of them are closed and hold no
+  // application work or state.
+  //
+  // expected_version is v. If the tablegroup is UNFENCED at v the coordinator
+  // writes FENCING at v+1 and then asks every member to close. If every member is
+  // clean it writes FENCED at v+1 (the version does not change) and returns OK.
+  // Otherwise it fails and the row stays FENCING at v+1. If the row is already
+  // FENCING at v+1 or at v this is a retry or a resume: every member is asked again
+  // and, once all are clean, FENCED is written; a resume that loses the compare-and-set
+  // to another resume of the same fence reads the row again and succeeds if it is
+  // FENCED at its version. If it is FENCED at v+1 or at v the fence is done and the
+  // call succeeds: the members are asked again on a best-effort basis, and one that
+  // is busy or unreachable now is reported in the response's members, not made an
+  // error, because the fence was committed on a clean answer; nothing is written. Any other
+  // state is rejected; a fence the controller undid is UNFENCED at a later version,
+  // so a delayed retry of it fails. Success is reported only after the row has been
+  // read again and found FENCED at the fence's version.
+  //
+  // A fence never ends a client's state, and never undoes itself. Every member is
+  // asked, none is skipped because another failed, and each answers clean, busy
+  // (with what it still holds) or unreachable (with the error). A fence that is not
+  // yet complete succeeds only if all are clean. Otherwise it fails with ABORTED,
+  // the row stays FENCING,
+  // and the per-member results are the FenceTablegroupResponse in the error's
+  // details. The controller retries the same fence (it resumes and waits again,
+  // which makes a long wait possible) or unfences.
+  //
+  // Members close their gate and wait, for drain_timeout, for their admitted
+  // requests to finish and their reservations to be released; requests on an
+  // existing reservation still pass the closed gate, so an ordinary transaction can
+  // commit inside the deadline. A member that still has a request running, an
+  // application reservation held (a transaction, even an idle one, a temporary
+  // table, a session advisory lock, a COPY, a portal), or a client backend on the
+  // server that is not idle and that none of its connections owns, answers busy.
+  // Control traffic, the LISTEN connection and logical replication streams are not
+  // application work: moving the consumers of a replication stream is the
+  // migration's job, and the pooler ends the streams it has at shutdown. Assumption:
+  // replication connections through the pooler are used only for replication. SQL
+  // sent over a replication connection is not covered by fencing, and callers must
+  // not use replication connections for writes. Other clients of the database must
+  // be stopped before a cutover, or they make the fence busy.
+  //
+  // The fence returns no WAL position. After it succeeds nothing more is written
+  // through the fenced poolers, and the controller reads the position it needs
+  // from the source itself.
+  //
+  // A tablegroup whose durability policy, or the control home's, needs fewer than
+  // two nodes is refused with FAILED_PRECONDITION before anything is written.
+  rpc FenceTablegroup(FenceTablegroupRequest) returns (FenceTablegroupResponse);
+
+  // UnfenceTablegroup sets the row back to UNFENCED and asks the members to reopen
+  // on a best-effort basis, reporting the ones it could not reach: there is no
+  // acknowledgement barrier, since a pooler opens once it reads UNFENCED. The
+  // controller repeats the call with the same version until none is unreached; that
+  // is safe, because a repeat is a success that writes nothing.
+  //
+  // expected_version is the version v of the fence being undone. If the tablegroup
+  // is FENCING or FENCED at v the coordinator writes UNFENCED at v+1. If it is
+  // already UNFENCED at v+1 the unfence was done: the call succeeds, writes nothing,
+  // and asks the members again. Any other state is rejected.
+  rpc UnfenceTablegroup(UnfenceTablegroupRequest) returns (UnfenceTablegroupResponse);
+
+  // FlipRouting moves the database's application traffic from one tablegroup to
+  // another, in one transaction that also checks that both are FENCED, a completed
+  // fence: a tablegroup that is FENCING is refused with FAILED_PRECONDITION. Success
+  // means the routing metadata committed; it does not unfence anything. A retry
+  // after the move, which finds the traffic already on to_tablegroup at the version
+  // after expected_routing_version, succeeds and writes nothing.
+  rpc FlipRouting(FlipRoutingRequest) returns (FlipRoutingResponse);
+
+  // RefreshAdmission is called by the coordinator on each member of a tablegroup.
+  // The pooler re-reads its tablegroup's row from the control home and enforces it.
+  // Migration controllers do not call this.
+  rpc RefreshAdmission(RefreshAdmissionRequest) returns (RefreshAdmissionResponse);
 }
 
 // ExecuteQueryRequest represents a request to execute a SQL query
@@ -732,4 +900,210 @@ message NotificationStreamRequest {
 message NotificationStreamResponse {
   query.PgNotification notification = 1;
   bool ready = 2;
+}
+
+// TablegroupServingState is one tablegroup's persisted serving metadata.
+message TablegroupServingState {
+  // tablegroup is the tablegroup name.
+  string tablegroup = 1;
+
+  // backing_connection names the external connection that backs this
+  // tablegroup. Empty when it is served by its managed cohort.
+  string backing_connection = 2;
+
+  // state is the tablegroup's admission state. The tablegroup serves application
+  // work only while it is UNFENCED; FENCING and FENCED both refuse it, and only
+  // FENCED says that every member was confirmed clean.
+  AdmissionState state = 3;
+
+  // version goes up by one every time the tablegroup is fenced or unfenced; it does
+  // not change when a fence completes. Fence and unfence name the version they
+  // expect.
+  int64 version = 4;
+
+  // updated_at is when the state last changed.
+  google.protobuf.Timestamp updated_at = 5;
+}
+
+// AdmissionState is a tablegroup's admission state.
+enum AdmissionState {
+  ADMISSION_STATE_UNSPECIFIED = 0;
+  // UNFENCED: the tablegroup serves application work. A tablegroup with no row is
+  // UNFENCED at version zero.
+  ADMISSION_STATE_UNFENCED = 1;
+  // FENCING: a fence was decided and its members are not all confirmed clean: it is
+  // in progress, it failed, or its coordinator was lost. Every member that was asked
+  // refuses application work; none is known to hold none. A flip refuses it.
+  ADMISSION_STATE_FENCING = 2;
+  // FENCED: every member answered clean. Only this state is a completed fence, and a
+  // flip requires it on both tablegroups.
+  ADMISSION_STATE_FENCED = 3;
+}
+
+// GetServingStateRequest selects what to read.
+message GetServingStateRequest {
+  // database is the database to read.
+  string database = 1;
+
+  // tablegroups lists the tablegroups whose serving rows to return. Leave empty
+  // to read only the routing fields, which is what gateways poll.
+  repeated string tablegroups = 2;
+}
+
+// GetServingStateResponse is a read from the control home's leader. The rows and
+// the routing pointer are read by separate statements, so it is not a single
+// snapshot; every decision it leads to is re-checked where it is made.
+message GetServingStateResponse {
+  // tablegroups holds one entry per requested tablegroup, in request order.
+  repeated TablegroupServingState tablegroups = 1;
+
+  // app_tablegroup is the tablegroup that currently receives the database's
+  // application traffic.
+  string app_tablegroup = 2;
+
+  // routing_version increases every time app_tablegroup changes. Pollers use it
+  // to detect a change cheaply, and a flip names the version it expects.
+  int64 routing_version = 3;
+}
+
+// MemberFenceResult is one member's answer to a fence.
+message MemberFenceResult {
+  // pooler_id identifies the member.
+  clustermetadata.ID pooler_id = 1;
+
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    // CLEAN: the member's gate is closed and it holds no application work or state.
+    STATUS_CLEAN = 1;
+    // BUSY: the member's gate is closed, and detail says what it still holds.
+    STATUS_BUSY = 2;
+    // UNREACHABLE: the member did not answer, or failed for another reason; detail
+    // is the error.
+    STATUS_UNREACHABLE = 3;
+  }
+  Status status = 2;
+
+  // detail says why a member is not clean.
+  string detail = 3;
+}
+
+// FenceTablegroupRequest asks to fence one tablegroup.
+message FenceTablegroupRequest {
+  // database is the database the tablegroup belongs to.
+  string database = 1;
+
+  // tablegroup is the tablegroup to fence.
+  string tablegroup = 2;
+
+  // expected_version is the version of the row the caller read, v: the tablegroup
+  // is fenced if it is UNFENCED at v, and an already FENCING or FENCED tablegroup
+  // is resumed if it is at v or v+1 (see FenceTablegroup).
+  int64 expected_version = 3;
+
+  // timeout bounds the whole call. Zero selects drain_timeout plus 30 seconds.
+  google.protobuf.Duration timeout = 4;
+
+  // drain_timeout is how long each member waits for its admitted requests to
+  // finish and its reservations to be released. Zero selects 3 seconds. The
+  // controller chooses it per workflow: a short one to keep the pause of an
+  // ordinary cutover small, a long one to wait out a maintenance window. Each
+  // member is given this plus an internal budget for its look at the server and a
+  // margin to answer in.
+  google.protobuf.Duration drain_timeout = 5;
+}
+
+// FenceTablegroupResponse is returned only when every member is clean; when one
+// is not, the same message is the details of the ABORTED error.
+message FenceTablegroupResponse {
+  // state is the persisted row after the call: FENCED when every member is clean
+  // (FENCING in the error's details), at the version the fence has. The caller names
+  // that version to unfence.
+  TablegroupServingState state = 1;
+
+  // members has one result for every member of the tablegroup.
+  repeated MemberFenceResult members = 2;
+}
+
+// UnfenceTablegroupRequest asks to unfence one tablegroup.
+message UnfenceTablegroupRequest {
+  // database is the database the tablegroup belongs to.
+  string database = 1;
+
+  // tablegroup is the tablegroup to unfence.
+  string tablegroup = 2;
+
+  // expected_version is the version of the fence being undone. A delayed unfence
+  // of an old fence can never open a newer one; repeating the same unfence is a
+  // success (see UnfenceTablegroup).
+  int64 expected_version = 3;
+}
+
+// UnfenceTablegroupResponse is returned once the row is unfenced.
+message UnfenceTablegroupResponse {
+  // state is the persisted row after the call.
+  TablegroupServingState state = 1;
+
+  // unreached lists the members that could not be asked to reopen. A member that
+  // was not asked reads its row again only when it restarts or its role changes,
+  // so the controller repeats the unfence until none is unreached.
+  repeated clustermetadata.ID unreached = 2;
+}
+
+// FlipRoutingRequest asks to move application traffic.
+message FlipRoutingRequest {
+  // database is the database whose routing changes.
+  string database = 1;
+
+  // from_tablegroup must be the current app_tablegroup.
+  string from_tablegroup = 2;
+
+  // to_tablegroup becomes the app_tablegroup.
+  string to_tablegroup = 3;
+
+  // expected_routing_version is the routing_version the caller read.
+  int64 expected_routing_version = 4;
+}
+
+// FlipRoutingResponse reports the committed routing.
+message FlipRoutingResponse {
+  // app_tablegroup is the tablegroup that now receives application traffic.
+  string app_tablegroup = 1;
+
+  // routing_version is the version after the change.
+  int64 routing_version = 2;
+}
+
+// RefreshAdmissionRequest tells a pooler to re-read and enforce its admission.
+message RefreshAdmissionRequest {
+  // database is the database the tablegroup belongs to.
+  string database = 1;
+
+  // tablegroup is the tablegroup the pooler must be serving.
+  string tablegroup = 2;
+
+  // expected_state and expected_version are what the coordinator has just committed.
+  // They are an expectation, never permission: the pooler enforces only what it reads
+  // from the control home, and fails if that is not this.
+  AdmissionState expected_state = 3;
+  int64 expected_version = 4;
+
+  // drain_timeout is how long a fence refresh waits for the pooler's admitted
+  // requests to finish and its reservations to be released. Zero selects 3 seconds.
+  // Ignored for an unfence.
+  google.protobuf.Duration drain_timeout = 5;
+}
+
+// RefreshAdmissionResponse is returned once the pooler enforces the row.
+message RefreshAdmissionResponse {
+  // pooler_id identifies the responding pooler.
+  clustermetadata.ID pooler_id = 1;
+
+  // state is what the pooler now enforces: for a fence (FENCING or FENCED), the gate
+  // is closed and no application work is running. A pooler that has work running, a
+  // reservation held, or a backend that is not idle and that it does not own, fails a
+  // fence refresh with a "busy" error instead.
+  AdmissionState state = 2;
+
+  // version is the row version the pooler enforces.
+  int64 version = 3;
 }
