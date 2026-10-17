@@ -166,6 +166,11 @@ const (
 	// (cancellation, deadline, dead socket) where the backend's state cannot
 	// be trusted and the socket must be closed.
 	ReleaseStatementError
+
+	// ReleasePeerGone indicates the server ended the connection while no request was using it
+	// (a session that a controller terminated, say). Nothing is sent to the server, so it is not
+	// a kill; the backend is gone and the connection is closed.
+	ReleasePeerGone
 )
 
 // preventsReuse reports whether the release reason indicates uncertain
@@ -202,6 +207,8 @@ func (r ReleaseReason) String() string {
 		return "kill"
 	case ReleaseError:
 		return "error"
+	case ReleasePeerGone:
+		return "peer_gone"
 	default:
 		return "unknown"
 	}

@@ -279,10 +279,22 @@ func (m *stubPoolManager) GetReservedConn(int64, string) (*reserved.Conn, bool) 
 	return m.reservedConn, m.reservedConnOK
 }
 
-func (m *stubPoolManager) WaitForDrain(context.Context) error           { return nil }
-func (m *stubPoolManager) WaitForReservedDrain(context.Context) error   { return nil }
-func (m *stubPoolManager) CloseReservedConnections(context.Context) int { return 0 }
-func (m *stubPoolManager) Stats() connpoolmanager.ManagerStats          { return connpoolmanager.ManagerStats{} }
+func (m *stubPoolManager) WaitForDrain(context.Context) error            { return nil }
+func (m *stubPoolManager) WaitForApplicationDrain(context.Context) error { return nil }
+func (m *stubPoolManager) WaitForReservedDrain(context.Context) error    { return nil }
+func (m *stubPoolManager) CloseReservedConnections(context.Context) int  { return 0 }
+
+func (m *stubPoolManager) ApplicationReservations() int64        { return 0 }
+func (m *stubPoolManager) HoldReservedConn(int64, string) func() { return func() {} }
+
+func (m *stubPoolManager) ReleaseGone(held []connpoolmanager.HeldReservation) []connpoolmanager.HeldReservation {
+	return held
+}
+
+func (m *stubPoolManager) HeldReservations(int) ([]connpoolmanager.HeldReservation, int) {
+	return nil, 0
+}
+func (m *stubPoolManager) Stats() connpoolmanager.ManagerStats { return connpoolmanager.ManagerStats{} }
 func (m *stubPoolManager) CredentialQueryRecorder() connpoolmanager.CredentialQueryRecorder {
 	return nil
 }

@@ -339,6 +339,23 @@ func (p *UserPool) CloseReservedConnections(ctx context.Context) int {
 	return p.reservedPool.KillAll(ctx)
 }
 
+// DiscardReservedConnIfGone drops a reservation whose backend the server ended. See
+// reserved.Pool.DiscardIfGone.
+func (p *UserPool) DiscardReservedConnIfGone(connID int64) bool {
+	return p.reservedPool.DiscardIfGone(connID)
+}
+
+// HoldReservedConn marks a request as running on the reserved connection until the
+// returned function is called. See reserved.Pool.Hold.
+func (p *UserPool) HoldReservedConn(connID int64) func() {
+	return p.reservedPool.Hold(connID)
+}
+
+// HeldReservations describes the user's reservations that are client work.
+func (p *UserPool) HeldReservations(now time.Time) []reserved.Held {
+	return p.reservedPool.HeldReservations(now)
+}
+
 // Close closes both regular and reserved pools.
 func (p *UserPool) Close() {
 	p.mu.Lock()

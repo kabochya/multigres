@@ -62,12 +62,26 @@ type Conn struct {
 	// releaseCleanups run before clean release recycles the backend.
 	releaseCleanups []ReleaseCleanup
 
+	// uncounted is set at creation: see WithoutDrainAccounting.
+	uncounted bool
+
 	// inactivityTimeout is the maximum duration the connection can be inactive
 	// (no client activity) before expiring. A value of 0 means no timeout.
 	inactivityTimeout time.Duration
 
 	// expiryNanos stores the expiry time as Unix nanoseconds for atomic access.
 	expiryNanos atomic.Int64
+
+	// reservedAtNanos is when the connection was reserved, and lastUsedNanos when a
+	// request last used it (it started, or it ended: see BeginUse), as Unix nanoseconds
+	// for atomic access. inUse counts the requests that are running on it now, and
+	// reasons mirrors reservedProps.Reasons, which only the request that holds the
+	// connection may touch. They are facts a fence that cannot complete reports (see
+	// Held), read from outside the request, so they are atomic.
+	reservedAtNanos atomic.Int64
+	lastUsedNanos   atomic.Int64
+	inUse           atomic.Int32
+	reasons         atomic.Uint32
 
 	// released indicates whether this connection has been released.
 	released atomic.Bool
@@ -110,12 +124,16 @@ func (c *Conn) recordTxnOutcome(ctx context.Context, outcome string) {
 
 // newConn creates a new reserved connection.
 func newConn(pooled regular.PooledConn, connID int64, pool *Pool, releaseCleanups []ReleaseCleanup) *Conn {
-	return &Conn{
+	c := &Conn{
 		pooled:          pooled,
 		connID:          connID,
 		pool:            pool,
 		releaseCleanups: append([]ReleaseCleanup(nil), releaseCleanups...),
 	}
+	now := time.Now().UnixNano()
+	c.reservedAtNanos.Store(now)
+	c.lastUsedNanos.Store(now)
+	return c
 }
 
 // ConnID returns the unique identifier for this reservation.
@@ -442,6 +460,7 @@ func (c *Conn) AddReservationReason(reason uint32) {
 	} else {
 		c.reservedProps.AddReason(reason)
 	}
+	c.reasons.Store(c.reservedProps.Reasons)
 	if reason&protoutil.ReasonUnsafeConnection != 0 {
 		c.closeOnRelease.Store(true)
 	}
@@ -476,8 +495,10 @@ func (c *Conn) RemoveReservationReason(reason uint32) bool {
 	c.reservedProps.RemoveReason(reason)
 	if c.reservedProps.IsEmpty() {
 		c.reservedProps = nil
+		c.reasons.Store(0)
 		return true
 	}
+	c.reasons.Store(c.reservedProps.Reasons)
 	return false
 }
 
@@ -487,6 +508,63 @@ func (c *Conn) RemainingReasons() uint32 {
 		return 0
 	}
 	return c.reservedProps.Reasons
+}
+
+// Held describes a reservation for a fence that cannot complete. It says what the
+// connection is for, how long it has been held and how long ago a request last used it,
+// and who holds it, as far as the pooler knows. It carries nothing the client sent: no
+// query text, no parameters, no settings.
+type Held struct {
+	// ConnID identifies the reservation within the pool.
+	ConnID int64
+	// Reasons is the reservation reasons bitmask.
+	Reasons uint32
+	// BackendPID is the process id of the backend.
+	BackendPID uint32
+	// ClientPort is the local TCP port of the pooler's connection to the backend, which is the
+	// client_port the server shows for that backend in pg_stat_activity: with the process id it
+	// names the connection exactly, whatever a reused process id might otherwise suggest. It
+	// equals the server's value only on a direct TCP connection (a NAT or a proxy in between
+	// changes it, and a controller's statement that names it then matches nothing, which fails
+	// safe). It is zero when the connection is not TCP.
+	ClientPort int32
+	// ClientConnectionID is the gateway's identifier of the client session, when the
+	// pooler recorded one for this backend, and zero otherwise.
+	ClientConnectionID uint32
+	// HeldFor is how long the connection has been reserved.
+	HeldFor time.Duration
+	// InUse is whether a request is running on it now.
+	InUse bool
+	// IdleFor is how long ago the last request on it ended, or zero while InUse. A
+	// connection that is not InUse and has been idle for long is an idle client; one
+	// that is InUse has a running request, however long ago it started.
+	IdleFor time.Duration
+}
+
+// Held describes this reservation at now.
+func (c *Conn) Held(now time.Time) Held {
+	h := Held{
+		ConnID:             c.connID,
+		Reasons:            c.reasons.Load(), // not reservedProps, which the request goroutine mutates
+		BackendPID:         c.ProcessID(),
+		ClientPort:         c.pooled.Conn.RawConn().LocalPort(),
+		ClientConnectionID: c.State().TrackedVpid(),
+		HeldFor:            now.Sub(time.Unix(0, c.reservedAtNanos.Load())),
+		InUse:              c.inUse.Load() > 0,
+	}
+	if !h.InUse {
+		h.IdleFor = now.Sub(time.Unix(0, c.lastUsedNanos.Load()))
+	}
+	h.HeldFor, h.IdleFor = max(h.HeldFor, 0), max(h.IdleFor, 0)
+	return h
+}
+
+// BackendGone reports whether the server has ended this connection (a session that a controller
+// terminated, say), judged from the socket alone: nothing is read from it and the server is not
+// asked. It is only meaningful while no request is using the connection.
+func (c *Conn) BackendGone() bool {
+	raw := c.pooled.Conn.RawConn()
+	return raw.IsClosed() || raw.PeerClosed()
 }
 
 // --- Timeout ---
@@ -500,9 +578,22 @@ func (c *Conn) SetInactivityTimeout(timeout time.Duration) {
 // ResetExpiryTime resets the expiry time based on the inactivity timeout.
 // Called when the connection is accessed to extend its lifetime.
 func (c *Conn) ResetExpiryTime() {
+	now := time.Now()
+	c.lastUsedNanos.Store(now.UnixNano())
 	if c.inactivityTimeout > 0 {
-		c.expiryNanos.Store(time.Now().Add(c.inactivityTimeout).UnixNano())
+		c.expiryNanos.Store(now.Add(c.inactivityTimeout).UnixNano())
 	}
+}
+
+// BeginUse marks a request as running on the connection, until it calls EndUse. A
+// fence that cannot complete says which reservations have a request running.
+func (c *Conn) BeginUse() { c.inUse.Add(1) }
+
+// EndUse ends a request's use of the connection and records when, so that the time
+// the connection has been idle counts from the end of the request, not from its start.
+func (c *Conn) EndUse() {
+	c.lastUsedNanos.Store(time.Now().UnixNano())
+	c.inUse.Add(-1)
 }
 
 // IsTimedOut returns true if the connection has exceeded its inactivity timeout.

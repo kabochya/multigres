@@ -120,10 +120,15 @@ type MultipoolerManager struct {
 	stateError   error
 	consensusMgr *consensus.ConsensusManager
 
-	topoLoaded  bool
-	ctx         context.Context
-	cancel      context.CancelFunc
-	loadTimeout time.Duration
+	// admission is the local application admission state; see admission.go.
+	admission admissionRuntime
+	// defaultPrimary is the cached connection to the default primary, for admission reads.
+	defaultPrimary     *defaultPrimaryClient
+	defaultPrimaryOnce sync.Once
+	topoLoaded         bool
+	ctx                context.Context
+	cancel             context.CancelFunc
+	loadTimeout        time.Duration
 
 	// shutdownCtx is cancelled at the end of GracefulShutdown to signal
 	// long-lived subscribers (currently the health-stream gRPC handlers via
@@ -458,6 +463,12 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 			cancel()
 			return nil, err
 		}
+	}
+
+	// A pooler opens only after it has read its admission state, so its application
+	// gate is closed from the moment the query server exists.
+	if gate, ok := pm.qsc.(poolerserver.ApplicationGate); ok {
+		gate.EnableAdmissionControl(unmanaged)
 	}
 
 	// The health streamer must wait for the query server to update its type before
@@ -1953,10 +1964,28 @@ func (pm *MultipoolerManager) StartTopoRegistration(alarm func(string)) {
 // LifecycleStatus=LIFECYCLE_STARTING, and the orchestrator promotes as
 // usual.
 //
+// A pooler with admission control first closes its application gate for good,
+// stops the admission loop and waits, within half of ctx's remaining time, for
+// the work it admitted to finish. If that does not happen it writes nothing
+// (see below), so the record fails closed, and it returns false: nobody else may
+// write SHUTDOWN over that decision.
+//
 // Does not require the manager's action lock — record.Unregister stops the
 // publisher before applying the finalize callback, so no other goroutine
 // can publish over our shutdown state regardless of locking.
-func (pm *MultipoolerManager) StopTopoRegistration(ctx context.Context) {
+func (pm *MultipoolerManager) StopTopoRegistration(ctx context.Context) bool {
+	// A pooler that announces shutdown is no longer in any fence membership, so it
+	// must not admit application work after that, even if its graceful stop timed
+	// out or could not take the action lock.
+	if !pm.shutdownApplication(ctx) {
+		// Work admitted before the close is still running, so the pooler must not
+		// say it has stopped: a fence that snapshotted its membership afterwards
+		// would not wait for work that can still reach the database. The process is
+		// about to exit, and the record is left as a crashed pooler's would be: a
+		// fence that includes it fails to get its acknowledgment instead of passing
+		// without it, until an operator removes the entry.
+		return false
+	}
 	pm.record.Unregister(ctx, func(s *MutablePoolerRecordState) {
 		s.RoutingState = nil
 		s.ServingStatus = clustermetadatapb.PoolerServingStatus_DISABLED
@@ -1966,6 +1995,34 @@ func (pm *MultipoolerManager) StopTopoRegistration(ctx context.Context) {
 			Updated: timestamppb.Now(),
 		}
 	})
+	return true
+}
+
+// shutdownApplication closes the application gate terminally and waits for the
+// admitted work to finish, and reports whether it did. It reports true for a pooler
+// that has no gate to close.
+func (pm *MultipoolerManager) shutdownApplication(ctx context.Context) bool {
+	pm.admission.stopped.Store(true)
+	if pm.defaultPrimary != nil {
+		pm.defaultPrimary.close()
+	}
+	g, err := pm.applicationGate()
+	if err != nil {
+		return true
+	}
+	drainCtx := ctx
+	if deadline, ok := ctx.Deadline(); ok {
+		// Leave the rest for the shutdown write.
+		var cancel context.CancelFunc
+		drainCtx, cancel = context.WithTimeout(ctx, time.Until(deadline)/2)
+		defer cancel()
+	}
+	if err := g.ShutdownApplication(drainCtx); err != nil {
+		pm.logger.WarnContext(ctx, "application work is still running at shutdown; not announcing the pooler as stopped",
+			"error", err)
+		return false
+	}
+	return true
 }
 
 // WaitUntilReady blocks until the manager reaches Ready or Error state, or

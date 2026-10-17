@@ -110,6 +110,11 @@ type PoolManager interface {
 	// Used during graceful shutdown to wait for in-flight queries to complete.
 	WaitForDrain(ctx context.Context) error
 
+	// WaitForApplicationDrain blocks until no reserved connection that is client work
+	// is left. Used at shutdown, together with the admission permits of the requests in
+	// flight; a fence does not wait, it reports (see ApplicationReservations).
+	WaitForApplicationDrain(ctx context.Context) error
+
 	// WaitForReservedDrain blocks until all RESERVED connections (transactions,
 	// temp tables, portals, COPY) have been released or ctx is cancelled. It
 	// ignores transient single-query borrows, so the first stage of a graceful
@@ -120,6 +125,28 @@ type PoolManager interface {
 	// Used after drain grace period expires to prevent reserved connections from being
 	// used in a non-serving state.
 	CloseReservedConnections(ctx context.Context) int
+
+	// HeldReservations describes the application reservations held now, the longest held
+	// first and at most limit of them, and how many more there are. It carries nothing
+	// the client sent, and ends nothing.
+	HeldReservations(limit int) (held []HeldReservation, more int)
+
+	// HoldReservedConn marks a request as running on the user's reserved connection
+	// until the returned function is called, so that a busy fence can tell a reservation
+	// with a request running on it from an idle one. It does nothing when there is no
+	// such connection.
+	HoldReservedConn(connID int64, user string) func()
+
+	// ReleaseGone drops the held reservations whose connection the server has ended (a
+	// controller terminated the session), releasing them, and returns the ones that remain. It
+	// looks at the sockets only.
+	ReleaseGone(held []HeldReservation) []HeldReservation
+
+	// ApplicationReservations returns how many reserved connections that are client work
+	// are held now. The LISTEN connection of the pubsub listener is infrastructure and is
+	// not counted. A fence reads it, with the requests in flight, and any held reservation
+	// makes it report busy.
+	ApplicationReservations() int64
 
 	// --- Stats ---
 

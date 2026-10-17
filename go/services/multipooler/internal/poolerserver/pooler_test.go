@@ -105,6 +105,14 @@ func requireMTF01(t *testing.T, err error) {
 	assert.True(t, mterrors.IsErrorCode(err, mterrors.MTF01.ID), "expected MTF01 error, got: %v", err)
 }
 
+// requireMTF02 asserts that err is the MTF02 (application admission closed)
+// gateway-buffering signal.
+func requireMTF02(t *testing.T, err error) {
+	t.Helper()
+	require.Error(t, err)
+	assert.True(t, mterrors.IsErrorCode(err, mterrors.MTF02.ID), "expected MTF02 error, got: %v", err)
+}
+
 func TestStartRequest_Serving(t *testing.T) {
 	s := newStartRequestTestServer()
 	s.servingStatus = clustermetadatapb.PoolerServingStatus_SERVING
@@ -283,8 +291,17 @@ type drainMockPoolManager struct {
 	zeroCh         chan struct{}
 	reservedZeroCh chan struct{}
 
+	// held and heldMore are what HeldReservations answers, and goneBackends the backends the
+	// server ended: ReleaseGone drops their reservations.
+	held         []connpoolmanager.HeldReservation
+	heldMore     int
+	goneBackends map[uint32]bool
+
 	closeReservedCount int
 	closeReservedCalls int
+	// onCloseReserved, when set, runs when the reserved connections are closed,
+	// letting a test model the closed connections returning to the pool.
+	onCloseReserved func()
 }
 
 func newDrainMockPoolManager() *drainMockPoolManager {
@@ -341,6 +358,11 @@ func (m *drainMockPoolManager) WaitForDrain(ctx context.Context) error {
 	}
 }
 
+// WaitForApplicationDrain: the mock's reserved connections are the application's.
+func (m *drainMockPoolManager) WaitForApplicationDrain(ctx context.Context) error {
+	return m.WaitForReservedDrain(ctx)
+}
+
 func (m *drainMockPoolManager) WaitForReservedDrain(ctx context.Context) error {
 	m.mu.Lock()
 	ch := m.reservedZeroCh
@@ -357,8 +379,50 @@ func (m *drainMockPoolManager) WaitForReservedDrain(ctx context.Context) error {
 func (m *drainMockPoolManager) CloseReservedConnections(ctx context.Context) int {
 	m.mu.Lock()
 	m.closeReservedCalls++
+	hook := m.onCloseReserved
 	m.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return m.closeReservedCount
+}
+
+// HeldReservations is what the pool manager would describe of the held reservations.
+func (m *drainMockPoolManager) HeldReservations(limit int) ([]connpoolmanager.HeldReservation, int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	held := m.held
+	if limit >= 0 && len(held) > limit {
+		held = held[:limit]
+	}
+	return held, m.heldMore + len(m.held) - len(held)
+}
+
+// ApplicationReservations is the count of held reservations a fence looks at.
+func (m *drainMockPoolManager) HoldReservedConn(int64, string) func() { return func() {} }
+
+func (m *drainMockPoolManager) ReleaseGone(held []connpoolmanager.HeldReservation) []connpoolmanager.HeldReservation {
+	var live, remaining []connpoolmanager.HeldReservation
+	for _, h := range held {
+		if m.goneBackends[h.BackendPID] {
+			m.reservedAdd(-1)
+			continue
+		}
+		live = append(live, h)
+	}
+	for _, h := range m.held {
+		if !m.goneBackends[h.BackendPID] {
+			remaining = append(remaining, h)
+		}
+	}
+	m.held = remaining // the server's view: what is gone is no longer held
+	return live
+}
+
+func (m *drainMockPoolManager) ApplicationReservations() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.reservedCount
 }
 
 func (m *drainMockPoolManager) closeReservedCallCount() int {
