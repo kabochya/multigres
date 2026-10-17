@@ -52,6 +52,9 @@ func RegisterPoolerManagerServices(senv *servenv.ServEnv, grpc *servenv.GrpcServ
 
 // WaitForLSN waits for PostgreSQL server to reach a specific LSN position
 func (s *managerService) WaitForLSN(ctx context.Context, req *multipoolermanagerdatapb.WaitForLSNRequest) (*multipoolermanagerdatapb.WaitForLSNResponse, error) {
+	if err := s.manager.RejectIfUnmanaged("WaitForLSN"); err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
 	err := s.manager.WaitForLSN(ctx, req.TargetLsn)
 	if err != nil {
 		return nil, mterrors.ToGRPC(err)
@@ -61,6 +64,9 @@ func (s *managerService) WaitForLSN(ctx context.Context, req *multipoolermanager
 
 // StartReplication starts WAL replay on standby (calls pg_wal_replay_resume)
 func (s *managerService) StartReplication(ctx context.Context, req *multipoolermanagerdatapb.StartReplicationRequest) (*multipoolermanagerdatapb.StartReplicationResponse, error) {
+	if err := s.manager.RejectIfUnmanaged("StartReplication"); err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
 	err := s.manager.StartReplication(ctx)
 	if err != nil {
 		return nil, mterrors.ToGRPC(err)
@@ -70,6 +76,9 @@ func (s *managerService) StartReplication(ctx context.Context, req *multipoolerm
 
 // StopReplication stops replication based on the specified mode
 func (s *managerService) StopReplication(ctx context.Context, req *multipoolermanagerdatapb.StopReplicationRequest) (*multipoolermanagerdatapb.StopReplicationResponse, error) {
+	if err := s.manager.RejectIfUnmanaged("StopReplication"); err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
 	err := s.manager.StopReplication(ctx, req.Mode, req.Wait)
 	if err != nil {
 		return nil, mterrors.ToGRPC(err)
@@ -79,6 +88,9 @@ func (s *managerService) StopReplication(ctx context.Context, req *multipoolerma
 
 // Status gets unified status that works for both PRIMARY and REPLICA poolers
 func (s *managerService) Status(ctx context.Context, req *multipoolermanagerdatapb.StatusRequest) (*multipoolermanagerdatapb.StatusResponse, error) {
+	if err := s.manager.RejectIfUnmanaged("Status"); err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
 	resp, err := s.manager.Status(ctx)
 	if err != nil {
 		return nil, mterrors.ToGRPC(err)
@@ -88,6 +100,9 @@ func (s *managerService) Status(ctx context.Context, req *multipoolermanagerdata
 
 // Backup performs a backup
 func (s *managerService) Backup(ctx context.Context, req *multipoolermanagerdatapb.BackupRequest) (*multipoolermanagerdatapb.BackupResponse, error) {
+	if err := s.manager.RejectIfUnmanaged("Backup"); err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
 	backupID, err := s.manager.Backup(ctx, req.ForcePrimary, req.Type, req.JobId, req.Overrides)
 	if err != nil {
 		return nil, mterrors.ToGRPC(err)
@@ -100,6 +115,9 @@ func (s *managerService) Backup(ctx context.Context, req *multipoolermanagerdata
 
 // GetBackups retrieves backup information
 func (s *managerService) GetBackups(ctx context.Context, req *multipoolermanagerdatapb.GetBackupsRequest) (*multipoolermanagerdatapb.GetBackupsResponse, error) {
+	if err := s.manager.RejectIfUnmanaged("GetBackups"); err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
 	backups, err := s.manager.GetBackups(ctx, req.Limit)
 	if err != nil {
 		return nil, mterrors.ToGRPC(err)
@@ -112,6 +130,9 @@ func (s *managerService) GetBackups(ctx context.Context, req *multipoolermanager
 
 // GetBackupByJobId retrieves a backup by its job_id annotation
 func (s *managerService) GetBackupByJobId(ctx context.Context, req *multipoolermanagerdatapb.GetBackupByJobIdRequest) (*multipoolermanagerdatapb.GetBackupByJobIdResponse, error) {
+	if err := s.manager.RejectIfUnmanaged("GetBackupByJobId"); err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
 	backup, err := s.manager.GetBackupByJobId(ctx, req.JobId)
 	if err != nil {
 		return nil, mterrors.ToGRPC(err)
@@ -124,6 +145,9 @@ func (s *managerService) GetBackupByJobId(ctx context.Context, req *multipoolerm
 
 // ExpireBackups removes backups that exceed the configured retention policy
 func (s *managerService) ExpireBackups(ctx context.Context, req *multipoolermanagerdatapb.ExpireBackupsRequest) (*multipoolermanagerdatapb.ExpireBackupsResponse, error) {
+	if err := s.manager.RejectIfUnmanaged("ExpireBackups"); err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
 	expiredIDs, err := s.manager.ExpireBackups(ctx, req.Overrides)
 	if err != nil {
 		return nil, mterrors.ToGRPC(err)
@@ -136,6 +160,9 @@ func (s *managerService) ExpireBackups(ctx context.Context, req *multipoolermana
 
 // VerifyBackups runs a full-stanza pgbackrest verify.
 func (s *managerService) VerifyBackups(ctx context.Context, req *multipoolermanagerdatapb.VerifyBackupsRequest) (*multipoolermanagerdatapb.VerifyBackupsResponse, error) {
+	if err := s.manager.RejectIfUnmanaged("VerifyBackups"); err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
 	result, err := s.manager.VerifyBackups(ctx)
 	if err != nil {
 		return nil, mterrors.ToGRPC(err)
@@ -148,6 +175,9 @@ func (s *managerService) VerifyBackups(ctx context.Context, req *multipoolermana
 
 // ResignLeadership gracefully resigns the pooler from leadership for use in a planned failover.
 func (s *managerService) ResignLeadership(ctx context.Context, req *multipoolermanagerdatapb.ResignLeadershipRequest) (*multipoolermanagerdatapb.ResignLeadershipResponse, error) {
+	if err := s.manager.RejectIfUnmanaged("ResignLeadership"); err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
 	resp, err := s.manager.ResignLeadership(ctx, req)
 	if err != nil {
 		return nil, mterrors.ToGRPC(err)
@@ -160,6 +190,9 @@ func (s *managerService) ResignLeadership(ctx context.Context, req *multipoolerm
 // dropping managed slots for members no longer listed). It is a declarative,
 // non-consensus notification the orchestrator sends off the cohort path.
 func (s *managerService) ReconcileFollowers(ctx context.Context, req *multipoolermanagerdatapb.ReconcileFollowersRequest) (*multipoolermanagerdatapb.ReconcileFollowersResponse, error) {
+	if err := s.manager.RejectIfUnmanaged("ReconcileFollowers"); err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
 	if err := s.manager.ReconcileFollowers(ctx, req.GetFollowers()); err != nil {
 		return nil, mterrors.ToGRPC(err)
 	}
@@ -168,11 +201,19 @@ func (s *managerService) ReconcileFollowers(ctx context.Context, req *multipoole
 
 // SetPostgresRestartsEnabled enables or disables automatic PostgreSQL restarts by the monitor
 func (s *managerService) SetPostgresRestartsEnabled(ctx context.Context, req *multipoolermanagerdatapb.SetPostgresRestartsEnabledRequest) (*multipoolermanagerdatapb.SetPostgresRestartsEnabledResponse, error) {
+	if err := s.manager.RejectIfUnmanaged("SetPostgresRestartsEnabled"); err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
 	return s.manager.SetPostgresRestartsEnabled(ctx, req)
 }
 
 // ReloadConfig triggers a PostgreSQL configuration reload and confirms it took effect.
 func (s *managerService) ReloadConfig(ctx context.Context, req *multipoolermanagerdatapb.ReloadConfigRequest) (*multipoolermanagerdatapb.ReloadConfigResponse, error) {
+	// An unmanaged pooler has no pgctld to ask, and reloading the configuration of
+	// an external postgres is not ours to do.
+	if err := s.manager.RejectIfUnmanaged("ReloadConfig"); err != nil {
+		return nil, mterrors.ToGRPC(err)
+	}
 	resp, err := s.manager.ReloadConfig(ctx, req)
 	if err != nil {
 		return nil, mterrors.ToGRPC(err)
@@ -201,6 +242,9 @@ func (s *managerService) ReloadConfig(ctx context.Context, req *multipoolermanag
 func (s *managerService) ManagerHealthStream(
 	stream multipoolermanagerpb.MultipoolerManager_ManagerHealthStreamServer,
 ) error {
+	if err := s.manager.RejectIfUnmanaged("ManagerHealthStream"); err != nil {
+		return mterrors.ToGRPC(err)
+	}
 	ctx := stream.Context()
 
 	// Read the start message. The first client message must be a start message.
