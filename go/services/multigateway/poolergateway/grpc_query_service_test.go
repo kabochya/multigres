@@ -228,6 +228,30 @@ func (m *mockMultipoolerServiceClient) GetBackingConnection(ctx context.Context,
 	return nil, nil
 }
 
+func (m *mockMultipoolerServiceClient) GetServingState(ctx context.Context, in *multipoolerservice.GetServingStateRequest, opts ...grpc.CallOption) (*multipoolerservice.GetServingStateResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) StartFence(ctx context.Context, in *multipoolerservice.StartFenceRequest, opts ...grpc.CallOption) (*multipoolerservice.StartFenceResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) CommitFence(ctx context.Context, in *multipoolerservice.CommitFenceRequest, opts ...grpc.CallOption) (*multipoolerservice.CommitFenceResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) UnfenceTablegroup(ctx context.Context, in *multipoolerservice.UnfenceTablegroupRequest, opts ...grpc.CallOption) (*multipoolerservice.UnfenceTablegroupResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) FlipRouting(ctx context.Context, in *multipoolerservice.FlipRoutingRequest, opts ...grpc.CallOption) (*multipoolerservice.FlipRoutingResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) RefreshAdmission(ctx context.Context, in *multipoolerservice.RefreshAdmissionRequest, opts ...grpc.CallOption) (*multipoolerservice.RefreshAdmissionResponse, error) {
+	return nil, nil
+}
+
 func (m *mockMultipoolerServiceClient) DiscardTempTables(ctx context.Context, in *multipoolerservice.DiscardTempTablesRequest, opts ...grpc.CallOption) (*multipoolerservice.DiscardTempTablesResponse, error) {
 	return nil, nil
 }
