@@ -154,6 +154,20 @@ func (p *Pool) Close() {
 	p.pool.Close()
 }
 
+// LivePIDs returns the process ids of the backends of the pool's open connections,
+// whether idle or borrowed. A connection that is being reconnected has none yet and
+// is left out.
+func (p *Pool) LivePIDs() []uint32 {
+	conns := p.pool.LiveConns()
+	pids := make([]uint32, 0, len(conns))
+	for _, c := range conns {
+		if pid := c.ProcessID(); pid != 0 {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
 // Stats returns current pool statistics.
 func (p *Pool) Stats() connpool.PoolStats {
 	return p.pool.Stats()

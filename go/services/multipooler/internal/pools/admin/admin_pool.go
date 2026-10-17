@@ -17,7 +17,9 @@ package admin
 import (
 	"context"
 	"fmt"
+	"strconv"
 
+	"github.com/multigres/multigres/go/common/mterrors"
 	"github.com/multigres/multigres/go/common/pgprotocol/client"
 	"github.com/multigres/multigres/go/services/multipooler/internal/pools/connpool"
 )
@@ -108,6 +110,46 @@ func (p *Pool) CancelBackend(ctx context.Context, processID uint32) (bool, error
 // Close closes all connections in the pool.
 func (p *Pool) Close() {
 	p.pool.Close()
+}
+
+// LivePIDs returns the process ids of the backends of the pool's open connections.
+func (p *Pool) LivePIDs() []uint32 {
+	conns := p.pool.LiveConns()
+	pids := make([]uint32, 0, len(conns))
+	for _, c := range conns {
+		if pid := c.ProcessID(); pid != 0 {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
+// QueryPIDs runs a query that returns backend process ids in its first column, on a
+// pooled admin connection.
+func (p *Pool) QueryPIDs(ctx context.Context, sql string) ([]uint32, error) {
+	pooled, err := p.pool.Get(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer pooled.Recycle()
+	results, err := pooled.Conn.QueryWithRetry(ctx, sql)
+	if err != nil {
+		return nil, err
+	}
+	var pids []uint32
+	for _, r := range results {
+		for _, row := range r.StructuredRows() {
+			if len(row.Values) == 0 {
+				continue
+			}
+			n, err := strconv.ParseUint(string(row.Values[0]), 10, 32)
+			if err != nil {
+				return nil, mterrors.Wrap(err, "parse backend pid")
+			}
+			pids = append(pids, uint32(n))
+		}
+	}
+	return pids, nil
 }
 
 // Stats returns current pool statistics.

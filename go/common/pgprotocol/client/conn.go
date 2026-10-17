@@ -136,8 +136,10 @@ type Conn struct {
 	// config is the connection configuration.
 	config *Config
 
-	// Backend key data received from the server.
-	processID uint32
+	// Backend key data received from the server. processID is atomic because
+	// the pooler reads it from outside the goroutine that owns the connection
+	// (see ProcessID).
+	processID atomic.Uint32
 	secretKey uint32
 
 	// Server parameters received during startup.
@@ -213,6 +215,10 @@ func Connect(ctx context.Context, poolCtx context.Context, config *Config) (*Con
 // The caller is responsible for re-applying any session state (settings,
 // prepared statements) after a successful reconnect.
 func (c *Conn) Reconnect(ctx context.Context) error {
+	// The old backend is no longer this connection's: a reader that lists the
+	// backends this connection owns must not see it until the new one is known.
+	c.processID.Store(0)
+
 	// Close the raw socket. Best-effort since the connection may already be broken.
 	// We intentionally don't call c.Close() because that cancels the lifetime
 	// context (derived from poolCtx) which we want to keep alive.
@@ -311,9 +317,10 @@ func (c *Conn) IsClosed() bool {
 	return c.closed.Load()
 }
 
-// ProcessID returns the backend process ID.
+// ProcessID returns the backend process ID, or 0 while a reconnect has not yet
+// learned the new backend's. It is safe to call from any goroutine.
 func (c *Conn) ProcessID() uint32 {
-	return c.processID
+	return c.processID.Load()
 }
 
 // SecretKey returns the backend secret key for query cancellation.

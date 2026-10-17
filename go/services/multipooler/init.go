@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -553,6 +554,29 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context) error {
 	}
 	unmanaged := mode == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
 
+	// Transport to the default primary pooler, used to fetch a backing connection
+	// at bootstrap and to read admission state afterwards. Every pooler uses it (it
+	// reads its admission state from the default primary), so it is built now and a
+	// misconfiguration fails at startup. It uses the multipooler gRPC client flags and,
+	// when none is set, the pooler's own server certificate, key and CA, so a cluster
+	// whose poolers serve TLS keeps working without new flags.
+	var (
+		transportOnce sync.Once
+		transportOpt  grpc.DialOption
+		transportErr  error
+	)
+	defaultPrimaryTransport := func() (grpc.DialOption, error) {
+		transportOnce.Do(func() {
+			cert, key, ca := mp.grpcServer.TLSPaths(mp.senv)
+			transportOpt, transportErr = mp.defaultPrimaryConn.TransportCredentialsOr(logger, cert, key, ca)
+		})
+		return transportOpt, transportErr
+	}
+	var bootstrapTransport grpc.DialOption
+	if bootstrapTransport, err = defaultPrimaryTransport(); err != nil {
+		return fmt.Errorf("default primary transport: %w", err)
+	}
+
 	// An unmanaged pooler takes its endpoint and credentials from the named
 	// backing connection; a managed one takes the admin password from its own
 	// configuration and manages backup keys.
@@ -572,10 +596,6 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context) error {
 		}
 		// Register as DISABLED/UNMANAGED, find the default primary and fetch
 		// the named connection before anything can serve.
-		transport, err := mp.defaultPrimaryConn.TransportCredentials(logger)
-		if err != nil {
-			return fmt.Errorf("default primary transport: %w", err)
-		}
 		initial := topoclient.NewMultipooler(serviceID, cell, mp.senv.GetHostname())
 		initial.ManagementMode = mode
 		initial.ShardKey = &clustermetadatapb.ShardKey{
@@ -588,7 +608,7 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context) error {
 		initial.ServingStatus = clustermetadatapb.PoolerServingStatus_DISABLED
 		source := mp.connections
 		if source == nil {
-			source = &defaultPrimarySource{ts: mp.ts, database: mp.database.Get(), transport: transport}
+			source = &defaultPrimarySource{ts: mp.ts, database: mp.database.Get(), transport: bootstrapTransport}
 		}
 		backing, err = bootstrapBackingConnection(startCtx, mp.ts, initial, mp.backingConnection.Get(), source, logger)
 		if err != nil {
@@ -721,7 +741,9 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context) error {
 
 		StaticLeader: mp.staticLeader,
 
-		ExternalBackend: externalBackend,
+		BackingConnectionName:   mp.backingConnection.Get(),
+		DefaultPrimaryTransport: defaultPrimaryTransport,
+		ExternalBackend:         externalBackend,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create multipooler: %w", err)
@@ -729,6 +751,8 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context) error {
 
 	// Start the MultipoolerManager
 	poolerManager.Start(mp.senv)
+	// A controlled pooler opens only once it has read its admission state.
+	poolerManager.StartAdmission()
 	// Launch the background backup-health poller (service-level concern, kept
 	// out of manager.Start so RPC unit tests don't run background DB queries).
 	poolerManager.StartBackupHealth()
@@ -822,8 +846,10 @@ func (mp *Multipooler) abandonStartup() {
 	// The server never started, so there is no context to derive this from.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second) //nolint:gocritic // entry point after a failed start
 	defer cancel()
-	if mp.poolerManager != nil {
-		mp.poolerManager.StopTopoRegistration(ctx)
+	if mp.poolerManager != nil && !mp.poolerManager.StopTopoRegistration(ctx) {
+		// The manager left the record unpublished on purpose, because work it
+		// admitted was still running: that decision is not ours to override.
+		return
 	}
 	if mp.preparing == nil {
 		return

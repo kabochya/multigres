@@ -181,6 +181,12 @@ type Pool[C Connection] struct {
 	close      atomic.Pointer[chan struct{}]
 	capacityMu sync.Mutex
 
+	// live lists the connections the pool has opened and not seen closed; see LiveConns.
+	live struct {
+		mu    sync.Mutex
+		conns []C
+	}
+
 	// ctx is the context used for background pool operations
 	ctx context.Context
 
@@ -376,10 +382,49 @@ func (pool *Pool[C]) RegisterChecker(c ConnChecker[C]) {
 // Open starts the background workers that manage the pool and gets it ready
 // to start serving out connections.
 func (pool *Pool[C]) Open(connect Connector[C], refresh RefreshCheck) *Pool[C] {
-	pool.config.connect = connect
+	pool.config.connect = func(ctx context.Context, poolCtx context.Context) (C, error) {
+		conn, err := connect(ctx, poolCtx)
+		if err == nil {
+			pool.trackLive(conn)
+		}
+		return conn, err
+	}
 	pool.config.refresh = refresh
 	pool.open()
 	return pool
+}
+
+// trackLive adds a freshly opened connection to the live list, dropping the closed
+// ones, so the list stays about as long as the pool's capacity.
+func (pool *Pool[C]) trackLive(conn C) {
+	pool.live.mu.Lock()
+	defer pool.live.mu.Unlock()
+	kept := pool.live.conns[:0]
+	for _, c := range pool.live.conns {
+		if !c.IsClosed() {
+			kept = append(kept, c)
+		}
+	}
+	clear(pool.live.conns[len(kept):])
+	pool.live.conns = append(kept, conn)
+}
+
+// LiveConns returns the connections this pool has opened that are not closed:
+// idle, borrowed or being opened. It is for a caller that needs to know which
+// backends belong to the pool (the pooler's fence, which looks for backends it
+// cannot account for); it adds nothing to the Get and Recycle paths.
+func (pool *Pool[C]) LiveConns() []C {
+	pool.live.mu.Lock()
+	defer pool.live.mu.Unlock()
+	kept := pool.live.conns[:0]
+	for _, c := range pool.live.conns {
+		if !c.IsClosed() {
+			kept = append(kept, c)
+		}
+	}
+	clear(pool.live.conns[len(kept):])
+	pool.live.conns = kept
+	return append([]C(nil), kept...)
 }
 
 // Close shuts down the pool. No connections will be returned from Pool.Get after calling this,

@@ -193,6 +193,7 @@ func (p *Pool) NewConn(ctx context.Context, settings *connstate.Settings, opts .
 
 	// Create reserved connection.
 	rc := newConn(pooled, connID, p, o.releaseCleanups)
+	rc.uncounted = o.uncounted
 	rc.SetInactivityTimeout(p.config.InactivityTimeout)
 
 	// Register in active map.
@@ -201,7 +202,7 @@ func (p *Pool) NewConn(ctx context.Context, settings *connstate.Settings, opts .
 	p.mu.Unlock()
 
 	p.reserveCount.Add(1)
-	if p.config.OnReserve != nil {
+	if p.config.OnReserve != nil && !rc.uncounted {
 		p.config.OnReserve()
 	}
 
@@ -410,7 +411,7 @@ func (p *Pool) release(rc *Conn, reason ReleaseReason, gatewaySessionSettings ma
 	// was tainted above.
 	rc.pooled.Recycle()
 
-	if p.config.OnRelease != nil {
+	if p.config.OnRelease != nil && !rc.uncounted {
 		p.config.OnRelease()
 	}
 
@@ -446,7 +447,7 @@ func (p *Pool) Close() {
 	// Cancel the pool's context to stop the background killer.
 	p.cancel()
 
-	// Collect all connections to taint.
+	// Collect all connections to release.
 	conns := make([]*Conn, 0, len(p.active))
 	for _, rc := range p.active {
 		conns = append(conns, rc)
@@ -454,16 +455,24 @@ func (p *Pool) Close() {
 	p.active = make(map[int64]*Conn)
 	p.mu.Unlock()
 
-	// Taint all connections since they may be in an inconsistent state.
+	// Release every connection with an error reason, which taints it since it may be in an
+	// inconsistent state, and closes it. That calls OnRelease for each, so a count of open
+	// reservations reaches zero when the pool closes with some open, and a Release that a
+	// handler may still make for the connection is a no-op.
 	for _, rc := range conns {
-		rc.pooled.Taint()
-		rc.pooled.Close()
+		rc.Release(ReleaseError, nil)
 	}
 
 	// Close the underlying regular pool.
 	p.conns.Close()
 
 	p.logger.Info("reserved pool closed")
+}
+
+// LivePIDs returns the process ids of the backends of the connections the pool has
+// open: the reserved ones and the idle ones behind them.
+func (p *Pool) LivePIDs() []uint32 {
+	return p.conns.LivePIDs()
 }
 
 // Stats returns current pool statistics.

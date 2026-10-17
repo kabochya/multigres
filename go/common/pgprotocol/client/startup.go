@@ -348,7 +348,7 @@ func (c *Conn) handleBackendKeyData(body []byte) error {
 		return fmt.Errorf("failed to read secret key: %w", err)
 	}
 
-	c.processID = processID
+	c.processID.Store(processID)
 	c.secretKey = secretKey
 	return nil
 }

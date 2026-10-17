@@ -103,6 +103,9 @@ type poolerRecord struct {
 
 	registerOnce sync.Once
 	tr           *toporeg.TopoReg
+	// registered is set once the initial registration has been written to
+	// topology.
+	registered atomic.Bool
 }
 
 // newPoolerRecord returns a poolerRecord seeded with initial as the desired
@@ -307,11 +310,19 @@ func (r *poolerRecord) Register(parent context.Context, alarm func(string)) {
 		// (via Mutate + final publish) so toporeg only needs to manage the
 		// retry goroutine's lifetime.
 		registerFunc := func(ctx context.Context) error {
-			return r.topoClient.RegisterMultipooler(ctx, routingStateForPublish(r.Snapshot()), true /* allowUpdate */)
+			if err := r.topoClient.RegisterMultipooler(ctx, routingStateForPublish(r.Snapshot()), true /* allowUpdate */); err != nil {
+				return err
+			}
+			r.registered.Store(true)
+			return nil
 		}
 		r.tr = toporeg.Register(registerFunc, func(context.Context) error { return nil }, alarm)
 	})
 }
+
+// IsRegistered reports whether the initial registration has been written to
+// topology.
+func (r *poolerRecord) IsRegistered() bool { return r.registered.Load() }
 
 // Unregister stops the publisher, applies an optional final mutation,
 // performs one synchronous publish if the result diverges from the last

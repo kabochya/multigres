@@ -110,6 +110,16 @@ type PoolManager interface {
 	// Used during graceful shutdown to wait for in-flight queries to complete.
 	WaitForDrain(ctx context.Context) error
 
+	// WaitForApplicationDrain blocks until no reserved connection that is client work
+	// is left. Used by a fence, together with the admission permits of the requests
+	// in flight.
+	WaitForApplicationDrain(ctx context.Context) error
+
+	// UnexplainedBackends looks, on the server, for client backends of this database
+	// that are not idle and that no connection of this pooler explains, and returns how
+	// many there are. An error means it cannot be said that there are none.
+	UnexplainedBackends(ctx context.Context) (int, error)
+
 	// WaitForReservedDrain blocks until all RESERVED connections (transactions,
 	// temp tables, portals, COPY) have been released or ctx is cancelled. It
 	// ignores transient single-query borrows, so the first stage of a graceful
@@ -120,6 +130,12 @@ type PoolManager interface {
 	// Used after drain grace period expires to prevent reserved connections from being
 	// used in a non-serving state.
 	CloseReservedConnections(ctx context.Context) int
+
+	// ApplicationReservations returns how many reserved connections that are client work
+	// are held now. The LISTEN connection of the pubsub listener is infrastructure and is
+	// not counted. A fence reads it at its drain deadline: any held reservation makes it
+	// report busy.
+	ApplicationReservations() int64
 
 	// --- Stats ---
 
