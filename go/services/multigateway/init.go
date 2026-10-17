@@ -385,6 +385,9 @@ func (mg *Multigateway) RegisterFlags(fs *pflag.FlagSet) {
 		mg.queryMetricsSQLMaxBytes,
 		mg.queryLogSampleRate,
 	)
+	for _, src := range routingSources {
+		src.RegisterFlags(fs, mg.reg)
+	}
 	mg.bufferConfig.RegisterFlags(fs)
 	mg.connConfig.RegisterFlags(fs)
 }
@@ -443,7 +446,8 @@ func (mg *Multigateway) Init(ctx context.Context, ts topoclient.Store) error {
 					TableGroup: constants.DefaultTableGroup,
 					Shard:      constants.DefaultShard,
 				},
-				Mode: querypb.Mode_MODE_WRITABLE,
+				Mode:    querypb.Mode_MODE_WRITABLE,
+				Control: true,
 			})
 			if err != nil || conn == nil {
 				return nil
@@ -476,6 +480,15 @@ func (mg *Multigateway) Init(ctx context.Context, ts topoclient.Store) error {
 	// Pass ScatterConn as the IExecute implementation
 	mg.executor = executor.NewExecutor(mg.scatterConn, logger, mg.planCacheMemory.Get())
 	mg.executor.SetSlotBasedReplicationEnabled(mg.slotBasedReplicationEnabled.Get)
+
+	// A routing source, when one is registered and configured, follows where the
+	// application's traffic goes and tells the gateway.
+	routing := &gatewayRouting{executor: mg.executor, pg: mg.poolerGateway}
+	for _, src := range routingSources {
+		if err := src.Start(mg.shutdownCtx, routing, routing, logger); err != nil {
+			return fmt.Errorf("start routing source: %w", err)
+		}
+	}
 	// Started only now that mg.executor is assigned — see CobraPreRunE's doc
 	// comment, which subscribes mg.configReloaded, for why the consumer
 	// can't start any earlier.

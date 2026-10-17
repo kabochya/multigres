@@ -50,6 +50,25 @@ func isNoWritablePrimaryError(err error) bool {
 	return errors.As(err, &target)
 }
 
+// admissionClosedError is a noWritablePrimaryError whose cause is a closed
+// application gate: every pooler that could take the request is fenced, as
+// opposed to there being no leader at all.
+type admissionClosedError struct{ error }
+
+func (e *admissionClosedError) Unwrap() error { return e.error }
+
+func newAdmissionClosedError(internalFormat string, args ...any) error {
+	return &admissionClosedError{newNoWritablePrimaryError(internalFormat, args...)}
+}
+
+// isAdmissionClosedError reports whether err says a pooler's application gate is
+// closed: the gateway's own selection found no admitting pooler, or a pooler
+// rejected the request with MTF02. It is not true of a failover.
+func isAdmissionClosedError(err error) bool {
+	var target *admissionClosedError
+	return errors.As(err, &target) || mterrors.IsErrorCode(err, mterrors.MTF02.ID)
+}
+
 // translatePreExecutionUnavailable removes the internal retry marker after the
 // gateway finishes buffering while retaining its client-safe diagnostic.
 func translatePreExecutionUnavailable(err error) error {
@@ -75,12 +94,13 @@ func isReadWriteDuringRecoveryError(err error) bool {
 
 // isCredentialSourceUnavailable recognizes only errors that occur before the
 // pooler can inspect pg_authid. Buffer terminal errors retain the semantics of
-// the MTF01 that caused credential lookup to enter failover buffering.
+// the MTF01 or MTF02 that caused credential lookup to enter failover buffering.
 func isCredentialSourceUnavailable(err error) bool {
 	return mterrors.Code(err) == mtrpcpb.Code_UNAVAILABLE ||
 		mterrors.IsPreExecutionUnavailable(err) ||
 		mterrors.IsErrorCode(err,
 			mterrors.MTF01.ID,
+			mterrors.MTF02.ID,
 			mterrors.MTB01.ID,
 			mterrors.MTB02.ID,
 			mterrors.MTB03.ID,

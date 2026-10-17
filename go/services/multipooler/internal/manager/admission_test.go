@@ -202,9 +202,12 @@ func TestAdmissionBackendUnavailableNeverOpens(t *testing.T) {
 
 func TestRefreshFenceThenUnfence(t *testing.T) {
 	h := newAdmissionHarness(t, true)
+	closed := func() bool { return h.pm.healthStreamer.getState().AdmissionClosed }
+	require.True(t, closed(), "gateways are told a pooler starts closed, until it has read its row")
 	_, err := h.pm.enforceAdmission(t.Context(), nil)
 	require.NoError(t, err)
 	require.True(t, h.gate.ApplicationOpen())
+	require.False(t, closed(), "and that it opened")
 
 	// The coordinator persists the fence, then asks the pooler to refresh.
 	h.setRow(true, 1, "src")
@@ -213,6 +216,7 @@ func TestRefreshFenceThenUnfence(t *testing.T) {
 	require.Equal(t, stateFenced, resp.State, "a fence is acknowledged as fenced")
 	require.EqualValues(t, 1, resp.Version)
 	require.False(t, h.gate.ApplicationOpen())
+	require.True(t, closed(), "gateways are told the pooler is fenced")
 	require.Equal(t, h.pm.record.Snapshot().GetId().GetName(), resp.PoolerId.GetName())
 
 	// A repeat of the same fence refresh reads again and runs the fence again, which is
@@ -229,6 +233,7 @@ func TestRefreshFenceThenUnfence(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, stateUnfenced, resp.State)
 	require.True(t, h.gate.ApplicationOpen())
+	require.False(t, closed())
 }
 
 func TestRefreshExpectationIsNeverPermission(t *testing.T) {
@@ -325,6 +330,8 @@ func TestLifecycleChangeWithdrawsAdmission(t *testing.T) {
 	down.ServingStatus = clustermetadatapb.PoolerServingStatus_DISABLED
 	require.NoError(t, lifecycle.OnStateChange(t.Context(), down))
 	require.False(t, h.gate.ApplicationOpen())
+	require.True(t, h.pm.healthStreamer.getState().AdmissionClosed,
+		"gateways are told the gate is closed until admission is read again")
 	require.NoError(t, lifecycle.OnStateChange(t.Context(), state))
 	require.False(t, h.gate.ApplicationOpen(), "recovery of the backend alone never reopens admission")
 
@@ -625,6 +632,49 @@ func TestReplicaWithADownBackendAcknowledgesAnUnfence(t *testing.T) {
 	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
 }
 
+// TestALifecycleCloseIsReportedAsClosed: a failover closes the gate of a pooler until it has
+// read the admission state again. Gateways are told so, with the one closed signal, so that
+// they keep it unselected and the requests they buffered for the failover held.
+func TestALifecycleCloseIsReportedAsClosed(t *testing.T) {
+	h := newAdmissionHarness(t, false)
+	h.pm.record.registered.Store(true)
+	_, err := h.pm.enforceAdmission(t.Context(), nil)
+	require.NoError(t, err)
+	state := func() *poolerserver.HealthState { return h.pm.healthStreamer.getState() }
+	require.False(t, state().AdmissionClosed)
+
+	require.NoError(t, admissionLifecycle{pm: h.pm}.OnStateChange(t.Context(), servingstate.State{
+		ServingStatus: clustermetadatapb.PoolerServingStatus_SERVING,
+		Routing:       servingstate.RoutingState{Role: servingstate.RoutingRolePrimary},
+	}))
+	require.False(t, h.gate.ApplicationOpen(), "the lifecycle close closes the gate")
+	require.True(t, state().AdmissionClosed, "and says so")
+
+	// Reading the state again settles it.
+	_, err = h.pm.enforceAdmission(t.Context(), nil)
+	require.NoError(t, err)
+	require.False(t, state().AdmissionClosed)
+}
+
+// TestRoleChangeIsBroadcastWithTheClosedGate: the broadcast that carries a role change
+// already says the gate is closed until the admission state is read. A gateway that saw
+// PRIMARY and SERVING first, and closed afterwards, would release the requests it buffered
+// for the failover into a closed gate.
+func TestRoleChangeIsBroadcastWithTheClosedGate(t *testing.T) {
+	h := newAdmissionHarness(t, true)
+	_, err := h.pm.enforceAdmission(t.Context(), nil)
+	require.NoError(t, err)
+	require.False(t, h.pm.healthStreamer.getState().AdmissionClosed)
+
+	require.NoError(t, h.pm.healthStreamer.OnStateChange(t.Context(), servingstate.State{
+		ServingStatus: clustermetadatapb.PoolerServingStatus_SERVING,
+		Routing:       servingstate.RoutingState{Role: servingstate.RoutingRolePrimary},
+	}))
+	got := h.pm.healthStreamer.getState()
+	require.Equal(t, clustermetadatapb.RoutingRole_ROUTING_ROLE_PRIMARY, got.RoutingState.GetRole())
+	require.True(t, got.AdmissionClosed, "in the same state the role change is published in")
+}
+
 // TestAReplicaPromotedWhileAFenceCommitsStaysClosed: a replica read an unfenced row and
 // opened. The fence then commits, and before the coordinator's refresh reaches it the
 // replica is promoted. The promotion closes its gate and it has to read its row again
@@ -651,6 +701,7 @@ func TestAReplicaPromotedWhileAFenceCommitsStaysClosed(t *testing.T) {
 	h.pm.signalAdmission()
 	require.Eventually(t, func() bool { return h.reads.Load() > 0 }, 5*time.Second, 10*time.Millisecond)
 	testpoll.Never(t, h.gate.ApplicationOpen, 300*time.Millisecond, 20*time.Millisecond, "it read fenced = true and must stay closed")
+	require.True(t, h.pm.healthStreamer.getState().AdmissionClosed, "and says it is fenced")
 
 	// The coordinator's own refresh is then acknowledged from what the pooler enforces.
 	resp, err := h.refresh(true, 1)
@@ -814,6 +865,7 @@ func TestFencingAndFencedBothKeepTheGateClosed(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, stateFencing, resp.State)
 	require.False(t, h.gate.ApplicationOpen(), "FENCING closes the gate")
+	require.True(t, h.pm.healthStreamer.getState().AdmissionClosed)
 
 	// The coordinator completes the fence: FENCED at the same version. A refresh that still
 	// expects FENCING is stale and refused; one that expects FENCED is acknowledged.
