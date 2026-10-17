@@ -33,6 +33,9 @@ type servingRow struct {
 	updatedAt  time.Time
 }
 
+// closed reports whether the tablegroup refuses application work.
+func (r *servingRow) closed() bool { return r.state != stateUnfenced }
+
 func (r *servingRow) proto(tablegroup string) *multipoolerservicepb.TablegroupServingState {
 	return &multipoolerservicepb.TablegroupServingState{
 		Tablegroup:        tablegroup,
@@ -60,15 +63,30 @@ type servingReader interface {
 	GetRouting(ctx context.Context, database string) (appTablegroup string, version int64, found bool, err error)
 }
 
+// servingStore is the durable store of serving state. Every mutation is a conditional update
+// on the expected prior value, so concurrent or stale writers cannot overwrite each other.
+type servingStore interface {
+	servingReader
+	// CompareAndSet moves a row from (prevState, prevVersion) to (nextState,
+	// nextVersion), and reports whether it did. A tablegroup with no row is UNFENCED at
+	// version zero, and a fence from there creates the row. An error means the outcome
+	// is uncertain; the caller must re-read.
+	CompareAndSet(ctx context.Context, database, tablegroup string, prevState multipoolerservicepb.AdmissionState, prevVersion int64, nextState multipoolerservicepb.AdmissionState, nextVersion int64) (bool, error)
+	// MoveRouting atomically moves the pointer from one tablegroup to another and
+	// bumps its version, only if the pointer is at from at expectedVersion and both
+	// tablegroups are FENCED (a completed fence). It reports whether it did.
+	MoveRouting(ctx context.Context, database, from, to string, expectedVersion int64) (appTablegroup string, version int64, moved bool, err error)
+}
+
 // newServingStore builds the store of serving state of this pooler, which must be the
 // default primary. Where the state is kept is not decided here, so nothing is configured by
 // default and the calls that need the store answer UNIMPLEMENTED until something is
 // registered (a pooler that reads UNIMPLEMENTED from the default primary opens: it has no
 // admission state to enforce).
-var newServingStore func(pm *MultipoolerManager) servingReader
+var newServingStore func(pm *MultipoolerManager) servingStore
 
-// servingReader returns the store of serving state on this pooler.
-func (pm *MultipoolerManager) servingReader() (servingReader, error) {
+// servingStore returns the store of serving state on this pooler.
+func (pm *MultipoolerManager) servingStore() (servingStore, error) {
 	if newServingStore == nil {
 		return nil, mterrors.New(mtrpcpb.Code_UNIMPLEMENTED, "no store of serving state is configured")
 	}
