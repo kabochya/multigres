@@ -130,6 +130,9 @@ func (p *Pool) NewLogicalReplicationConn(ctx context.Context) (*Conn, error) {
 
 	c := newConn(pooled, connID, p, nil)
 	c.AddReservationReason(protoutil.ReasonLogicalReplication)
+	// A replication stream is not application work a fence waits for: it is held for as
+	// long as its consumer runs, and moving the consumer is the migration's job.
+	c.uncounted = true
 
 	// Deliberately leave inactivityTimeout = 0 so the reserved pool's idleKiller
 	// never evicts this connection. Idle teardown for replication-mode sessions
@@ -150,9 +153,6 @@ func (p *Pool) NewLogicalReplicationConn(ctx context.Context) (*Conn, error) {
 	p.mu.Unlock()
 
 	p.reserveCount.Add(1)
-	if p.config.OnReserve != nil {
-		p.config.OnReserve()
-	}
 	p.logger.DebugContext(ctx, "logical replication connection created",
 		"conn_id", connID,
 		"process_id", c.ProcessID())

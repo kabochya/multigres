@@ -339,6 +339,12 @@ func (p *UserPool) CloseReservedConnections(ctx context.Context) int {
 	return p.reservedPool.KillAll(ctx)
 }
 
+// LivePIDs returns the process ids of the backends of every connection the user's
+// pools have open.
+func (p *UserPool) LivePIDs() []uint32 {
+	return append(p.regularPool.LivePIDs(), p.reservedPool.LivePIDs()...)
+}
+
 // Close closes both regular and reserved pools.
 func (p *UserPool) Close() {
 	p.mu.Lock()

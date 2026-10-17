@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/multigres/multigres/go/common/mterrors"
 	"github.com/multigres/multigres/go/common/pgprotocol/client"
@@ -1079,6 +1080,121 @@ func (m *Manager) WaitForDrain(ctx context.Context) error {
 	}
 }
 
+// WaitForApplicationDrain blocks until no reserved connection that is client work is
+// left. It does not wait for the single-query borrows of the regular pool, which a
+// request's admission permit already covers, and which control traffic (NOTIFY,
+// credential lookups) keeps nonzero for as long as it runs: waiting for the instant
+// at which none is borrowed could miss it forever.
+func (m *Manager) WaitForApplicationDrain(ctx context.Context) error {
+	return m.WaitForReservedDrain(ctx)
+}
+
+// unexplainedBackendsRetry is how long UnexplainedBackends waits before it looks again
+// after finding a backend it cannot account for.
+const unexplainedBackendsRetry = 100 * time.Millisecond
+
+// UnexplainedBackends looks, on the server, for client backends of this database that
+// are not idle and that no connection of this pooler explains, and returns how many
+// there are. These are the backends a request of ours may have left running (a
+// connection closed under a statement, a process that ran before this one) and the
+// sessions of other clients that write to the same database. Every client role is
+// looked at, the pooler's own and its admin role included: the pooler's own
+// connections are explained by the snapshot of its open connections, not by their
+// role, and on an unmanaged pooler the admin role is the application's.
+//
+// It asks the server first and snapshots the pooler's own connections second, so that
+// a backend that exists when the server is asked and belongs to a connection of ours is
+// in the snapshot. A connection that is being opened or closed at that moment can
+// still look unexplained, so it looks again, until ctx is done, before it says so.
+// An error, including ctx running out before an attempt completed, means it cannot be
+// said that there are none, unless an attempt that completed had found some.
+func (m *Manager) UnexplainedBackends(ctx context.Context) (int, error) {
+	var lastErr error
+	count := 0
+	for {
+		n, err := m.unexplainedBackendsOnce(ctx)
+		switch {
+		case err == nil && n == 0:
+			return 0, nil
+		case err == nil:
+			count, lastErr = n, nil
+		default:
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			// Backends found unexplained by an attempt that completed are still there as
+			// far as anyone can say: the answer is that there are some, even if the last
+			// attempt was cut short by the deadline.
+			if count > 0 {
+				return count, nil
+			}
+			return 0, lastErr
+		case <-time.After(unexplainedBackendsRetry):
+		}
+	}
+}
+
+func (m *Manager) unexplainedBackendsOnce(ctx context.Context) (int, error) {
+	m.createMu.Lock()
+	adminPool := m.adminPool
+	m.createMu.Unlock()
+	if adminPool == nil {
+		return 0, errors.New("no admin pool to look for backends with")
+	}
+	queried, err := adminPool.QueryPIDs(ctx, unexplainedBackendsSQL)
+	if err != nil {
+		return 0, fmt.Errorf("look for the client backends that are running: %w", err)
+	}
+	if len(queried) == 0 {
+		return 0, nil
+	}
+	ours := m.livePIDs(adminPool)
+	unexplained := 0
+	for _, pid := range queried {
+		if _, ok := ours[pid]; !ok {
+			unexplained++
+		}
+	}
+	return unexplained, nil
+}
+
+// livePIDs lists the backends of every connection the pooler has open, in every pool:
+// regular, reserved (which includes the LISTEN connection) and admin.
+func (m *Manager) livePIDs(adminPool *admin.Pool) map[uint32]struct{} {
+	ours := map[uint32]struct{}{}
+	for _, pid := range adminPool.LivePIDs() {
+		ours[pid] = struct{}{}
+	}
+	if pools := m.userPoolsSnapshot.Load(); pools != nil {
+		for _, pool := range *pools {
+			for _, pid := range pool.LivePIDs() {
+				ours[pid] = struct{}{}
+			}
+		}
+	}
+	return ours
+}
+
+// unexplainedBackendsSQL lists the non-idle client backends of the database the pooler is
+// connected to, other than the one asking. Three things about what PostgreSQL shows a role
+// that cannot see into other roles' sessions (it has no pg_read_all_stats) are why the
+// conditions are what they are: the backend_type of such a session is NULL, not
+// 'client backend', so a NULL is taken for a client backend; its state is NULL too, which
+// counts as not idle; and datname is still shown, so the database is filtered by name.
+// Background workers and walsenders have a backend_type of their own and are not seen,
+// and that depends on the role seeing them: without pg_read_all_stats, another role's
+// walsender (the apply and table-sync connections of a migrator's logical replication
+// subscription are walsenders on the source) also shows a NULL backend_type and a NULL
+// state, and would count as a running client, making every fence busy for as long as
+// the replication streams. An unmanaged pooler therefore does not serve without
+// pg_read_all_stats.
+const unexplainedBackendsSQL = `SELECT pid FROM pg_stat_activity
+WHERE (backend_type = 'client backend' OR backend_type IS NULL)
+  AND pid <> pg_backend_pid()
+  AND datname = current_database()
+  AND state IS DISTINCT FROM 'idle'`
+
 // WaitForReservedDrain blocks until all RESERVED connections (transactions, temp
 // tables, portals, COPY, etc.) have been released or ctx is cancelled. Unlike
 // WaitForDrain it ignores transient single-query borrows, so the first stage of
@@ -1115,6 +1231,15 @@ func (m *Manager) CloseReservedConnections(ctx context.Context) int {
 		total += pool.CloseReservedConnections(ctx)
 	}
 	return total
+}
+
+// ApplicationReservations returns how many reserved connections that are client work
+// are held now: the count the drain waits on. Infrastructure connections, such as the
+// LISTEN connection of the pubsub listener, are not counted.
+func (m *Manager) ApplicationReservations() int64 {
+	m.drainMu.Lock()
+	defer m.drainMu.Unlock()
+	return m.reservedCount
 }
 
 // IsClosed reports whether the manager is terminally closed. It returns false

@@ -355,6 +355,14 @@ func (g *GrpcServer) Key() string {
 	return resolveTLSPath(g.sv.tlsKey.Get(), g.key.Get())
 }
 
+// TLSPaths returns the certificate, key and CA paths gRPC will use, from the flags
+// as parsed, so it can be called before Create has run.
+func (g *GrpcServer) TLSPaths(sv *ServEnv) (cert, key, ca string) {
+	return resolveTLSPath(sv.tlsCert.Get(), g.cert.Get()),
+		resolveTLSPath(sv.tlsKey.Get(), g.key.Get()),
+		resolveTLSPath(sv.tlsCA.Get(), g.ca.Get())
+}
+
 // resolveTLSPath prefers the canonical --tls-* value and falls back to the
 // deprecated --grpc-* one only when the canonical flag is unset. Used only for
 // gRPC: HTTP TLS is new in this codebase, so it has no deprecated flag of its

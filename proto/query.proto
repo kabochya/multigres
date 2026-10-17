@@ -267,6 +267,13 @@ message Target {
   // mode expresses the caller's writability / consistency needs.
   // See Mode for the semantics of each value.
   Mode mode = 5;
+
+  // control marks the request as cluster control traffic rather than application
+  // work: a pooler's application admission gate does not apply to it, so it is
+  // served while the tablegroup is fenced. Only a request that reserves no
+  // connection is exempt; one that would start a reservation is still gated.
+  // Poolers trust the gateway for this marking.
+  bool control = 6;
 }
 
 // PreparedStatement represents a prepared statement in the extended query protocol.

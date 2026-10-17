@@ -30,9 +30,21 @@ const (
 	externalReadinessQuery = "SELECT NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off'"
 	// externalIdentityQuery reports the physical identity of the endpoint.
 	externalIdentityQuery = "SELECT system_identifier::text, current_database() FROM pg_control_system()"
-
-	externalProbeTimeout = 2 * time.Second
+	// externalVisibilityQuery is true when the role the pooler connects as can read the
+	// state of every session of the database: it has the privileges of pg_read_all_stats
+	// ('usage', which asks whether the role inherits them: on PostgreSQL 16 and later that
+	// is decided per grant, so a member through a grant WITH INHERIT FALSE, which still sees
+	// NULL states, does not pass; a superuser has them).
+	// pg_monitor is one way to have them. Without it an idle session of another role, and
+	// an autovacuum worker, show no state, and a fence cannot tell them from running work
+	// and stays busy.
+	externalVisibilityQuery = "SELECT pg_has_role(current_user, 'pg_read_all_stats', 'usage')"
+	externalProbeTimeout    = 2 * time.Second
 )
+
+// errExternalRoleCannotSeeSessions means the pooler's role on the source cannot read other
+// sessions' state, so the unexplained-backend look of a fence would be wrong.
+var errExternalRoleCannotSeeSessions = errors.New("the role the pooler connects to the external backend as needs pg_read_all_stats (or pg_monitor, or superuser): without it, other roles' sessions, including logical replication walsenders and autovacuum workers, cannot be told apart from running clients, and every fence would report busy; the pooler does not serve")
 
 // errExternalIdentityMismatch means the endpoint answered but is not the source
 // the backing connection names.
@@ -75,6 +87,17 @@ func (pm *MultipoolerManager) probeExternalBackend(ctx context.Context) error {
 	if want == nil || want.ExpectedSystemIdentifier == "" || sysID != want.ExpectedSystemIdentifier || database != want.Database {
 		return errExternalIdentityMismatch
 	}
+	result, err = pm.adminQuery(ctx, externalVisibilityQuery)
+	if err != nil {
+		return err
+	}
+	var seesEverySession bool
+	if err := executor.ScanSingleRow(result, &seesEverySession); err != nil {
+		return err
+	}
+	if !seesEverySession {
+		return errExternalRoleCannotSeeSessions
+	}
 	return nil
 }
 
@@ -83,8 +106,17 @@ func (pm *MultipoolerManager) checkExternalReadiness(ctx context.Context) {
 	err := pm.probeExternalBackend(probeCtx)
 	cancel()
 	ready := err == nil
-	if err != nil {
-		pm.logger.DebugContext(ctx, "external backend not ready", "error", err)
+	if errors.Is(err, errExternalRoleCannotSeeSessions) {
+		// A misconfiguration an operator has to fix, not a transient failure: said once
+		// until the state changes, not on every probe.
+		if pm.externalRoleWarned.CompareAndSwap(false, true) {
+			pm.logger.WarnContext(ctx, "external backend not served", "error", err)
+		}
+	} else {
+		pm.externalRoleWarned.Store(false)
+		if err != nil {
+			pm.logger.DebugContext(ctx, "external backend not ready", "error", err)
+		}
 	}
 	pm.healthStreamer.setBackendReady(ready)
 

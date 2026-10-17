@@ -70,6 +70,7 @@ func TestExternalReadinessFailsClosedAndRecovers(t *testing.T) {
 			}
 			if step.serving {
 				qs.AddQueryPatternOnce(exactly(externalIdentityQuery), mock.MakeQueryResult([]string{"sysid", "database"}, [][]any{{"123", "db"}}))
+				qs.AddQueryPatternOnce(exactly(externalVisibilityQuery), mock.MakeQueryResult([]string{"visible"}, [][]any{{true}}))
 			}
 			pm.checkExternalReadiness(t.Context())
 			require.Equal(t, step.serving, pm.record.ServingStatus() == clustermetadatapb.PoolerServingStatus_SERVING)
@@ -97,6 +98,9 @@ func TestExternalIdentityMismatchWithdrawsReadiness(t *testing.T) {
 	} {
 		qs.AddQueryPatternOnce(exactly(externalReadinessQuery), mock.MakeQueryResult([]string{"writable"}, [][]any{{true}}))
 		qs.AddQueryPatternOnce(exactly(externalIdentityQuery), mock.MakeQueryResult([]string{"sysid", "database"}, [][]any{{tc.sysID, tc.database}}))
+		if tc.serving {
+			qs.AddQueryPatternOnce(exactly(externalVisibilityQuery), mock.MakeQueryResult([]string{"visible"}, [][]any{{true}}))
+		}
 		pm.checkExternalReadiness(t.Context())
 		require.Equal(t, tc.serving, pm.record.ServingStatus() == clustermetadatapb.PoolerServingStatus_SERVING, "%+v", tc)
 		require.Equal(t, tc.serving, pm.healthStreamer.getState().BackendReady, "%+v", tc)
@@ -127,3 +131,22 @@ type noopRunner struct{}
 
 func (noopRunner) StartWithOptions(func(ctx context.Context), ...timer.StartOption) bool { return true }
 func (noopRunner) Stop()                                                                 {}
+
+// TestExternalRoleThatCannotSeeOtherSessionsIsNotServed: a role that is neither a superuser
+// nor a member of pg_read_all_stats would make every fence busy while any other session or
+// an autovacuum worker exists, so the pooler does not serve with it, and serves once the
+// role can see them.
+func TestExternalRoleThatCannotSeeOtherSessionsIsNotServed(t *testing.T) {
+	pm, qs := newExternalMonitorManager(t, "123")
+	for _, visible := range []bool{false, true} {
+		qs.AddQueryPatternOnce(exactly(externalReadinessQuery), mock.MakeQueryResult([]string{"writable"}, [][]any{{true}}))
+		qs.AddQueryPatternOnce(exactly(externalIdentityQuery), mock.MakeQueryResult([]string{"sysid", "database"}, [][]any{{"123", "db"}}))
+		qs.AddQueryPatternOnce(exactly(externalVisibilityQuery), mock.MakeQueryResult([]string{"visible"}, [][]any{{visible}}))
+		pm.checkExternalReadiness(t.Context())
+		require.Equal(t, visible, pm.record.ServingStatus() == clustermetadatapb.PoolerServingStatus_SERVING, "visible=%v", visible)
+		require.Equal(t, visible, pm.healthStreamer.getState().BackendReady)
+		require.Equal(t, !visible, pm.externalRoleWarned.Load(), "the warning is armed while the role cannot see sessions, and re-armed when it can")
+	}
+	require.NoError(t, qs.ExpectationsWereMet())
+	require.ErrorContains(t, errExternalRoleCannotSeeSessions, "pg_read_all_stats")
+}

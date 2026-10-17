@@ -31,6 +31,7 @@ const (
 	PgSSInvalidTextRepresentation = "22P02" // invalid_text_representation
 	PgSSInvalidParameterValue     = "22023" // invalid_parameter_value
 	PgSSUndefinedFunction         = "42883" // undefined_function
+	PgSSUndefinedTable            = "42P01" // undefined_table
 	PgSSActiveTransaction         = "25001" // active_sql_transaction
 	PgSSNoActiveTransaction       = "25P01" // no_active_sql_transaction
 	PgSSInFailedTransaction       = "25P02" // in_failed_sql_transaction
@@ -225,6 +226,17 @@ var (
 		ID: "MTF01", Severity: "ERROR",
 		Format:      "planned failover in progress",
 		Description: "The pooler is transitioning during a planned failover. The query will be retried automatically.",
+	}
+
+	// MTF02 is returned by a multipooler whose application admission gate is
+	// closed (a fence during a migration, or a pooler that has not yet read its
+	// admission state). Like MTF01 it is bufferable, but the closure is deliberate,
+	// not a failover, so the gateway does not apply the guard against buffering
+	// again soon after the last failover cycle.
+	MTF02 = &MTError{
+		ID: "MTF02", Severity: "ERROR",
+		Format:      "application admission is closed",
+		Description: "The pooler is not admitting application queries. The query will be retried automatically.",
 	}
 )
 

@@ -71,10 +71,15 @@ func (s *poolerService) StreamReplication(stream multipoolerpb.MultipoolerServic
 	}
 
 	// A replication stream opens a fresh, dedicated, session-pinned backend, so
-	// it is admitted like a new reservation (rejected during graceful drain).
-	if err := s.pooler.StartRequest(init.GetTarget(), admissionKind(0, true)); err != nil {
+	// it is admitted like a new reservation (rejected during graceful drain and while
+	// the tablegroup is fenced). It is not counted as work in flight for its lifetime:
+	// a fence does not wait for it, since moving the consumer of a stream is the
+	// migration's job, and the pooler ends its streams when it shuts down. This assumes
+	// that replication connections are used only for replication: SQL sent over one is
+	// not covered by fencing, and callers must not use them for writes.
+	if admissionErr := s.pooler.AdmitStream(init.GetTarget(), admissionKind(0, true)); admissionErr != nil {
 		s.pooler.ReplicationMetrics().RecordSetupError(replication.SetupErrorAdmissionRejected)
-		return mterrors.ToGRPC(err)
+		return mterrors.ToGRPC(admissionErr)
 	}
 
 	pm := s.pooler.PoolManager()
