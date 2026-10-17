@@ -15,6 +15,7 @@
 package handler
 
 import (
+	"errors"
 	"maps"
 	"slices"
 	"sync"
@@ -99,6 +100,12 @@ type MultigatewayConnectionState struct {
 	// so it genuinely belongs to connection state.
 	PendingBeginQuery string
 
+	// copyTarget is the target the active COPY was established on. Routing can
+	// re-resolve a COPY's target while it waits to start (application routing
+	// moving), so the data phase must use the target the reservation was recorded
+	// under, not rebuild one from the statement's plan. Guarded by mu.
+	copyTarget *query.Target
+
 	// ActiveTransactionBeginQuery stores the BEGIN/START statement that describes
 	// the current transaction's characteristics. PendingBeginQuery is consumed when
 	// the first backend reservation starts the transaction; this copy survives that
@@ -126,6 +133,11 @@ type MultigatewayConnectionState struct {
 	// pendingActions tracks LISTEN/UNLISTEN operations inside transactions,
 	// preserving the order they were issued. Processed at COMMIT by CommitPendingListens.
 	pendingActions []pendingListenAction
+
+	// pendingNotifications are the NOTIFYs of the open transaction that are sent to
+	// the default cohort after it commits (see engine.NotifyPrimitive), in the order
+	// they were issued. A savepoint remembers how many there were when it was set.
+	pendingNotifications []PendingNotification
 
 	// NotifCh receives notifications from the PubSubListener.
 	NotifCh chan *sqltypes.Notification
@@ -200,6 +212,15 @@ type savepointFrame struct {
 	// multipooler — PG closes those cursors server-side on
 	// ROLLBACK TO, and our reservation bookkeeping must follow.
 	openHoldCursors map[string]bool
+	// notificationCount is how many notifications were pending when the frame was
+	// pushed; ROLLBACK TO the savepoint discards the later ones.
+	notificationCount int
+}
+
+// PendingNotification is a NOTIFY waiting for its transaction to commit.
+type PendingNotification struct {
+	Channel string
+	Payload string
 }
 
 type ShardState struct {
@@ -381,6 +402,27 @@ func NewShardState(target *query.Target) *ShardState {
 	return &ShardState{
 		Target: target,
 	}
+}
+
+// SetCopyTarget records the target the active COPY was established on.
+func (m *MultigatewayConnectionState) SetCopyTarget(t *query.Target) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.copyTarget = t
+}
+
+// CopyTarget returns the target the active COPY was established on, or nil.
+func (m *MultigatewayConnectionState) CopyTarget() *query.Target {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.copyTarget
+}
+
+// ClearCopyTarget forgets the active COPY's target.
+func (m *MultigatewayConnectionState) ClearCopyTarget() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.copyTarget = nil
 }
 
 // GetMatchingShardState gets the shardState (if any) that matches the target specified.
@@ -631,6 +673,8 @@ func (m *MultigatewayConnectionState) pushFrameLocked(name string) {
 		name:            name,
 		sessionSettings: m.snapshotSessionSettingsLocked(),
 		openHoldCursors: m.snapshotOpenHoldCursorsLocked(),
+
+		notificationCount: len(m.pendingNotifications),
 	})
 	for _, gmv := range m.gatewayManagedVariablesLocked() {
 		gmv.Snapshot()
@@ -763,6 +807,9 @@ func (m *MultigatewayConnectionState) RollbackToSavepoint(name string) {
 	}
 	m.OpenHoldCursors = surviving
 	m.savepoints = m.savepoints[:idx+1]
+	if n := m.savepoints[idx].notificationCount; n < len(m.pendingNotifications) {
+		m.pendingNotifications = m.pendingNotifications[:n]
+	}
 	for _, gmv := range m.gatewayManagedVariablesLocked() {
 		gmv.RestoreFromDepth(idx)
 	}
@@ -1173,8 +1220,95 @@ func (m *MultigatewayConnectionState) CommitPendingListens() (subscribes []strin
 	return subscribes, unsubscribes, unsubscribeAll
 }
 
-// DiscardPendingListens discards pending listen/unlisten state on rollback.
+// MaxPendingNotifications caps the NOTIFYs a transaction can have recorded for after
+// its commit, and MaxPendingNotificationBytes their channels and payloads together. These
+// caps are a deliberate divergence from PostgreSQL, which has no per-transaction limit and
+// raises 54000 (program_limit_exceeded) at commit, when its notification queue is full, not
+// when the NOTIFY is issued: here a NOTIFY beyond either cap fails with 54000 when issued,
+// because the notifications are held in the gateway until the commit. The
+// bytes bound what is sent in the one statement that delivers them, which has to fit in a
+// gRPC message (16 MiB by default) after the array escaping, which can double it: more than
+// that would drop the whole batch at the commit instead of failing the NOTIFY that caused it.
+const (
+	MaxPendingNotifications     = 10_000
+	MaxPendingNotificationBytes = 4 << 20
+)
+
+var (
+	// ErrTooManyNotifications is returned when a transaction has MaxPendingNotifications.
+	ErrTooManyNotifications = errors.New("too many NOTIFY statements in one transaction")
+	// ErrNotificationsTooLarge is returned when the channels and payloads of a transaction's
+	// NOTIFYs would exceed MaxPendingNotificationBytes.
+	ErrNotificationsTooLarge = errors.New("the NOTIFY statements of one transaction are too large")
+)
+
+// AddPendingNotification records a NOTIFY of the open transaction, to be sent after
+// the transaction commits. It records nothing and returns ErrTooManyNotifications or
+// ErrNotificationsTooLarge when a cap would be exceeded.
+func (m *MultigatewayConnectionState) AddPendingNotification(channel, payload string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := PendingNotification{Channel: channel, Payload: payload}
+	// PostgreSQL delivers a channel and payload pair once per transaction, at the
+	// position of its first occurrence. Collapsing them here, not only when they are
+	// sent, keeps a repeat from being delivered twice and from counting twice.
+	size := len(channel) + len(payload)
+	for _, existing := range m.pendingNotifications {
+		if existing == n {
+			return nil
+		}
+		size += len(existing.Channel) + len(existing.Payload)
+	}
+	if len(m.pendingNotifications) >= MaxPendingNotifications {
+		return ErrTooManyNotifications
+	}
+	if size > MaxPendingNotificationBytes {
+		return ErrNotificationsTooLarge
+	}
+	m.pendingNotifications = append(m.pendingNotifications, n)
+	return nil
+}
+
+// TakePendingNotifications returns the recorded NOTIFYs in the order they were issued,
+// without the repeats of a channel and payload pair that PostgreSQL would collapse
+// within a transaction, and forgets them.
+func (m *MultigatewayConnectionState) TakePendingNotifications() []PendingNotification {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	taken := m.pendingNotifications
+	m.pendingNotifications = nil
+	seen := make(map[PendingNotification]struct{}, len(taken))
+	out := taken[:0]
+	for _, n := range taken {
+		if _, dup := seen[n]; dup {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	return out
+}
+
+// DiscardPendingNotifications forgets the recorded NOTIFYs: the transaction that
+// issued them did not commit.
+func (m *MultigatewayConnectionState) DiscardPendingNotifications() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pendingNotifications = nil
+}
+
+// HasPendingNotifications reports whether the open transaction has NOTIFYs waiting
+// for its commit.
+func (m *MultigatewayConnectionState) HasPendingNotifications() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.pendingNotifications) > 0
+}
+
+// DiscardPendingListens discards pending listen/unlisten state on rollback, and the
+// NOTIFYs recorded for after the commit with it.
 func (m *MultigatewayConnectionState) DiscardPendingListens() {
+	m.DiscardPendingNotifications()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pendingActions = nil

@@ -160,6 +160,10 @@ func (l admissionLifecycle) OnStateChange(_ context.Context, s servingstate.Stat
 		if g, err := pm.applicationGate(); err == nil {
 			g.CloseApplication()
 		}
+		// Gateways are told through the health stream that the gate is closed, so that
+		// they do not select the pooler, or release the requests they buffered for the
+		// failover, into a closed gate.
+		pm.healthStreamer.setAdmissionClosed(true)
 	}
 	a.mu.Unlock()
 	if changed {
@@ -304,6 +308,7 @@ func (pm *MultipoolerManager) enforceAdmission(ctx context.Context, expected *ad
 	// FENCING and FENCED both keep the gate closed; only the coordinator tells them apart.
 	closed := row.GetState() != stateUnfenced
 	if closed {
+		pm.announceClosingGate()
 		if expected != nil {
 			// Close, wait, and only then acknowledge. A fence that is not clean leaves the
 			// gate closed and the call failing, never a false acknowledgment.
@@ -330,9 +335,18 @@ func (pm *MultipoolerManager) enforceAdmission(ctx context.Context, expected *ad
 	} else if !g.OpenApplication(generation) {
 		return nil, mterrors.New(mtrpcpb.Code_ABORTED, "pooler lifecycle changed while reading admission; retry")
 	}
+	// Reported to gateways under the same lock, so a lifecycle close that follows
+	// cannot be overwritten by this open.
+	pm.healthStreamer.setAdmissionClosed(closed)
 	applied := &appliedAdmission{state: row.GetState(), version: row.GetVersion(), generation: generation}
 	a.applied = applied
 	return applied, nil
+}
+
+// announceClosingGate tells gateways, through the health stream, that the gate is
+// closing.
+func (pm *MultipoolerManager) announceClosingGate() {
+	pm.healthStreamer.setAdmissionClosed(true)
 }
 
 // mayOpenLater reports whether the pooler may open before its backend is ready: a managed

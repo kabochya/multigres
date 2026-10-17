@@ -469,6 +469,8 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 	// gate is closed from the moment the query server exists.
 	if gate, ok := pm.qsc.(poolerserver.ApplicationGate); ok {
 		gate.EnableAdmissionControl(unmanaged)
+		pm.healthStreamer.admissionControlled = true
+		pm.healthStreamer.admissionClosed = true
 	}
 
 	// The health streamer must wait for the query server to update its type before
