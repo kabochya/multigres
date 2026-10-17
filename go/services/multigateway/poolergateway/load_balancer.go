@@ -322,6 +322,12 @@ func (lb *loadBalancer) notifyLeaderServingFromSummary(summary *shardSummary, co
 	if health == nil || !health.isServing() {
 		return
 	}
+	// A leader that is not admitting application queries has not recovered: do
+	// not release requests toward it. That includes one that has not yet read its
+	// admission state after the failover, and an unmanaged pooler that is fenced.
+	if health.gateNotOpen() {
+		return
+	}
 	// The pooler's own broadcast must advertise role PRIMARY — it is the elected
 	// routing primary and it is attesting to that itself. Role PRIMARY implies
 	// writability (a pooler advertises PRIMARY only once it is the writable routing
@@ -350,6 +356,19 @@ func (lb *loadBalancer) notifyLeaderServingFromSummary(summary *shardSummary, co
 //     (see matchesReplicaTarget). Excludes both the current leader and a
 //     stale leader.
 func (lb *loadBalancer) getConnection(target *query.Target) (*poolerConnection, error) {
+	return lb.selectConnection(target, true)
+}
+
+// getControlConnection selects a pooler for a request the application gate does
+// not apply to (a credential lookup): a pooler whose gate is closed is as good as
+// an open one, so a fence does not hold such requests back.
+func (lb *loadBalancer) getControlConnection(target *query.Target) (*poolerConnection, error) {
+	return lb.selectConnection(target, false)
+}
+
+// selectConnection implements getConnection; requireOpenGate excludes poolers
+// whose application gate is closed.
+func (lb *loadBalancer) selectConnection(target *query.Target, requireOpenGate bool) (*poolerConnection, error) {
 	if target == nil {
 		return nil, errors.New("target cannot be nil")
 	}
@@ -387,6 +406,13 @@ func (lb *loadBalancer) getConnection(target *query.Target) (*poolerConnection, 
 		if !ok || conn == nil {
 			return nil, newNoWritablePrimaryError(
 				"leader %s known but not connected for database=%s, tablegroup=%s, shard=%s",
+				leaderID, sk.GetDatabase(), sk.GetTableGroup(), sk.GetShard())
+		}
+		// A leader whose application gate is closed cannot take the request: hold it
+		// until a pooler admits again rather than bouncing off it.
+		if h := conn.Health(); requireOpenGate && h != nil && h.gateNotOpen() {
+			return nil, newAdmissionClosedError(
+				"leader %s is not admitting application queries for database=%s, tablegroup=%s, shard=%s",
 				leaderID, sk.GetDatabase(), sk.GetTableGroup(), sk.GetShard())
 		}
 		return conn, nil
@@ -686,6 +712,10 @@ func matchesShardTarget(conn *poolerConnection, target *query.Target) bool {
 // signal carried on the health observation.
 func (lb *loadBalancer) matchesReplicaTarget(conn *poolerConnection, target *query.Target) bool {
 	if !matchesShardTarget(conn, target) {
+		return false
+	}
+	// A replica whose application gate is closed refuses queries.
+	if h := conn.Health(); h != nil && h.gateNotOpen() {
 		return false
 	}
 	return !lb.claimsPrimary(conn)

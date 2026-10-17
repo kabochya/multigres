@@ -19,6 +19,7 @@ package planner
 import (
 	"log/slog"
 	"strings"
+	"sync"
 
 	"github.com/multigres/multigres/go/common/constants"
 	"github.com/multigres/multigres/go/common/mterrors"
@@ -30,9 +31,16 @@ import (
 
 // Planner is responsible for creating query execution plans.
 type Planner struct {
-	// defaultTableGroup is the tablegroup to use when routing queries.
-	// For Phase 1, all queries are routed to this tablegroup.
-	defaultTableGroup string
+	// apps holds the tablegroup application queries are routed to, per database.
+	// It is read at plan time and may be swapped at runtime when application
+	// routing moves (see SetApplicationTableGroup); cached plans must be
+	// invalidated then.
+	apps *appTableGroups
+
+	// database is the database the planner is scoped to, which selects the
+	// tablegroup tableGroup returns. Plan scopes a copy to the connection's
+	// database; the shared planner is unscoped.
+	database string
 
 	logger *slog.Logger
 
@@ -55,10 +63,42 @@ type Planner struct {
 // NewPlanner creates a new query planner.
 func NewPlanner(defaultTableGroup string, logger *slog.Logger, txnMetrics *engine.TransactionMetrics) *Planner {
 	return &Planner{
-		defaultTableGroup: defaultTableGroup,
-		logger:            logger,
-		txnMetrics:        txnMetrics,
+		apps:       &appTableGroups{fallback: defaultTableGroup, byDatabase: map[string]string{}},
+		logger:     logger,
+		txnMetrics: txnMetrics,
 	}
+}
+
+// appTableGroups is the tablegroup application queries go to: the fallback for
+// every database, except those whose application routing moves it (see
+// poolergateway.AppRouting).
+type appTableGroups struct {
+	mu         sync.RWMutex
+	fallback   string
+	byDatabase map[string]string
+}
+
+func (a *appTableGroups) get(database string) string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if tg, ok := a.byDatabase[database]; ok {
+		return tg
+	}
+	return a.fallback
+}
+
+func (a *appTableGroups) set(database, tableGroup string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.byDatabase[database] = tableGroup
+}
+
+// forDatabase returns a planner for statements of database: it shares everything
+// with p, and its tableGroup is the one application routing gives that database.
+func (p *Planner) forDatabase(database string) *Planner {
+	scoped := *p
+	scoped.database = database
+	return &scoped
 }
 
 // SetSlotBasedReplicationEnabled wires the dynamic getter that gates
@@ -175,11 +215,14 @@ func (p *Planner) Plan(
 	conn *server.Conn,
 	opts PlanOptions,
 ) (*engine.Plan, error) {
+	if conn != nil {
+		p = p.forDatabase(conn.Database())
+	}
 	p.logger.Debug("planning query",
 		"query", sql,
 		"user", conn.User(),
 		"database", conn.Database(),
-		"default_tablegroup", p.defaultTableGroup,
+		"default_tablegroup", p.tableGroup(),
 		"statement_type", stmt.NodeTag())
 
 	// unsafeConnection is the per-connection opt-out. It suppresses the
@@ -273,7 +316,7 @@ func (p *Planner) Plan(
 		return p.planUnlistenStmt(sql, stmt.(*ast.UnlistenStmt))
 
 	case ast.T_NotifyStmt:
-		return p.planNotifyStmt(sql)
+		return p.planNotifyStmt(sql, stmt.(*ast.NotifyStmt))
 
 	case ast.T_DiscardStmt:
 		return p.planDiscardStmt(sql, stmt.(*ast.DiscardStmt), conn)
@@ -482,7 +525,7 @@ func checkTempSchemaQualifiedCreate(stmt ast.Stmt) error {
 // persists across queries on the same session.
 func (p *Planner) planTempTableCreation(sql string, conn *server.Conn) (*engine.Plan, error) {
 	p.logger.Debug("planning temp table creation", "sql", sql)
-	plan := engine.NewPlan(sql, engine.NewRoute(p.defaultTableGroup, constants.DefaultShard, sql, nil))
+	plan := engine.NewPlan(sql, engine.NewRoute(p.tableGroup(), constants.DefaultShard, sql, nil))
 	// The temp-table reservation is a static property of the plan: it routes as
 	// a plain Route, but ExecInfo.TempTable tells the executor to reserve a
 	// connection with ReasonTempTable.
@@ -499,7 +542,7 @@ func (p *Planner) planTempTableCreation(sql string, conn *server.Conn) (*engine.
 func (p *Planner) planHoldCursorDeclare(sql string, stmt *ast.DeclareCursorStmt) (*engine.Plan, error) {
 	p.logger.Debug("planning DECLARE WITH HOLD cursor",
 		"cursor", stmt.PortalName, "sql", sql)
-	route := engine.NewHoldCursorRoute(p.defaultTableGroup, constants.DefaultShard, sql, stmt.PortalName)
+	route := engine.NewHoldCursorRoute(p.tableGroup(), constants.DefaultShard, sql, stmt.PortalName)
 	plan := engine.NewPlan(sql, route)
 	// The cursor name to pin is known at plan time, so it rides on the cached
 	// plan's ExecInfo; HoldCursorRoute forwards it to the reservation.
@@ -517,9 +560,9 @@ func (p *Planner) planClosePortalStmt(sql string, stmt *ast.ClosePortalStmt) (*e
 	p.logger.Debug("planning CLOSE cursor", "cursor", stmt.PortalName, "sql", sql)
 	var route *engine.CloseCursorRoute
 	if stmt.PortalName == "" {
-		route = engine.NewCloseAllCursorRoute(p.defaultTableGroup, constants.DefaultShard, sql)
+		route = engine.NewCloseAllCursorRoute(p.tableGroup(), constants.DefaultShard, sql)
 	} else {
-		route = engine.NewCloseCursorRoute(p.defaultTableGroup, constants.DefaultShard, sql, stmt.PortalName)
+		route = engine.NewCloseCursorRoute(p.tableGroup(), constants.DefaultShard, sql, stmt.PortalName)
 	}
 	plan := engine.NewPlan(sql, route)
 	plan.Type = engine.PlanTypeCloseCursorRoute
@@ -541,7 +584,7 @@ func (p *Planner) planDefault(sql string, stmt ast.Stmt, conn *server.Conn, opts
 
 	p.logger.Debug("created default route plan",
 		"plan", plan.String(),
-		"tablegroup", p.defaultTableGroup)
+		"tablegroup", p.tableGroup())
 	return plan, nil
 }
 
@@ -586,9 +629,9 @@ func (p *Planner) routePrimitive(sql string, stmt ast.Stmt, opts PlanOptions) (e
 		return nil, err
 	}
 	if !rewrote {
-		return engine.NewRoute(p.defaultTableGroup, constants.DefaultShard, sql, stmt), nil
+		return engine.NewRoute(p.tableGroup(), constants.DefaultShard, sql, stmt), nil
 	}
-	route := engine.NewRoute(p.defaultTableGroup, constants.DefaultShard, routeAST.SqlString(), routeAST)
+	route := engine.NewRoute(p.tableGroup(), constants.DefaultShard, routeAST.SqlString(), routeAST)
 	if len(reads) > 0 {
 		return engine.NewGatewayManagedValueRoute(route, nil, reads), nil
 	}
@@ -618,16 +661,18 @@ func execInfoFromOpts(opts PlanOptions) engine.PlanExecInfo {
 	}
 }
 
-// SetDefaultTableGroup updates the default tablegroup for routing.
-// This allows dynamic configuration changes.
-func (p *Planner) SetDefaultTableGroup(tableGroup string) {
-	p.defaultTableGroup = tableGroup
-	p.logger.Info("default tablegroup updated", "tablegroup", tableGroup)
+// SetApplicationTableGroup sets the tablegroup application queries of database
+// are routed to. Other databases keep the tablegroup they had. Cached plans
+// embed the previous one and must be invalidated by the caller.
+func (p *Planner) SetApplicationTableGroup(database, tableGroup string) {
+	p.apps.set(database, tableGroup)
+	p.logger.Info("application tablegroup updated", "database", database, "tablegroup", tableGroup)
 }
 
-// GetDefaultTableGroup returns the current default tablegroup.
-func (p *Planner) GetDefaultTableGroup() string {
-	return p.defaultTableGroup
+// GetDefaultTableGroup returns the tablegroup application queries of database
+// are routed to.
+func (p *Planner) GetDefaultTableGroup(database string) string {
+	return p.apps.get(database)
 }
 
 // planType returns the observability label for a plan. Temp-table and
@@ -695,7 +740,28 @@ func (p *Planner) planUnlistenStmt(sql string, stmt *ast.UnlistenStmt) (*engine.
 	return engine.NewPlan(sql, engine.NewUnlistenPrimitive(stmt.Conditionname, sql)), nil
 }
 
-// planNotifyStmt routes NOTIFY to the default table group as a regular query.
-func (p *Planner) planNotifyStmt(sql string) (*engine.Plan, error) {
-	return engine.NewPlan(sql, engine.NewRoute(p.defaultTableGroup, constants.DefaultShard, sql, nil)), nil
+// planNotifyStmt plans NOTIFY. LISTEN subscribes on the default cohort and stays
+// there, so a NOTIFY is always sent there; anywhere else it would never be delivered.
+// It is control traffic: it writes no table data, so a fenced default tablegroup
+// still serves it.
+//
+// While the application tablegroup is not the default one (before a cutover into
+// it, or after a rollback), a NOTIFY inside a transaction is not sent when it is
+// issued but after the transaction has committed, and is discarded by a rollback (see
+// engine.NotifyPrimitive). Once the application tablegroup is the default one,
+// application tables, triggers, NOTIFY and LISTEN are all on its primary: a NOTIFY
+// inside a transaction goes to the transaction's own backend and is atomic with it.
+// Known limits: pg_notify() inside a query, and NOTIFY run by a
+// trigger or function on the external source, run there and are not delivered to
+// LISTENers on the default cohort before the cutover.
+func (p *Planner) planNotifyStmt(sql string, stmt *ast.NotifyStmt) (*engine.Plan, error) {
+	plan := engine.NewPlan(sql, engine.NewNotifyPrimitive(stmt, sql, p.tableGroup() != constants.DefaultTableGroup))
+	plan.ExecInfo.Control = true
+	return plan, nil
+}
+
+// tableGroup returns the tablegroup application queries of the planner's
+// database are routed to.
+func (p *Planner) tableGroup() string {
+	return p.apps.get(p.database)
 }
