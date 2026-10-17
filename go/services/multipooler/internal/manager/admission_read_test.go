@@ -92,7 +92,7 @@ func pointAtDefaultLeader(t *testing.T, h *admissionHarness, stub *defaultLeader
 func withAStoreOfServingState(t *testing.T) {
 	t.Helper()
 	old := newServingStore
-	newServingStore = func(*MultipoolerManager) servingReader { return nil }
+	newServingStore = func(*MultipoolerManager) servingStore { return nil }
 	t.Cleanup(func() { newServingStore = old })
 }
 

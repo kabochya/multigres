@@ -451,12 +451,14 @@ func unfencedRow(tablegroup string) *multipoolerservicepb.TablegroupServingState
 //
 // The tablegroup rows and the routing pointer are read by separate statements, so
 // the response is not a single snapshot. That is harmless: a caller treats it as
-// advice and every decision it leads to is re-checked where it is made.
+// advice and every decision it leads to is re-checked where it is made
+// (MoveRouting re-checks the admission states in the statement that moves the
+// pointer; a pooler's admission read is of its own row only).
 func (pm *MultipoolerManager) GetServingState(ctx context.Context, req *multipoolerservicepb.GetServingStateRequest) (*multipoolerservicepb.GetServingStateResponse, error) {
 	if err := pm.requireDefaultPrimary(req.GetDatabase()); err != nil {
 		return nil, err
 	}
-	store, err := pm.servingReader()
+	store, err := pm.servingStore()
 	if err != nil {
 		return nil, err
 	}
@@ -485,4 +487,106 @@ func readServingState(ctx context.Context, store servingReader, req *multipooler
 	}
 	resp.AppTablegroup, resp.RoutingVersion = app, version
 	return resp, nil
+}
+
+func (pm *MultipoolerManager) newAdmissionCoordinator() (*admissionCoordinator, error) {
+	transport, err := pm.config.DefaultPrimaryDialOption()
+	if err != nil {
+		return nil, mterrors.Wrap(err, "default primary transport")
+	}
+	store, err := pm.servingStore()
+	if err != nil {
+		return nil, err
+	}
+	database := pm.record.ShardKey().GetDatabase()
+	members := topologyMembership{ts: pm.config.TopoClient}
+	return &admissionCoordinator{
+		store:     store,
+		members:   members,
+		refresher: grpcRefresher{transport: transport},
+		logger:    pm.logger,
+		isLeader:  func() error { return pm.requireDefaultPrimary(database) },
+		requiredNodes: func(ctx context.Context, db, tg string) (int, bool, error) {
+			return pm.requiredNodes(ctx, members, db, tg)
+		},
+	}, nil
+}
+
+// requiredNodes returns how many nodes the durability policy of the tablegroup needs to
+// acknowledge a write, and whether the tablegroup is managed. The default tablegroup's
+// is the committed rule of this pooler, its leader. Another tablegroup's cohort is not
+// local, and the policy the database was bootstrapped with stands in for it.
+//
+// Known limit: a managed tablegroup other than the default one is not asked for its
+// current rule.
+func (pm *MultipoolerManager) requiredNodes(ctx context.Context, members membership, db, tg string) (int, bool, error) {
+	if tg == pm.record.ShardKey().GetTableGroup() {
+		var policy *clustermetadatapb.DurabilityPolicy
+		if pm.consensusMgr != nil {
+			policy = pm.consensusMgr.CachedConsensusStatus().GetCurrentPosition().GetPosition().GetDecision().GetDurabilityPolicy()
+		}
+		return int(policy.GetRequiredCount()), true, nil
+	}
+	list, err := members.Snapshot(ctx, db, tg)
+	if err != nil {
+		return 0, false, err
+	}
+	managed := false
+	for _, p := range list {
+		if p.record.GetManagementMode() != clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED {
+			managed = true
+		}
+	}
+	if !managed {
+		return 0, false, nil
+	}
+	policy, err := pm.loadDurabilityPolicy(ctx)
+	if err != nil {
+		return 0, true, err
+	}
+	return int(policy.GetRequiredCount()), true, nil
+}
+
+// FenceTablegroup fences a tablegroup. Only the default primary serves it. The
+// default tablegroup can be fenced too, as the destination of a migration: its
+// poolers then refuse application work, and the default primary, which is in the
+// fan-out like any other member, keeps serving this control plane, since admission
+// applies to application queries only.
+func (pm *MultipoolerManager) FenceTablegroup(ctx context.Context, req *multipoolerservicepb.FenceTablegroupRequest) (*multipoolerservicepb.FenceTablegroupResponse, error) {
+	c, err := pm.coordinatorFor(ctx, req.GetDatabase())
+	if err != nil {
+		return nil, err
+	}
+	return c.FenceTablegroup(ctx, req)
+}
+
+// UnfenceTablegroup unfences a tablegroup. Only the default primary serves it.
+func (pm *MultipoolerManager) UnfenceTablegroup(ctx context.Context, req *multipoolerservicepb.UnfenceTablegroupRequest) (*multipoolerservicepb.UnfenceTablegroupResponse, error) {
+	c, err := pm.coordinatorFor(ctx, req.GetDatabase())
+	if err != nil {
+		return nil, err
+	}
+	return c.UnfenceTablegroup(ctx, req)
+}
+
+// FlipRouting moves application traffic between two fenced tablegroups. Only the
+// default primary serves it.
+func (pm *MultipoolerManager) FlipRouting(ctx context.Context, req *multipoolerservicepb.FlipRoutingRequest) (*multipoolerservicepb.FlipRoutingResponse, error) {
+	c, err := pm.coordinatorFor(ctx, req.GetDatabase())
+	if err != nil {
+		return nil, err
+	}
+	return c.FlipRouting(ctx, req)
+}
+
+// coordinatorFor returns the admission coordinator, after checking that this pooler is
+// the default primary of the database.
+func (pm *MultipoolerManager) coordinatorFor(ctx context.Context, database string) (*admissionCoordinator, error) {
+	if err := pm.requireDefaultPrimary(database); err != nil {
+		return nil, err
+	}
+	if pm.config == nil || pm.config.TopoClient == nil {
+		return nil, mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "pooler discovery unavailable")
+	}
+	return pm.newAdmissionCoordinator()
 }

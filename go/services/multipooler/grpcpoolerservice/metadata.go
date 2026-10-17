@@ -69,3 +69,20 @@ func (s *poolerService) GetServingState(ctx context.Context, req *multipoolerpb.
 func (s *poolerService) RefreshAdmission(ctx context.Context, req *multipoolerpb.RefreshAdmissionRequest) (*multipoolerpb.RefreshAdmissionResponse, error) {
 	return serveMetadata(ctx, s, req, poolerserver.MetadataProvider.RefreshAdmission)
 }
+
+// FenceTablegroup fences a tablegroup. Only the default primary serves it. A fence that some
+// member did not complete carries the per-member results, which serveMetadata passes through.
+func (s *poolerService) FenceTablegroup(ctx context.Context, req *multipoolerpb.FenceTablegroupRequest) (*multipoolerpb.FenceTablegroupResponse, error) {
+	return serveMetadata(ctx, s, req, poolerserver.MetadataProvider.FenceTablegroup)
+}
+
+// UnfenceTablegroup unfences a tablegroup. Only the default primary serves it.
+func (s *poolerService) UnfenceTablegroup(ctx context.Context, req *multipoolerpb.UnfenceTablegroupRequest) (*multipoolerpb.UnfenceTablegroupResponse, error) {
+	return serveMetadata(ctx, s, req, poolerserver.MetadataProvider.UnfenceTablegroup)
+}
+
+// FlipRouting moves application traffic between two fenced tablegroups. Only the
+// default primary serves it.
+func (s *poolerService) FlipRouting(ctx context.Context, req *multipoolerpb.FlipRoutingRequest) (*multipoolerpb.FlipRoutingResponse, error) {
+	return serveMetadata(ctx, s, req, poolerserver.MetadataProvider.FlipRouting)
+}

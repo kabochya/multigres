@@ -27,6 +27,9 @@ import (
 type MetadataProvider interface {
 	GetBackingConnection(ctx context.Context, req *multipoolerservicepb.GetBackingConnectionRequest) (*multipoolerservicepb.GetBackingConnectionResponse, error)
 	GetServingState(ctx context.Context, req *multipoolerservicepb.GetServingStateRequest) (*multipoolerservicepb.GetServingStateResponse, error)
+	FenceTablegroup(ctx context.Context, req *multipoolerservicepb.FenceTablegroupRequest) (*multipoolerservicepb.FenceTablegroupResponse, error)
+	UnfenceTablegroup(ctx context.Context, req *multipoolerservicepb.UnfenceTablegroupRequest) (*multipoolerservicepb.UnfenceTablegroupResponse, error)
+	FlipRouting(ctx context.Context, req *multipoolerservicepb.FlipRoutingRequest) (*multipoolerservicepb.FlipRoutingResponse, error)
 	// RefreshAdmission re-reads and applies this pooler's application admission.
 	RefreshAdmission(ctx context.Context, req *multipoolerservicepb.RefreshAdmissionRequest) (*multipoolerservicepb.RefreshAdmissionResponse, error)
 }
