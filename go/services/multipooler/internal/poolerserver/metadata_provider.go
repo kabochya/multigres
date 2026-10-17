@@ -26,6 +26,9 @@ import (
 // application query admission: a closed gate must never block the call that reopens it.
 type MetadataProvider interface {
 	GetBackingConnection(ctx context.Context, req *multipoolerservicepb.GetBackingConnectionRequest) (*multipoolerservicepb.GetBackingConnectionResponse, error)
+	GetServingState(ctx context.Context, req *multipoolerservicepb.GetServingStateRequest) (*multipoolerservicepb.GetServingStateResponse, error)
+	// RefreshAdmission re-reads and applies this pooler's application admission.
+	RefreshAdmission(ctx context.Context, req *multipoolerservicepb.RefreshAdmissionRequest) (*multipoolerservicepb.RefreshAdmissionResponse, error)
 }
 
 // MetadataProvider returns the manager's metadata service, or an error when the

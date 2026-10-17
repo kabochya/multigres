@@ -82,6 +82,12 @@ func (c *Conn) IsClosed() bool {
 	return c.conn.IsClosed()
 }
 
+// ProcessID returns the backend process id, or 0 while a reconnect has not learned the
+// new one. It is safe to call from any goroutine.
+func (c *Conn) ProcessID() uint32 {
+	return c.conn.ProcessID()
+}
+
 // Close closes the underlying connection.
 func (c *Conn) Close() error {
 	return c.conn.Close()

@@ -57,3 +57,15 @@ func serveMetadata[Req, Resp any](
 func (s *poolerService) GetBackingConnection(ctx context.Context, req *multipoolerpb.GetBackingConnectionRequest) (*multipoolerpb.GetBackingConnectionResponse, error) {
 	return serveMetadata(ctx, s, req, poolerserver.MetadataProvider.GetBackingConnection)
 }
+
+// GetServingState returns the authoritative routing and admission metadata. Only
+// the default primary serves it.
+func (s *poolerService) GetServingState(ctx context.Context, req *multipoolerpb.GetServingStateRequest) (*multipoolerpb.GetServingStateResponse, error) {
+	return serveMetadata(ctx, s, req, poolerserver.MetadataProvider.GetServingState)
+}
+
+// RefreshAdmission re-reads and applies this pooler's application admission. It
+// bypasses the application gate by construction: it is not a query-path request.
+func (s *poolerService) RefreshAdmission(ctx context.Context, req *multipoolerpb.RefreshAdmissionRequest) (*multipoolerpb.RefreshAdmissionResponse, error) {
+	return serveMetadata(ctx, s, req, poolerserver.MetadataProvider.RefreshAdmission)
+}

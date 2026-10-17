@@ -62,6 +62,9 @@ type Conn struct {
 	// releaseCleanups run before clean release recycles the backend.
 	releaseCleanups []ReleaseCleanup
 
+	// uncounted is set at creation: see WithoutDrainAccounting.
+	uncounted bool
+
 	// inactivityTimeout is the maximum duration the connection can be inactive
 	// (no client activity) before expiring. A value of 0 means no timeout.
 	inactivityTimeout time.Duration

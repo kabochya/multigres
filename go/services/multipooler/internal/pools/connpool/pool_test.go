@@ -726,3 +726,30 @@ func TestPoolConnectTimeout_BoundsConnReopen(t *testing.T) {
 	// The active slot should be released, not permanently consumed
 	assert.Equal(t, int64(0), pool.Active(), "active slot should be released after reopen timeout")
 }
+
+// TestPool_LiveConns lists the connections the pool has open: idle and borrowed ones,
+// the replacement of one that was closed, and not the closed ones themselves.
+func TestPool_LiveConns(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(3)
+	defer pool.Close()
+	require.Empty(t, pool.LiveConns())
+
+	a, err := pool.Get(ctx)
+	require.NoError(t, err)
+	b, err := pool.Get(ctx)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []*mockConnection{a.Conn, b.Conn}, pool.LiveConns(), "borrowed connections")
+
+	a.Recycle()
+	require.ElementsMatch(t, []*mockConnection{a.Conn, b.Conn}, pool.LiveConns(), "an idle connection is open too")
+
+	// A connection that is closed and replaced in its slot is the replacement.
+	closed := b.Conn
+	require.NoError(t, closed.Close())
+	require.NoError(t, pool.connReopen(ctx, b, monotonicNow()))
+	live := pool.LiveConns()
+	require.ElementsMatch(t, []*mockConnection{a.Conn, b.Conn}, live)
+	require.NotContains(t, live, closed)
+	b.Recycle()
+}
