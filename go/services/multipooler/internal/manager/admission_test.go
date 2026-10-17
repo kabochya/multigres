@@ -792,10 +792,10 @@ func TestServingStateReadsAMissingRowAsUnfenced(t *testing.T) {
 	})
 
 	t.Run("no store configured", func(t *testing.T) {
-		defer func(old func(*MultipoolerManager) servingReader) { newServingStore = old }(newServingStore)
+		defer func(old func(*MultipoolerManager) servingStore) { newServingStore = old }(newServingStore)
 		newServingStore = nil
 		pm, _ := newTestManagerWithMock(t, constants.DefaultTableGroup, "0-inf")
-		_, err := pm.servingReader()
+		_, err := pm.servingStore()
 		requireCode(t, mtrpcpb.Code_UNIMPLEMENTED, err)
 	})
 }
