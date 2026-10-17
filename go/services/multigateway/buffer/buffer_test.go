@@ -718,3 +718,64 @@ func TestBufferShutdownAfterEnqueue(t *testing.T) {
 	assert.Empty(t, buf.queue)
 	buf.mu.Unlock()
 }
+
+// TestBufferWaitMarkedToIgnoreTheTimingGuardStillBuffers: the guard keeps a
+// flapping failover from buffering again and again; a deliberate closure, such as
+// a fence in a migration, opts out so a second one shortly after the first waits
+// too.
+func TestBufferWaitMarkedToIgnoreTheTimingGuardStillBuffers(t *testing.T) {
+	cfg := testConfig(t, func(c *Config) {
+		c.MinTimeBetweenFailovers.Set(1 * time.Hour)
+	})
+	buf := New(context.Background(), cfg, testLogger())
+	defer buf.Shutdown()
+	ctx := context.Background()
+
+	// A first cycle, ended just now.
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		retryDone, waitErr := buf.WaitForFailoverEnd(ctx, shard1Key)
+		assert.NoError(t, waitErr)
+		if retryDone != nil {
+			retryDone()
+		}
+	})
+	waitForQueueLen(t, buf, 1)
+	buf.StopBuffering(shard1Key)
+	wg.Wait()
+	buf.buffers[commontypes.FormatShardKey(shard1Key)].drainWg.Wait()
+
+	// An ordinary wait is skipped as too soon, a marked one buffers.
+	retryDone, err := buf.WaitForFailoverEnd(ctx, shard1Key)
+	require.NoError(t, err)
+	require.Nil(t, retryDone)
+
+	wg.Go(func() {
+		retryDone, waitErr := buf.WaitForFailoverEnd(IgnoringMinTimeBetweenFailovers(ctx), shard1Key)
+		assert.NoError(t, waitErr)
+		if retryDone != nil {
+			retryDone()
+		}
+	})
+	waitForQueueLen(t, buf, 1)
+	buf.StopBuffering(shard1Key)
+	wg.Wait()
+}
+
+// TestBufferDoesNotStartForACancelledRequest: a request whose context is already
+// done must not move an idle shard to BUFFERING, which nobody would end.
+func TestBufferDoesNotStartForACancelledRequest(t *testing.T) {
+	buf := New(context.Background(), testConfig(t), testLogger())
+	defer buf.Shutdown()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	retryDone, err := buf.WaitForFailoverEnd(ctx, shard1Key)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Nil(t, retryDone)
+
+	// Nothing is waiting on the shard, so a proactive wait finds it idle.
+	retryDone, err = buf.WaitIfAlreadyBuffering(context.Background(), shard1Key)
+	require.NoError(t, err)
+	require.Nil(t, retryDone, "the shard must not have started buffering")
+}

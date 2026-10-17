@@ -99,6 +99,7 @@ trigger buffering. Only leader-routed queries are buffered:
 | ---------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------ |
 | no writable primary                | gateway routing                    | No leader is currently available                                               |
 | `MTF01`                            | multipooler `StartRequest()`       | Pooler is not serving or is draining during failover                           |
+| `MTF02`                            | multipooler `BeginRequest()`       | Pooler's application gate is closed (a fence, or no admission state read yet)  |
 | internal pre-execution unavailable | multipooler connection acquisition | PostgreSQL was unavailable before query execution or reservation state changed |
 | `25006`                            | PostgreSQL                         | Replay-safe request hit a primary that has already been demoted                |
 | exact recovery `0A000`             | PostgreSQL                         | A deferred `BEGIN READ WRITE` reached a standby before its first statement     |
@@ -138,10 +139,18 @@ IDLE ──────────► BUFFERING ──────────�
 - **IDLE**: no failover in progress. Requests pass through normally.
 - **BUFFERING**: failover detected. New requests are queued in the
   global FIFO. A timing guard (`MinTimeBetweenFailovers`) prevents
-  rapid re-entry.
+  rapid re-entry. The guard does not apply to a wait caused by a closed
+  application admission gate (`MTF02`, or a selection in which every
+  candidate pooler reports a closed gate), whatever closed it: a fence is
+  deliberate, and a gate that is closed until the admission state is read
+  reopens within a second or two. A pooler that is not serving or is draining
+  rejects with `MTF01` and keeps the guard. Requests are held only when buffering
+  is enabled (`--buffer-enabled`, off by default); without it a closed gate
+  rejects them.
 - **DRAINING**: a primary has been observed. Buffered entries are extracted
   and retried with configurable concurrency (`DrainConcurrency`). A subsequent
-  failure is a new incident and remains subject to `MinTimeBetweenFailovers`.
+  failure is a new incident and remains subject to `MinTimeBetweenFailovers`,
+  unless it is a closed admission gate (`MTF02`), which is deliberate.
 
 ### Global FIFO Queue
 
@@ -182,6 +191,16 @@ Several mechanisms prevent unbounded buffering:
 | Max failover duration | retry result | Entire shard force-drained after `MaxFailoverDuration`    |
 | Gateway shutdown      | `MTB03`      | Gateway is shutting down — all entries evicted            |
 | Timing guard          | (no buffer)  | `MinTimeBetweenFailovers` not elapsed since last failover |
+
+## Unmanaged tablegroups
+
+A tablegroup served by an unmanaged pooler is a shard of one, and the pooler is its leader
+while its backend is ready. It has no replicas, so a read that asks for a replica
+(`INCONSISTENT` mode) of it finds none and fails as unavailable; only leader-routed modes are
+served, and buffered. An external source that is in recovery (a standby) is not writable:
+the pooler withdraws its readiness, reports no role and does not serve, so writes wait in the
+buffer until the buffer window ends, and reads fail as unavailable as well. There is no leader,
+and no replica, until the source is writable again.
 
 ## Configuration
 

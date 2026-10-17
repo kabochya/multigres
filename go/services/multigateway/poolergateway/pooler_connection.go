@@ -39,6 +39,10 @@ import (
 // errPoolerUninitialized is the initial error before health stream connects.
 var errPoolerUninitialized = errors.New("pooler health not initialized")
 
+// gateNotOpen reports whether the pooler's application gate is not admitting, for any
+// reason: fenced, or closed until the admission state is read.
+func (h *poolerHealth) gateNotOpen() bool { return h.AdmissionClosed }
+
 // poolerHealth represents the health state received from a multipooler.
 // This is a snapshot of health state that can be safely passed around
 // without synchronization.
@@ -60,6 +64,11 @@ type poolerHealth struct {
 	// ReplicationLagNs is the replication lag in nanoseconds reported by the pooler.
 	// Zero on the primary or when not yet measured.
 	ReplicationLagNs int64
+
+	// AdmissionClosed is true while the pooler's application gate is closed: it
+	// is serving but refuses application queries, whatever the reason (a fence, or
+	// an admission state not read yet).
+	AdmissionClosed bool
 
 	// LastError is the most recent error from the health stream.
 	LastError error
@@ -90,6 +99,7 @@ func (h *poolerHealth) simpleCopy() *poolerHealth {
 		ServingStatus:    h.ServingStatus,
 		RoutingState:     h.RoutingState,
 		ReplicationLagNs: h.ReplicationLagNs,
+		AdmissionClosed:  h.AdmissionClosed,
 		LastError:        h.LastError,
 		LastResponse:     h.LastResponse,
 	}
@@ -414,6 +424,7 @@ func (pc *poolerConnection) processHealthResponse(response *multipoolerservice.S
 		ServingStatus:    response.ServingStatus,
 		RoutingState:     response.RoutingState,
 		ReplicationLagNs: response.ReplicationLagNs,
+		AdmissionClosed:  response.AdmissionClosed,
 		LastError:        nil,
 		LastResponse:     time.Now(),
 	}

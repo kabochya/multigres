@@ -76,6 +76,16 @@ func (e *Executor) InvalidatePlanCache() {
 	e.planCache.Invalidate()
 }
 
+// SetApplicationTableGroup changes the tablegroup the application queries of a
+// database are planned against and discards every cached plan, which embed the
+// previous one. Other databases are not affected. Work already running keeps the
+// target it started with; new statements, and retries of buffered ones, use the
+// new tablegroup.
+func (e *Executor) SetApplicationTableGroup(database, tableGroup string) {
+	e.planner.SetApplicationTableGroup(database, tableGroup)
+	e.planCache.Invalidate()
+}
+
 // NewExecutor creates a new executor instance.
 // The IExecute parameter provides the execution backend (typically ScatterConn).
 // planCacheMemory controls the maximum memory in bytes for the plan cache (0 disables caching).
@@ -401,7 +411,7 @@ func (e *Executor) Describe(
 	// support unsharded, we don't have to do much.
 	// We just send the query to the default table group.
 
-	return e.exec.Describe(ctx, e.planner.GetDefaultTableGroup(), constants.DefaultShard, conn, state, portalInfo, preparedStatementInfo)
+	return e.exec.Describe(ctx, e.planner.GetDefaultTableGroup(conn.Database()), constants.DefaultShard, conn, state, portalInfo, preparedStatementInfo)
 }
 
 // describeAST returns the parsed statement being described, from whichever of
@@ -429,7 +439,7 @@ func (e *Executor) PrepareInTransaction(
 	queryStr string,
 	paramTypes []uint32,
 ) error {
-	return e.exec.StreamExecute(ctx, conn, DefaultTableGroup, constants.DefaultShard, "", &query.ExecuteSqlPreparedStatement{
+	return e.exec.StreamExecute(ctx, conn, e.planner.GetDefaultTableGroup(conn.Database()), constants.DefaultShard, "", &query.ExecuteSqlPreparedStatement{
 		PreparedStatement: &query.PreparedStatement{
 			Query:        queryStr,
 			ParamTypes:   paramTypes,
@@ -454,7 +464,7 @@ func (e *Executor) StreamReplication(
 		"database", conn.Database(),
 		"connection_id", conn.ConnectionID())
 
-	return e.exec.StreamReplication(ctx, conn, e.planner.GetDefaultTableGroup(), constants.DefaultShard, state, init)
+	return e.exec.StreamReplication(ctx, conn, e.planner.GetDefaultTableGroup(conn.Database()), constants.DefaultShard, state, init)
 }
 
 // ReleaseAll releases all reserved connections, regardless of reservation
