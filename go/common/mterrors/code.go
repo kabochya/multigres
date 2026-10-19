@@ -43,6 +43,7 @@ const (
 	PgSSSyntaxError               = "42601" // syntax_error
 	PgSSUndefinedObject           = "42704" // undefined_object
 	PgSSQueryCanceled             = "57014" // query_canceled
+	PgSSAdminShutdown             = "57P01" // admin_shutdown
 	PgSSCannotConnectNow          = "57P03" // cannot_connect_now
 	PgSSIdleSessionTimeout        = "57P05" // idle_session_timeout
 	PgSSInternalError             = "XX000" // internal_error
@@ -111,8 +112,34 @@ func NewIdleSessionTimeout() *PgDiagnostic {
 // to buffer or auto-retry inside the cluster — only the client can replay it.
 func NewReservedConnectionTerminated(reservedConnID uint64) *PgDiagnostic {
 	return NewPgError("ERROR", PgSSSerializationFailure,
-		"reserved connection terminated; please retry",
+		reservedConnectionTerminatedMessage,
 		fmt.Sprintf("reserved connection %d was terminated", reservedConnID))
+}
+
+const reservedConnectionTerminatedMessage = "reserved connection terminated; please retry"
+
+// IsReservedConnectionTerminated reports whether err is the diagnostic
+// NewReservedConnectionTerminated builds. SQLSTATE 40001 alone is not enough:
+// PostgreSQL raises it for a real serialization failure, which leaves the
+// reservation alive.
+func IsReservedConnectionTerminated(err error) bool {
+	var diag *PgDiagnostic
+	return errors.As(err, &diag) &&
+		diag.Code == PgSSSerializationFailure &&
+		diag.Message == reservedConnectionTerminatedMessage
+}
+
+// NewSessionStateLost creates the PgDiagnostic that ends a session whose state lived
+// on a reserved connection the gateway can no longer use (a temporary table, a
+// session advisory lock, a set seed, an unsafe connection, a logical replication
+// slot, a portal outside a transaction). The new backend does not have that state,
+// and the client would carry on as if it did, so the session ends and the client
+// reconnects. state names what was lost and why says how it was lost.
+// SQLSTATE 57P01 (admin_shutdown), severity FATAL: what PostgreSQL sends when it
+// terminates a session, which drivers and pools treat as a lost connection.
+func NewSessionStateLost(state, why string) *PgDiagnostic {
+	return NewPgError("FATAL", PgSSAdminShutdown,
+		fmt.Sprintf("the session's state (%s) was lost because %s; reconnect", state, why), "")
 }
 
 // NewAuthenticationTimeout creates a PgDiagnostic for an authentication_timeout

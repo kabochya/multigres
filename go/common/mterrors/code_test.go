@@ -16,6 +16,7 @@ package mterrors
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -179,4 +180,22 @@ func TestNewPgError_WithDetail(t *testing.T) {
 	require.Equal(t, "XX000", diag.Code)
 	require.Equal(t, "something failed", diag.Message)
 	require.Equal(t, "underlying cause", diag.Detail)
+}
+
+func TestNewSessionStateLost(t *testing.T) {
+	diag := NewSessionStateLost("temp_table", "its reserved connection is gone")
+
+	require.Equal(t, "FATAL", diag.Severity)
+	require.Equal(t, PgSSAdminShutdown, diag.Code)
+	require.True(t, diag.IsFatal())
+	require.Equal(t, "the session's state (temp_table) was lost because its reserved connection is gone; reconnect", diag.Message)
+}
+
+func TestIsReservedConnectionTerminated(t *testing.T) {
+	require.True(t, IsReservedConnectionTerminated(NewReservedConnectionTerminated(7)))
+	require.True(t, IsReservedConnectionTerminated(fmt.Errorf("query execution failed: %w", NewReservedConnectionTerminated(7))))
+	// A real serialization failure leaves the reservation alive.
+	require.False(t, IsReservedConnectionTerminated(NewPgError("ERROR", PgSSSerializationFailure, "could not serialize access due to concurrent update", "")))
+	require.False(t, IsReservedConnectionTerminated(errors.New("reserved connection terminated; please retry")))
+	require.False(t, IsReservedConnectionTerminated(nil))
 }

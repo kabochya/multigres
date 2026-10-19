@@ -138,6 +138,12 @@ func isCancellationError(err error) bool {
 	return false
 }
 
+// isFatalError reports whether err is a FATAL diagnostic, which ends the client's session.
+func isFatalError(err error) bool {
+	var diag *mterrors.PgDiagnostic
+	return errors.As(err, &diag) && diag.IsFatal()
+}
+
 // applyReservedState replaces independent bookkeeping with the authoritative reservation
 // state from the multipooler. If the reserved connection ID is zero, the connection was
 // destroyed or released — clear the shard state. Otherwise, update the reservation reasons.
@@ -265,6 +271,9 @@ func (sc *ScatterConn) StreamExecute(
 		eo.ReservedConnectionId = ss.ReservedState.GetReservedConnectionId()
 		qs, err := sc.gateway.QueryServiceByID(ctx, ss.ReservedState.GetPoolerId(), target)
 		if err != nil {
+			if isConnectionLostError(err) {
+				return sc.reservationLostError(conn, state, lostFrom(ss, 0), err)
+			}
 			return err
 		}
 
@@ -344,6 +353,7 @@ func (sc *ScatterConn) StreamExecute(
 			reservationOpts.RecheckAdvisoryLocks = true
 		}
 
+		lost := lostFrom(ss, reservationOpts.GetReasons())
 		reservedState, err := qs.StreamExecute(ctx, target, sql, eo, reservationOpts, callback)
 
 		// A query error on an existing reserved connection does not, by itself, mean
@@ -367,6 +377,9 @@ func (sc *ScatterConn) StreamExecute(
 			reservedState.GetReservedConnectionId() == 0 &&
 			conn.TxnStatus() != protocol.TxnStatusInBlock &&
 			isCancellationError(err)
+		if !keepReservation && reservationLost(reservedState, true, err) {
+			return sc.reservationLostError(conn, state, lost, fmt.Errorf("query execution failed: %w", err))
+		}
 		if !keepReservation {
 			sc.applyReservedState(conn, state, target, reservedState)
 		}
@@ -531,7 +544,9 @@ func (sc *ScatterConn) PortalStreamExecute(
 	// we are routing the query to the pooler where we got the reserved
 	// connection from. If a reparent happened, then we will get an error
 	// back.
-	if ss != nil && ss.ReservedState.GetReservedConnectionId() != 0 {
+	reserved := ss != nil && ss.ReservedState.GetReservedConnectionId() != 0
+	var lost lostReservation
+	if reserved {
 		eo.ReservedConnectionId = ss.ReservedState.GetReservedConnectionId()
 		qs, err = sc.gateway.QueryServiceByID(ctx, ss.ReservedState.GetPoolerId(), target)
 
@@ -573,6 +588,7 @@ func (sc *ScatterConn) PortalStreamExecute(
 		if reasons != 0 {
 			reservationOpts = &querypb.ReservationOptions{Reasons: reasons}
 		}
+		lost = lostFrom(ss, reasons)
 	} else if conn.IsInTransaction() || conn.UnsafeConnection() || info.TempTable || info.AdvisoryLock || info.LogicalReplicationSlot || info.SetSeed {
 		// Case 2: Need a new reserved connection — for transaction, temp table,
 		// advisory lock, unsafe connection, or a combination. Build reservation
@@ -615,6 +631,9 @@ func (sc *ScatterConn) PortalStreamExecute(
 	}
 
 	if err != nil {
+		if reserved && isConnectionLostError(err) {
+			return sc.reservationLostError(conn, state, lost, err)
+		}
 		return err
 	}
 
@@ -634,6 +653,9 @@ func (sc *ScatterConn) PortalStreamExecute(
 		keepReservation := reservedState.GetReservedConnectionId() == 0 &&
 			conn.TxnStatus() != protocol.TxnStatusInBlock &&
 			isCancellationError(err)
+		if reserved && !keepReservation && reservationLost(reservedState, true, err) {
+			return sc.reservationLostError(conn, state, lost, err)
+		}
 		if !keepReservation {
 			sc.applyReservedState(conn, state, target, reservedState)
 		}
@@ -764,6 +786,8 @@ func (sc *ScatterConn) ConcludeTransaction(
 	var updates []shardUpdate
 	var errs []error
 	var callbackResult *sqltypes.Result
+	var lost []lostReservation
+	var lostCause error
 
 	// Count shards with a transaction reason — multi-shard transactions are not
 	// yet supported (distributed transactions). Log a warning as a sentinel so
@@ -817,14 +841,21 @@ func (sc *ScatterConn) ConcludeTransaction(
 
 		qs, err := sc.gateway.QueryServiceByID(ctx, ss.ReservedState.GetPoolerId(), ss.Target)
 		if err != nil {
-			// Connection lost — mark for clearing, continue to other shards
-			updates = append(updates, shardUpdate{target: ss.Target, clear: true})
-			errs = append(errs, fmt.Errorf("conclude transaction: pooler lookup failed for %s: %w", ss.Target, err))
+			// Connection lost — what the session lost is decided below, once every
+			// shard has been concluded.
+			lost = append(lost, lostFrom(ss, 0))
+			lostCause = fmt.Errorf("conclude transaction: pooler lookup failed for %s: %w", ss.Target, err)
 			continue
 		}
 
+		tracked := lostFrom(ss, 0)
 		result, reservedState, err := qs.ConcludeTransaction(ctx, ss.Target, eo, conclusion, releasePortalNames, releaseAllPortals, chain, rollbackSessionSettings)
 		if err != nil {
+			if reservationLost(reservedState, true, err) {
+				lost = append(lost, tracked)
+				lostCause = fmt.Errorf("conclude transaction failed for %s: %w", ss.Target, err)
+				continue
+			}
 			if reservedState.GetReservedConnectionId() != 0 {
 				// The multipooler reported the backend is still healthy and
 				// reserved for a surviving non-transaction reason (e.g. a temp
@@ -865,6 +896,18 @@ func (sc *ScatterConn) ConcludeTransaction(
 			state.ClearReservedConnection(u.target)
 		} else {
 			state.SetReservedConnection(u.target, u.reservedState)
+		}
+	}
+
+	if len(lost) > 0 {
+		lossErr := sc.endLostReservations(conn, state, lost, "its reserved connection is gone", lostCause)
+		if conclusion == multipoolerpb.TransactionConclusion_TRANSACTION_CONCLUSION_ROLLBACK && !chain && !isFatalError(lossErr) {
+			// Plain ROLLBACK on a destroyed connection is graceful recovery: the
+			// transaction is over, which is what the client asked for. Only a loss of
+			// session state, which ends the session, is reported.
+			callbackResult = &sqltypes.Result{CommandTag: "ROLLBACK"}
+		} else if lossErr != nil {
+			errs = append([]error{lossErr}, errs...)
 		}
 	}
 
@@ -914,6 +957,8 @@ func (sc *ScatterConn) DiscardTempTables(
 	var updates []shardUpdate
 	var errs []error
 	var callbackResult *sqltypes.Result
+	var lost []lostReservation
+	var lostCause error
 
 	// Iterate over all shard states with reserved connections.
 	// Only discard on shards that have the temp table reason.
@@ -933,10 +978,16 @@ func (sc *ScatterConn) DiscardTempTables(
 			ReservedConnectionId: ss.ReservedState.GetReservedConnectionId(),
 		}
 
+		// The temporary tables are what this statement discards: losing them is not
+		// losing anything. What else the reservation holds is.
+		tracked := lostFrom(ss, 0)
+		tracked.reasons &^= protoutil.ReasonTempTable
+
 		qs, err := sc.gateway.QueryServiceByID(ctx, ss.ReservedState.GetPoolerId(), ss.Target)
 		if err != nil {
-			updates = append(updates, shardUpdate{target: ss.Target, clear: true})
-			errs = append(errs, fmt.Errorf("discard temp tables: pooler lookup failed for %s: %w", ss.Target, err))
+			lost = append(lost, tracked)
+			lostCause = fmt.Errorf("discard temp tables: pooler lookup failed for %s: %w", ss.Target, err)
+			errs = append(errs, lostCause)
 			continue
 		}
 
@@ -944,6 +995,10 @@ func (sc *ScatterConn) DiscardTempTables(
 		if err != nil {
 			updates = append(updates, shardUpdate{target: ss.Target, clear: true})
 			errs = append(errs, fmt.Errorf("discard temp tables failed for %s: %w", ss.Target, err))
+			if reservationLost(reservedState, true, err) {
+				lost = append(lost, tracked)
+				lostCause = errs[len(errs)-1]
+			}
 			continue
 		}
 
@@ -965,6 +1020,12 @@ func (sc *ScatterConn) DiscardTempTables(
 			state.ClearReservedConnection(u.target)
 		} else {
 			state.SetReservedConnection(u.target, u.reservedState)
+		}
+	}
+
+	if len(lost) > 0 {
+		if lossErr := sc.endLostReservations(conn, state, lost, "its reserved connection is gone", lostCause); isFatalError(lossErr) {
+			return lossErr
 		}
 	}
 
@@ -1031,7 +1092,10 @@ func (sc *ScatterConn) CopyOutInitiate(
 	// starting COPY. Mirrors CopyInitiate (FROM STDIN).
 	var reservationOpts *querypb.ReservationOptions
 	ss := state.GetMatchingShardState(target)
-	if ss != nil && ss.ReservedState.GetReservedConnectionId() != 0 {
+	reserved := ss != nil && ss.ReservedState.GetReservedConnectionId() != 0
+	var lost lostReservation
+	if reserved {
+		lost = lostFrom(ss, 0)
 		execOptions.ReservedConnectionId = ss.ReservedState.GetReservedConnectionId()
 		// COPY reaching an already-reserved connection never promotes it (no
 		// BeginQuery is ever sent here, unlike the branch below), so any
@@ -1062,6 +1126,9 @@ func (sc *ScatterConn) CopyOutInitiate(
 
 	format, columnFormats, notices, reservedState, err := sc.gateway.CopyOutReady(ctx, target, queryStr, execOptions, reservationOpts)
 	if err != nil {
+		if reserved && reservationLost(reservedState, true, err) {
+			return 0, nil, notices, sc.reservationLostError(conn, state, lost, err)
+		}
 		sc.applyReservedState(conn, state, target, reservedState)
 		// Surface the PG error un-wrapped — see the comment on CopyInitiate
 		// below for the rationale.
@@ -1113,7 +1180,11 @@ func (sc *ScatterConn) CopyOutStream(
 		ReservedConnectionId: ss.ReservedState.GetReservedConnectionId(),
 	}
 
+	lost := lostFrom(ss, 0)
 	result, reservedState, err := sc.gateway.CopyOutStream(ctx, target, copyOptions, onMessage)
+	if reservationLost(reservedState, true, err) {
+		return nil, sc.reservationLostError(conn, state, lost, err)
+	}
 	sc.applyReservedState(conn, state, target, reservedState)
 	if err != nil {
 		return nil, err
@@ -1198,7 +1269,10 @@ func (sc *ScatterConn) CopyInitiate(
 	// pass ReservationOptions so CopyReady creates a connection with the pending BEGIN.
 	var reservationOpts *querypb.ReservationOptions
 	ss := state.GetMatchingShardState(target)
-	if ss != nil && ss.ReservedState.GetReservedConnectionId() != 0 {
+	reserved := ss != nil && ss.ReservedState.GetReservedConnectionId() != 0
+	var lost lostReservation
+	if reserved {
+		lost = lostFrom(ss, 0)
 		execOptions.ReservedConnectionId = ss.ReservedState.GetReservedConnectionId()
 		// COPY reaching an already-reserved connection never promotes it (no
 		// BeginQuery is ever sent here, unlike the branch below), so any
@@ -1231,6 +1305,9 @@ func (sc *ScatterConn) CopyInitiate(
 	// Call CopyReady on gateway to initiate the COPY and get format info
 	format, columnFormats, reservedState, err := sc.gateway.CopyReady(ctx, target, queryStr, execOptions, reservationOpts)
 	if err != nil {
+		if reserved && reservationLost(reservedState, true, err) {
+			return 0, nil, sc.reservationLostError(conn, state, lost, err)
+		}
 		// When init fails, the multipooler may still have a live reserved
 		// connection (e.g., it was already held for a transaction or temp
 		// tables and only the COPY query itself was rejected). Apply whatever
@@ -1295,6 +1372,11 @@ func (sc *ScatterConn) CopySendData(
 
 	// Send data via gateway
 	if err := sc.gateway.CopySendData(ctx, target, data, copyOptions); err != nil {
+		// No reserved state comes back with a chunk: the error alone says whether
+		// the COPY's connection is gone.
+		if reservationLost(nil, false, err) {
+			return sc.reservationLostError(conn, state, lostFrom(ss, 0), err)
+		}
 		// Surface PG errors un-wrapped — see CopyInitiate comment above.
 		return err
 	}
@@ -1351,6 +1433,7 @@ func (sc *ScatterConn) CopyFinalize(
 	}
 
 	// Finalize the COPY operation via gateway
+	lost := lostFrom(ss, 0)
 	result, reservedState, err := sc.gateway.CopyFinalize(ctx, target, finalData, copyOptions)
 	if err != nil {
 		// Forward notices PostgreSQL sent before the ErrorResponse, so clients see
@@ -1360,6 +1443,9 @@ func (sc *ScatterConn) CopyFinalize(
 				sc.applyReservedState(conn, state, target, reservedState)
 				return cbErr
 			}
+		}
+		if reservationLost(reservedState, true, err) {
+			return sc.reservationLostError(conn, state, lost, err)
 		}
 		// CopyFinalize returns a non-nil ReservedState when a PG-level error
 		// (e.g., constraint violation) left the underlying reserved connection
@@ -1427,9 +1513,18 @@ func (sc *ScatterConn) CopyAbort(
 	}
 
 	// Abort the COPY operation via gateway
+	lost := lostFrom(ss, 0)
 	reservedState, err := sc.gateway.CopyAbort(ctx, target, "operation aborted by client", copyOptions)
 	if err != nil {
 		sc.logger.WarnContext(ctx, "error during COPY abort", "error", err)
+		if reservationLost(reservedState, true, err) {
+			// The abort itself is best effort and the caller is already reporting why
+			// the COPY ended, but losing the session's state is reported whatever
+			// else happens.
+			if lossErr := sc.reservationLostError(conn, state, lost, err); isFatalError(lossErr) {
+				return lossErr
+			}
+		}
 	}
 
 	// Update shard state with authoritative state from multipooler
@@ -1475,6 +1570,16 @@ func (sc *ScatterConn) ReleaseAllReservedConnections(
 		releaseSettings = state.GetSessionSettings()
 	}
 
+	// What this call releases is not lost when the pooler cannot confirm it: a
+	// disconnect releases everything, DISCARD ALL everything but the sticky reasons,
+	// which the session keeps and which a failed release does lose.
+	released := ^uint32(0)
+	if keepStickyReservations {
+		released = ^protoutil.StickyReasons
+	}
+	var lost []lostReservation
+	var lostCause error
+
 	for _, ss := range state.ShardStates {
 		if ss.ReservedState.GetReservedConnectionId() == 0 {
 			continue
@@ -1494,11 +1599,19 @@ func (sc *ScatterConn) ReleaseAllReservedConnections(
 				"target", ss.Target, "error", err)
 			errs = append(errs, err)
 			updates = append(updates, shardUpdate{target: ss.Target, clear: true})
+			l := lostFrom(ss, 0)
+			l.reasons &= ^released
+			lost, lostCause = append(lost, l), err
 			continue
 		}
 
 		reservedState, err := qs.ReleaseReservedConnection(ctx, ss.Target, eo, keepStickyReservations)
 		if err != nil {
+			if reservationLost(reservedState, true, err) {
+				l := lostFrom(ss, 0)
+				l.reasons &= ^released
+				lost, lostCause = append(lost, l), err
+			}
 			sc.logger.ErrorContext(ctx, "release: RPC failed",
 				"target", ss.Target,
 				"reserved_conn_id", ss.ReservedState.GetReservedConnectionId(),
@@ -1525,6 +1638,12 @@ func (sc *ScatterConn) ReleaseAllReservedConnections(
 		}
 	}
 
+	if len(lost) > 0 && keepStickyReservations {
+		// A client that is not disconnecting is told; one that is has nobody to tell.
+		if lossErr := sc.endLostReservations(conn, state, lost, "its reserved connection is gone", lostCause); isFatalError(lossErr) {
+			return lossErr
+		}
+	}
 	return errors.Join(errs...)
 }
 
