@@ -16,6 +16,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/multigres/multigres/go/common/constants"
@@ -58,7 +59,7 @@ func (c *CopyStatement) StreamExecute(
 	_ []*ast.A_Const,
 	_ PlanExecInfo,
 	callback func(context.Context, *sqltypes.Result) error,
-) error {
+) (retErr error) {
 	// For now, use DefaultShard (unsharded). When sharding is supported,
 	// this will need to be determined from the COPY target table.
 	shard := constants.DefaultShard
@@ -84,7 +85,7 @@ func (c *CopyStatement) StreamExecute(
 	completed := false
 	defer func() {
 		if !completed {
-			_ = exec.CopyAbort(ctx, conn, c.TableGroup, shard, state)
+			retErr = abortCopy(ctx, exec, conn, c.TableGroup, shard, state, retErr)
 		}
 	}()
 
@@ -223,7 +224,7 @@ func (c *CopyStatement) streamCopyOut(
 	shard string,
 	state *handler.MultigatewayConnectionState,
 	callback func(context.Context, *sqltypes.Result) error,
-) error {
+) (retErr error) {
 	format, columnFormats, initNotices, err := exec.CopyOutInitiate(ctx, conn, c.TableGroup, shard, c.Query, state)
 	if err != nil {
 		// Surface PG errors un-wrapped so the gateway re-emits a verbatim
@@ -249,7 +250,7 @@ func (c *CopyStatement) streamCopyOut(
 	streamCompleted := false
 	defer func() {
 		if !streamCompleted {
-			_ = exec.CopyAbort(ctx, conn, c.TableGroup, shard, state)
+			retErr = abortCopy(ctx, exec, conn, c.TableGroup, shard, state, retErr)
 		}
 	}()
 
@@ -331,3 +332,23 @@ func (c *CopyStatement) streamCopyOut(
 
 // Ensure CopyStatement implements Primitive interface.
 var _ Primitive = (*CopyStatement)(nil)
+
+// abortCopy aborts a COPY that ends before its normal conclusion and returns the error
+// the statement ends with. The abort is best effort and the statement is already
+// reporting why the COPY ended, except when the abort finds that the session's state was
+// lost with the COPY's connection: that FATAL ends the session and is reported instead.
+func abortCopy(
+	ctx context.Context,
+	exec IExecute,
+	conn *server.Conn,
+	tableGroup, shard string,
+	state *handler.MultigatewayConnectionState,
+	err error,
+) error {
+	abortErr := exec.CopyAbort(ctx, conn, tableGroup, shard, state)
+	var diag *mterrors.PgDiagnostic
+	if errors.As(abortErr, &diag) && diag.IsFatal() {
+		return abortErr
+	}
+	return err
+}

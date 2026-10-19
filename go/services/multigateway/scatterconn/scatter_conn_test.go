@@ -89,6 +89,19 @@ type mockGateway struct {
 	copyAbortReturnState *querypb.ReservedState
 	copyAbortErr         error
 
+	// Describe, CopySendData, CopyOutStream and DiscardTempTables failures
+	describeErr        error
+	describeCalls      int
+	copySendDataErr    error
+	copyOutStreamErr   error
+	copyOutStreamState *querypb.ReservedState
+	discardTempState   *querypb.ReservedState
+	discardTempErr     error
+	discardTempCalls   int
+	concludeCalls      int
+	streamExecuteCalls int
+	portalCalls        int
+
 	// Callback control
 	callbackResult *sqltypes.Result
 
@@ -106,6 +119,7 @@ type mockGateway struct {
 // StreamExecute implements queryservice.QueryService.
 func (m *mockGateway) StreamExecute(_ context.Context, _ *querypb.Target, sql string, opts *querypb.ExecuteOptions, reservationOpts *querypb.ReservationOptions, callback func(context.Context, *sqltypes.Result) error) (*querypb.ReservedState, error) {
 	m.streamExecuteCalled = true
+	m.streamExecuteCalls++
 	m.streamExecuteSQL = sql
 	m.streamExecuteOpts = opts
 	m.streamExecuteReservationOps = reservationOpts
@@ -136,6 +150,7 @@ func (m *mockGateway) ExecuteQuery(context.Context, *querypb.Target, string, *qu
 
 func (m *mockGateway) PortalStreamExecute(_ context.Context, _ *querypb.Target, _ *querypb.PreparedStatement, _ *querypb.Portal, opts *querypb.ExecuteOptions, _ *multipoolerpb.PortalExecuteOptions, reservationOpts *querypb.ReservationOptions, callback func(context.Context, *sqltypes.Result) error) (*querypb.ReservedState, error) {
 	m.portalCalled = true
+	m.portalCalls++
 	m.portalOpts = opts
 	m.portalReservationOps = reservationOpts
 	if m.portalErr != nil {
@@ -150,7 +165,8 @@ func (m *mockGateway) PortalStreamExecute(_ context.Context, _ *querypb.Target, 
 }
 
 func (m *mockGateway) Describe(context.Context, *querypb.Target, *querypb.PreparedStatement, *querypb.Portal, *querypb.ExecuteOptions) (*querypb.StatementDescription, error) {
-	return nil, nil
+	m.describeCalls++
+	return nil, m.describeErr
 }
 
 func (m *mockGateway) Close() error { return nil }
@@ -161,7 +177,7 @@ func (m *mockGateway) CopyReady(_ context.Context, _ *querypb.Target, _ string, 
 }
 
 func (m *mockGateway) CopySendData(context.Context, *querypb.Target, []byte, *querypb.ExecuteOptions) error {
-	return nil
+	return m.copySendDataErr
 }
 
 func (m *mockGateway) CopyFinalize(_ context.Context, _ *querypb.Target, _ []byte, _ *querypb.ExecuteOptions) (*sqltypes.Result, *querypb.ReservedState, error) {
@@ -178,7 +194,7 @@ func (m *mockGateway) CopyOutReady(_ context.Context, _ *querypb.Target, _ strin
 }
 
 func (m *mockGateway) CopyOutStream(_ context.Context, _ *querypb.Target, _ *querypb.ExecuteOptions, _ func(pgClient.CopyOutMessage) error) (*sqltypes.Result, *querypb.ReservedState, error) {
-	return nil, nil, nil
+	return nil, m.copyOutStreamState, m.copyOutStreamErr
 }
 
 func (m *mockGateway) ReleaseReservedConnection(_ context.Context, _ *querypb.Target, options *querypb.ExecuteOptions, keepStickyReservations bool) (*querypb.ReservedState, error) {
@@ -188,13 +204,15 @@ func (m *mockGateway) ReleaseReservedConnection(_ context.Context, _ *querypb.Ta
 }
 
 func (m *mockGateway) ConcludeTransaction(_ context.Context, _ *querypb.Target, _ *querypb.ExecuteOptions, _ multipoolerpb.TransactionConclusion, _ []string, _ bool, _ bool, rollbackSessionSettings map[string]string) (*sqltypes.Result, *querypb.ReservedState, error) {
+	m.concludeCalls++
 	m.concludeRollbackSessionSettings = rollbackSessionSettings
 	m.concludeRollbackSessionSettingsSet = true
 	return m.concludeTransactionResult, m.concludeTransactionReturnState, m.concludeTransactionErr
 }
 
 func (m *mockGateway) DiscardTempTables(ctx context.Context, target *querypb.Target, options *querypb.ExecuteOptions) (*sqltypes.Result, *querypb.ReservedState, error) {
-	return nil, nil, nil
+	m.discardTempCalls++
+	return nil, m.discardTempState, m.discardTempErr
 }
 
 func (m *mockGateway) StreamReplication(_ context.Context, init *multipoolerpb.StreamReplicationInit) (multipoolerpb.MultipoolerService_StreamReplicationClient, error) {
@@ -255,6 +273,7 @@ func TestScatterConn_Case2_InTransactionNoReservedConn(t *testing.T) {
 	state := handler.NewMultigatewayConnectionState()
 	conn := newTestConn()
 	conn.SetTxnStatus(protocol.TxnStatusInBlock)
+	state.PendingBeginQuery = "BEGIN" // the first statement of the transaction starts it
 
 	err := sc.StreamExecute(context.Background(), conn, "tg1", "", "SELECT 1", nil, state, engine.PlanExecInfo{}, false,
 		func(_ context.Context, _ *sqltypes.Result) error { return nil })
@@ -281,6 +300,7 @@ func TestScatterConn_Case2_ReserveError(t *testing.T) {
 	state := handler.NewMultigatewayConnectionState()
 	conn := newTestConn()
 	conn.SetTxnStatus(protocol.TxnStatusInBlock)
+	state.PendingBeginQuery = "BEGIN" // the first statement of the transaction starts it
 
 	err := sc.StreamExecute(context.Background(), conn, "tg1", "", "SELECT 1", nil, state, engine.PlanExecInfo{}, false,
 		func(_ context.Context, _ *sqltypes.Result) error { return nil })
@@ -615,6 +635,7 @@ func TestScatterConn_Portal_FirstStatementReservesViaPortalRPC(t *testing.T) {
 	state := handler.NewMultigatewayConnectionState()
 	conn := newTestConn()
 	conn.SetTxnStatus(protocol.TxnStatusInBlock)
+	state.PendingBeginQuery = "BEGIN" // the first statement of the transaction starts it
 
 	err := sc.PortalStreamExecute(context.Background(), "tg1", "", conn, state,
 		testPortalInfo(), 0, false,
@@ -858,6 +879,7 @@ func TestScatterConn_NewTransactionErrorAppliesReturnedReservedState(t *testing.
 	state := handler.NewMultigatewayConnectionState()
 	conn := newTestConn()
 	conn.SetTxnStatus(protocol.TxnStatusInBlock)
+	state.PendingBeginQuery = "BEGIN" // the first statement of the transaction starts it
 
 	err := sc.StreamExecute(context.Background(), conn, "tg1", "", "INSERT INTO t VALUES (1)", nil, state, engine.PlanExecInfo{}, false,
 		func(_ context.Context, _ *sqltypes.Result) error { return nil })
@@ -1032,7 +1054,7 @@ func TestScatterConn_ConcludeTransaction_RollbackAndChainOnDestroyedConnFails(t 
 		})
 
 	require.Error(t, err, "ROLLBACK AND CHAIN on destroyed connection must fail closed")
-	require.Contains(t, err.Error(), "conclude transaction failed")
+	require.True(t, mterrors.IsReservedConnectionTerminated(err), "a lost transaction is 40001, got %v", err)
 	require.False(t, callbackCalled, "must not emit a synthetic ROLLBACK command tag")
 	require.Nil(t, state.GetMatchingShardState(target))
 }
@@ -1061,7 +1083,7 @@ func TestScatterConn_ConcludeTransaction_CommitOnDestroyedConn(t *testing.T) {
 		func(_ context.Context, _ *sqltypes.Result) error { return nil })
 
 	require.Error(t, err, "COMMIT on destroyed connection must propagate error")
-	require.Contains(t, err.Error(), "conclude transaction failed")
+	require.True(t, mterrors.IsReservedConnectionTerminated(err), "a lost transaction is 40001, got %v", err)
 	// Shard state must be cleared
 	require.Nil(t, state.GetMatchingShardState(target))
 }
@@ -1213,7 +1235,7 @@ func TestScatterConn_CopyFinalize_ErrorClearsShardState(t *testing.T) {
 		func(_ context.Context, _ *sqltypes.Result) error { return nil })
 
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "COPY operation failed")
+	require.True(t, mterrors.IsReservedConnectionTerminated(err), "a lost transaction is 40001, got %v", err)
 	// All shard state should be cleared
 	require.Nil(t, state.GetMatchingShardState(target))
 }
@@ -1240,7 +1262,7 @@ func TestScatterConn_CopyFinalize_ErrorSetsTxnFailed(t *testing.T) {
 		func(_ context.Context, _ *sqltypes.Result) error { return nil })
 
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "COPY operation failed")
+	require.True(t, mterrors.IsReservedConnectionTerminated(err), "a lost transaction is 40001, got %v", err)
 	// Shard state must be cleared
 	require.Nil(t, state.GetMatchingShardState(target))
 	// Transaction status must be set to Failed (defense-in-depth)
