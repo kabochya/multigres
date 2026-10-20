@@ -716,6 +716,17 @@ func (sc *ScatterConn) Describe(
 
 	description, err := qs.Describe(ctx, target, preparedStatement, portal, eo)
 	if err != nil {
+		// Describe's RPC carries no ReservedState, so the only signal that the
+		// multipooler dropped the reserved connection is the error itself. If it
+		// did, forget the reservation as the execute and COPY paths do; otherwise
+		// every later statement on this session would be routed at the dead
+		// reservation and fail with the same terminated error. Any other error
+		// (e.g. a bad statement) leaves the backend usable, so keep tracking it.
+		if eo.ReservedConnectionId != 0 &&
+			(mterrors.IsReservedConnectionTerminated(err) || mterrors.IsConnectionDead(err)) {
+			sc.applyReservedState(conn, state, target, nil)
+		}
+
 		// If it's a PostgreSQL error, don't wrap it - pass through unchanged
 		var pgDiag *mterrors.PgDiagnostic
 		if errors.As(err, &pgDiag) {
