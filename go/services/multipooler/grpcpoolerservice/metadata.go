@@ -52,6 +52,12 @@ func serveMetadata[Req, Resp any](
 	return resp, nil
 }
 
+// GetTablegroupBinding returns the connection a tablegroup is bound to. Only the default
+// primary serves it; the manager enforces that.
+func (s *poolerService) GetTablegroupBinding(ctx context.Context, req *multipoolerpb.GetTablegroupBindingRequest) (*multipoolerpb.GetTablegroupBindingResponse, error) {
+	return serveMetadata(ctx, s, req, poolerserver.MetadataProvider.GetTablegroupBinding)
+}
+
 // GetBackingConnection returns a named backing connection. Only the default
 // primary serves it; the manager enforces that.
 func (s *poolerService) GetBackingConnection(ctx context.Context, req *multipoolerpb.GetBackingConnectionRequest) (*multipoolerpb.GetBackingConnectionResponse, error) {

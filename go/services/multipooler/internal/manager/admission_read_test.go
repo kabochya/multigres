@@ -27,7 +27,6 @@ import (
 
 	"github.com/multigres/multigres/go/common/topoclient/memorytopo"
 	clustermetadatapb "github.com/multigres/multigres/go/pb/clustermetadata"
-	mtrpcpb "github.com/multigres/multigres/go/pb/mtrpc"
 	multipoolerservicepb "github.com/multigres/multigres/go/pb/multipoolerservice"
 )
 
@@ -35,6 +34,7 @@ import (
 type defaultLeaderStub struct {
 	multipoolerservicepb.UnimplementedMultipoolerServiceServer
 	answer   func() (*multipoolerservicepb.GetServingStateResponse, error)
+	binding  func() (*multipoolerservicepb.GetTablegroupBindingResponse, error)
 	accepted *atomic.Int32
 }
 
@@ -54,6 +54,15 @@ func (l *countingListener) Accept() (net.Conn, error) {
 
 func (s *defaultLeaderStub) GetServingState(context.Context, *multipoolerservicepb.GetServingStateRequest) (*multipoolerservicepb.GetServingStateResponse, error) {
 	return s.answer()
+}
+
+// GetTablegroupBinding answers as the stub's binding says; a stub with none is a default
+// primary that predates the RPC.
+func (s *defaultLeaderStub) GetTablegroupBinding(ctx context.Context, req *multipoolerservicepb.GetTablegroupBindingRequest) (*multipoolerservicepb.GetTablegroupBindingResponse, error) {
+	if s.binding == nil {
+		return s.UnimplementedMultipoolerServiceServer.GetTablegroupBinding(ctx, req)
+	}
+	return s.binding()
 }
 
 // pointAtDefaultLeader makes the harness's pooler read its admission state over gRPC from a
@@ -83,7 +92,17 @@ func pointAtDefaultLeader(t *testing.T, h *admissionHarness, stub *defaultLeader
 	}))
 	h.pm.config.TopoClient = ts
 	h.pm.admission.reader = nil
+	h.pm.admission.binding = nil
 	withAStoreOfServingState(t)
+}
+
+// withNoStores makes the build one that has neither a store of serving state nor a directory
+// of backing connections.
+func withNoStores(t *testing.T) {
+	t.Helper()
+	oldServing, oldDirectory := newServingStore, newConnectionDirectory
+	newServingStore, newConnectionDirectory = nil, nil
+	t.Cleanup(func() { newServingStore, newConnectionDirectory = oldServing, oldDirectory })
 }
 
 // withAStoreOfServingState makes the build one that has a store of serving state, as the
@@ -101,9 +120,7 @@ func withAStoreOfServingState(t *testing.T) {
 // without asking anyone, the default primary included (which would otherwise read its own
 // answer, UNIMPLEMENTED, as a failure and stay closed forever).
 func TestWithNoStoreOfServingStateEveryPoolerOpensWithoutReading(t *testing.T) {
-	old := newServingStore
-	newServingStore = nil // whatever a build registers, this test is about one that has none
-	t.Cleanup(func() { newServingStore = old })
+	withNoStores(t) // whatever a build registers, this test is about one that has none
 	for name, unmanaged := range map[string]bool{"default primary or replica": false, "unmanaged": true} {
 		t.Run(name, func(t *testing.T) {
 			h := newAdmissionHarness(t, unmanaged)
@@ -223,48 +240,57 @@ func TestTheConnectionToTheDefaultPrimaryIsReused(t *testing.T) {
 	require.EqualValues(t, 2, stub.accepted.Load())
 }
 
-// TestAnUnmanagedPoolerNeedsARowNamingItsConnectionOnlyWhereThereIsAStore: where a store of
-// serving state answers, an unmanaged pooler opens only on a row that names its own backing
-// connection (a store with no row for its tablegroup answers an unfenced row naming none, which
-// is a mismatch); where nothing can answer (no store built in, or a default primary that
-// predates the RPC and says Unimplemented) its own connection is the one it is backed by.
-func TestAnUnmanagedPoolerNeedsARowNamingItsConnectionOnlyWhereThereIsAStore(t *testing.T) {
-	row := func(connection string) func() (*multipoolerservicepb.GetServingStateResponse, error) {
-		return func() (*multipoolerservicepb.GetServingStateResponse, error) {
-			return &multipoolerservicepb.GetServingStateResponse{Tablegroups: []*multipoolerservicepb.TablegroupServingState{
-				{Tablegroup: "migrateTG", State: stateUnfenced, BackingConnection: connection},
-			}}, nil
+// TestAPoolerOpensOnlyOnATablegroupBoundToItsOwnConnection: where a default primary answers
+// the binding of the tablegroup, a pooler opens only if the connection it fronts is the one the
+// tablegroup is bound to, and a managed pooler only if the tablegroup is bound to none (a
+// tablegroup that is not in the catalog is bound to nothing). Where nothing can answer (no
+// directory built in, or a default primary that predates the RPC and says Unimplemented)
+// nothing can disagree.
+func TestAPoolerOpensOnlyOnATablegroupBoundToItsOwnConnection(t *testing.T) {
+	bound := func(connection string) func() (*multipoolerservicepb.GetTablegroupBindingResponse, error) {
+		return func() (*multipoolerservicepb.GetTablegroupBindingResponse, error) {
+			return &multipoolerservicepb.GetTablegroupBindingResponse{BackingConnection: connection}, nil
 		}
 	}
+	unfenced := func() (*multipoolerservicepb.GetServingStateResponse, error) {
+		return &multipoolerservicepb.GetServingStateResponse{Tablegroups: []*multipoolerservicepb.TablegroupServingState{
+			{Tablegroup: "migrateTG", State: stateUnfenced},
+		}}, nil
+	}
 	for name, tc := range map[string]struct {
-		answer func() (*multipoolerservicepb.GetServingStateResponse, error)
-		opens  bool
+		unmanaged bool
+		binding   func() (*multipoolerservicepb.GetTablegroupBindingResponse, error)
+		opens     bool
 	}{
-		"a default primary that predates the RPC": {answer: func() (*multipoolerservicepb.GetServingStateResponse, error) {
-			return nil, status.Error(codes.Unimplemented, "unknown method GetServingState")
-		}, opens: true},
-		"a store with no row for the tablegroup":   {answer: row("")},
-		"a row naming another connection":          {answer: row("other")},
-		"a row naming the pooler's own connection": {answer: row("src"), opens: true},
+		"a default primary that predates the RPC":       {unmanaged: true, opens: true},
+		"an unmanaged pooler, tablegroup bound to none": {unmanaged: true, binding: bound("")},
+		"an unmanaged pooler, tablegroup not in the catalog": {unmanaged: true, binding: func() (*multipoolerservicepb.GetTablegroupBindingResponse, error) {
+			return nil, status.Error(codes.NotFound, "tablegroup not found")
+		}},
+		"an unmanaged pooler, another connection":            {unmanaged: true, binding: bound("other")},
+		"an unmanaged pooler, its own connection":            {unmanaged: true, binding: bound("src"), opens: true},
+		"a managed pooler, tablegroup bound to none":         {binding: bound(""), opens: true},
+		"a managed pooler, tablegroup bound to a connection": {binding: bound("src")},
+		"a binding that cannot be read": {unmanaged: true, binding: func() (*multipoolerservicepb.GetTablegroupBindingResponse, error) {
+			return nil, status.Error(codes.Unavailable, "failing over")
+		}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			h := newAdmissionHarness(t, true)
-			pointAtDefaultLeader(t, h, &defaultLeaderStub{answer: tc.answer})
+			h := newAdmissionHarness(t, tc.unmanaged)
+			pointAtDefaultLeader(t, h, &defaultLeaderStub{answer: unfenced, binding: tc.binding})
 			_, err := h.pm.enforceAdmission(t.Context(), nil)
 			if tc.opens {
 				require.NoError(t, err)
 				require.True(t, h.gate.ApplicationOpen())
 				return
 			}
-			requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+			require.Error(t, err)
 			require.False(t, h.gate.ApplicationOpen())
 		})
 	}
 
-	t.Run("no store built in", func(t *testing.T) {
-		old := newServingStore
-		newServingStore = nil
-		t.Cleanup(func() { newServingStore = old })
+	t.Run("no directory built in", func(t *testing.T) {
+		withNoStores(t)
 		h := newAdmissionHarness(t, true)
 		h.pm.admission.reader = nil
 		h.pm.config.TopoClient = nil
@@ -283,9 +309,7 @@ func TestAReplicaWithNoStoreDoesNotAskTheDefaultPrimary(t *testing.T) {
 		return nil, status.Error(codes.Unavailable, "the default primary is failing over")
 	}}
 	pointAtDefaultLeader(t, h, stub)
-	old := newServingStore
-	newServingStore = nil
-	t.Cleanup(func() { newServingStore = old })
+	withNoStores(t)
 
 	_, err := h.pm.enforceAdmission(t.Context(), nil)
 	require.NoError(t, err)

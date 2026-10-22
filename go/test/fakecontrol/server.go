@@ -160,11 +160,10 @@ func (s *Server) db(name string) *database {
 
 func (r *row) proto(tablegroup string) *multipoolerservicepb.TablegroupServingState {
 	return &multipoolerservicepb.TablegroupServingState{
-		Tablegroup:        tablegroup,
-		BackingConnection: r.backing,
-		State:             r.state,
-		Version:           r.version,
-		UpdatedAt:         timestamppb.New(r.updatedAt),
+		Tablegroup: tablegroup,
+		State:      r.state,
+		Version:    r.version,
+		UpdatedAt:  timestamppb.New(r.updatedAt),
 	}
 }
 

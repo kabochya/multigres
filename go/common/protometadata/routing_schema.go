@@ -12,12 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package protometadata holds the throwaway metadata tables the unmanaged
-// pooler prototype keeps on the default primary.
-//
-// PROTOTYPE STUB: delete this package when the real tablegroup and connection
-// catalog lands. The tables are created lazily and live beside, never inside,
-// the sharding catalog tables.
 package protometadata
 
 import (
@@ -36,14 +30,6 @@ const ensureSchemaSQL = `DO $$
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtext('multigres.proto_metadata'));
 
-  -- Plaintext, insert-only connection catalog. Never UPDATE a row.
-  CREATE TABLE IF NOT EXISTS multigres.proto_connections (
-    name TEXT PRIMARY KEY,
-    dsn TEXT NOT NULL,
-    expected_system_identifier TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-  );
-
   -- Per-tablegroup backing connection and admission. A tablegroup serves application
   -- work only while state is UNFENCED; FENCING is a fence whose members are not all
   -- confirmed clean, FENCED one that is. version goes up by one every time the
@@ -52,7 +38,6 @@ BEGIN
   CREATE TABLE IF NOT EXISTS multigres.proto_tablegroup_serving (
     database TEXT NOT NULL,
     tablegroup TEXT NOT NULL,
-    connection TEXT NULL REFERENCES multigres.proto_connections(name),
     state TEXT NOT NULL DEFAULT 'UNFENCED' CHECK (state IN ('UNFENCED', 'FENCING', 'FENCED')),
     version BIGINT NOT NULL DEFAULT 0,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),

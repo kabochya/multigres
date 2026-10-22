@@ -137,12 +137,33 @@ func seedBackingConnection(t *testing.T, s *ShardSetup, name, url, expectedSyste
 		s.PrimaryPgctld(t).PgPort, TestPostgresPassword))
 	require.NoError(t, err)
 	defer conn.Close(context.Background())
-	require.NoError(t, protometadata.EnsureSchema(ctx, func(ctx context.Context, sql string) error {
+	require.NoError(t, protometadata.EnsureConnectionSchema(ctx, func(ctx context.Context, sql string) error {
 		_, err := conn.Exec(ctx, sql)
 		return err
 	}))
-	_, err = conn.Exec(ctx, "INSERT INTO multigres.proto_connections (name, dsn, expected_system_identifier) VALUES ($1, $2, $3)",
+	_, err = conn.Exec(ctx, "INSERT INTO multigres.connection (name, dsn, expected_system_identifier) VALUES ($1, $2, $3)",
 		name, url, expectedSystemIdentifier)
+	require.NoError(t, err)
+}
+
+// bindTablegroup records a tablegroup in the catalog, with its one shard, and binds it to the
+// named connection, or to none (managed) when connection is empty. The connection must have been
+// seeded with seedBackingConnection. The default tablegroup is already in the catalog, from the
+// bootstrap of the default shard.
+func bindTablegroup(t *testing.T, s *ShardSetup, tablegroup, connection string) {
+	t.Helper()
+	ctx := t.Context()
+	conn := s.ConnectPrimaryAdmin(t)
+	require.NoError(t, protometadata.EnsureConnectionSchema(ctx, func(ctx context.Context, sql string) error {
+		_, err := conn.Exec(ctx, sql)
+		return err
+	}))
+	_, err := conn.Exec(ctx, `INSERT INTO multigres.tablegroup (name, type) VALUES ($1, 'unsharded') ON CONFLICT (name) DO NOTHING`, tablegroup)
+	require.NoError(t, err)
+	_, err = conn.Exec(ctx, `INSERT INTO multigres.shard (tablegroup_oid, shard_name)
+SELECT oid, '0-inf' FROM multigres.tablegroup WHERE name = $1 ON CONFLICT (tablegroup_oid, shard_name) DO NOTHING`, tablegroup)
+	require.NoError(t, err)
+	_, err = conn.Exec(ctx, `UPDATE multigres.tablegroup SET backing_connection = NULLIF($2, '') WHERE name = $1`, tablegroup, connection)
 	require.NoError(t, err)
 }
 

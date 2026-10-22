@@ -39,6 +39,15 @@ type fakeDirectory struct {
 	found bool
 	err   error
 	asked string
+	// bound is the connection every tablegroup is bound to, and tablegroupFound whether the
+	// tablegroup exists.
+	bound           string
+	tablegroupFound bool
+}
+
+func (d *fakeDirectory) TablegroupBinding(_ context.Context, tablegroup string) (string, bool, error) {
+	d.asked = tablegroup
+	return d.bound, d.tablegroupFound, d.err
 }
 
 func (d *fakeDirectory) BackingConnection(_ context.Context, name string) (*multipoolerservicepb.BackingConnection, bool, error) {
@@ -107,4 +116,39 @@ func TestMetadataIsServedOnlyByTheDefaultPrimary(t *testing.T) {
 	requireMetadataCode(t, mtrpcpb.Code_UNAVAILABLE, err)
 	_, err = newMetadataManager(t, clustermetadatapb.PoolerType_REPLICA, constants.DefaultTableGroup).GetBackingConnection(t.Context(), &multipoolerservicepb.GetBackingConnectionRequest{Database: "other", ConnectionName: "src"})
 	requireMetadataCode(t, mtrpcpb.Code_INVALID_ARGUMENT, err)
+}
+
+// TestTablegroupBindingComesFromTheDirectory: the connection a tablegroup is bound to is read
+// from the directory; a tablegroup the catalog does not have is NOT_FOUND, and one served by its
+// managed cohort is bound to nothing.
+func TestTablegroupBindingComesFromTheDirectory(t *testing.T) {
+	defer func(old func(*MultipoolerManager) connectionDirectory) { newConnectionDirectory = old }(newConnectionDirectory)
+	pm := newMetadataManager(t, clustermetadatapb.PoolerType_REPLICA, constants.DefaultTableGroup)
+	req := &multipoolerservicepb.GetTablegroupBindingRequest{Database: "db", Tablegroup: "migrateTG"}
+
+	newConnectionDirectory = nil
+	_, err := pm.tablegroupBinding(t.Context(), "migrateTG")
+	requireMetadataCode(t, mtrpcpb.Code_UNIMPLEMENTED, err)
+
+	dir := &fakeDirectory{bound: "src", tablegroupFound: true}
+	newConnectionDirectory = func(*MultipoolerManager) connectionDirectory { return dir }
+	resp, err := pm.tablegroupBinding(t.Context(), "migrateTG")
+	require.NoError(t, err)
+	require.Equal(t, "migrateTG", dir.asked)
+	require.Equal(t, "src", resp.GetBackingConnection())
+
+	dir.bound = ""
+	resp, err = pm.tablegroupBinding(t.Context(), "migrateTG")
+	require.NoError(t, err)
+	require.Empty(t, resp.GetBackingConnection(), "a managed tablegroup is bound to nothing")
+
+	dir.tablegroupFound = false
+	_, err = pm.tablegroupBinding(t.Context(), "migrateTG")
+	requireMetadataCode(t, mtrpcpb.Code_NOT_FOUND, err)
+
+	_, err = pm.tablegroupBinding(t.Context(), "")
+	requireMetadataCode(t, mtrpcpb.Code_INVALID_ARGUMENT, err)
+
+	_, err = newMetadataManager(t, clustermetadatapb.PoolerType_REPLICA, constants.DefaultTableGroup).GetTablegroupBinding(t.Context(), req)
+	requireMetadataCode(t, mtrpcpb.Code_UNAVAILABLE, err)
 }

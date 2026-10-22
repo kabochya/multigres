@@ -65,21 +65,6 @@ func TestPrototypeStoreReadsAMissingRowAndAMissingTableAsUnfenced(t *testing.T) 
 	})
 }
 
-// TestPrototypeStoreCreatesItsTablesBeforeAWriteAndTheConnectionLookup: reads never create
-// anything, but the writes and the lookup of a connection do, in one statement.
-func TestPrototypeStoreCreatesItsTablesBeforeAWriteAndTheConnectionLookup(t *testing.T) {
-	pm, qs := newTestManagerWithMock(t, constants.DefaultTableGroup, "0-inf")
-	qs.AddQueryPattern("DO \\$\\$", mock.MakeQueryResult(nil, nil))
-	qs.AddQueryPattern("FROM multigres.proto_connections", mock.MakeQueryResult([]string{"dsn", "sysid"}, [][]any{{"postgres://u@h/db", "42"}}))
-	conn, found, err := newPrototypeStore(pm).BackingConnection(t.Context(), "src")
-	require.NoError(t, err)
-	require.True(t, found)
-	require.Equal(t, "h", conn.GetHost())
-	require.Equal(t, "u", conn.GetUser())
-	require.Equal(t, "42", conn.GetExpectedSystemIdentifier())
-	require.EqualValues(t, 2, qs.AdminQueryCount(), "the schema statement, then the lookup")
-}
-
 // TestPrototypeStoreCreatesItsTablesOncePerProcess: once the statement that creates the tables
 // has succeeded, later writes do not run it again, and the store of a manager is built once.
 func TestPrototypeStoreCreatesItsTablesOncePerProcess(t *testing.T) {
@@ -94,43 +79,4 @@ func TestPrototypeStoreCreatesItsTablesOncePerProcess(t *testing.T) {
 		require.True(t, ok)
 	}
 	require.EqualValues(t, 4, qs.AdminQueryCount(), "the schema statement once, then three writes")
-}
-
-func TestParseBackingDSN(t *testing.T) {
-	got, err := parseBackingDSN("postgres://alice:s3cret@db.example.com:6543/app?sslmode=verify-full&sslrootcert=/ca.pem&sslnegotiation=direct")
-	require.NoError(t, err)
-	require.Equal(t, "db.example.com", got.GetHost())
-	require.EqualValues(t, 6543, got.GetPort())
-	require.Equal(t, "app", got.GetDatabase())
-	require.Equal(t, "alice", got.GetUser())
-	require.Equal(t, "s3cret", got.GetPassword())
-	require.Equal(t, "verify-full", got.GetSslMode())
-	require.Equal(t, "/ca.pem", got.GetSslRootCert())
-	require.Equal(t, "direct", got.GetSslNegotiation())
-
-	got, err = parseBackingDSN("postgres://alice@db.example.com/app")
-	require.NoError(t, err)
-	require.EqualValues(t, 5432, got.GetPort())
-
-	for _, bad := range []string{"", "mysql://u@h/db", "postgres://u@h:notaport/db"} {
-		_, err := parseBackingDSN(bad)
-		require.Error(t, err, bad)
-	}
-}
-
-// TestParseBackingDSNRequiresASingleServer: fence safety looks at the backends of the server the
-// pooler's admin connection reaches, so a URL that could send the admin connection and the
-// application connections to different servers is refused.
-func TestParseBackingDSNRequiresASingleServer(t *testing.T) {
-	for _, bad := range []string{
-		"postgres://u@h1:5432,h2:5432/db",
-		"postgres://u@h1/db?host=h2",
-		"postgres://u@h1/db?hostaddr=10.0.0.1",
-		"postgres://u@h1/db?port=5433",
-		"postgres://u@h1/db?target_session_attrs=read-write",
-		"postgres://u@h1/db?load_balance_hosts=random",
-	} {
-		_, err := parseBackingDSN(bad)
-		require.Error(t, err, bad)
-	}
 }

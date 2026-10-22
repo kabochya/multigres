@@ -64,6 +64,7 @@ type admissionHarness struct {
 	tg    string // the tablegroup of the pooler: the default one for a managed pooler
 	gate  *poolerserver.QueryPoolerServer
 	row   atomic.Pointer[multipoolerservicepb.TablegroupServingState]
+	bound atomic.Pointer[string] // the connection the tablegroup is bound to
 	err   atomic.Pointer[error]
 	reads atomic.Int32
 }
@@ -101,6 +102,9 @@ func newAdmissionHarness(t *testing.T, unmanaged bool) *admissionHarness {
 		backing = "src"
 	}
 	h.setRow(false, 0, backing)
+	pm.admission.binding = func(context.Context) (string, bool, error) {
+		return *h.bound.Load(), true, nil
+	}
 	pm.admission.reader = func(context.Context) (*multipoolerservicepb.TablegroupServingState, error) {
 		h.reads.Add(1)
 		if e := h.err.Load(); e != nil {
@@ -130,8 +134,9 @@ func (h *admissionHarness) setRow(fenced bool, version int64, backing string) {
 }
 
 func (h *admissionHarness) setRowState(state multipoolerservicepb.AdmissionState, version int64, backing string) {
+	h.bound.Store(&backing)
 	h.row.Store(&multipoolerservicepb.TablegroupServingState{
-		Tablegroup: h.tg, State: state, Version: version, BackingConnection: backing,
+		Tablegroup: h.tg, State: state, Version: version,
 	})
 }
 
@@ -824,7 +829,7 @@ func TestServingStateReadsAMissingRowAsUnfenced(t *testing.T) {
 
 	t.Run("rows and routing", func(t *testing.T) {
 		store := &fakeServingReader{
-			rows: map[string]*servingRow{"other": {connection: "src", state: stateFenced, version: 4}},
+			rows: map[string]*servingRow{"other": {state: stateFenced, version: 4}},
 			app:  "default", appVersion: 7,
 		}
 		resp, err := readServingState(t.Context(), store, req)
@@ -832,7 +837,6 @@ func TestServingStateReadsAMissingRowAsUnfenced(t *testing.T) {
 		require.Equal(t, stateUnfenced, resp.GetTablegroups()[0].GetState())
 		require.Equal(t, stateFenced, resp.GetTablegroups()[1].GetState())
 		require.EqualValues(t, 4, resp.GetTablegroups()[1].GetVersion())
-		require.Equal(t, "src", resp.GetTablegroups()[1].GetBackingConnection())
 		require.Equal(t, "default", resp.GetAppTablegroup())
 		require.EqualValues(t, 7, resp.GetRoutingVersion())
 	})

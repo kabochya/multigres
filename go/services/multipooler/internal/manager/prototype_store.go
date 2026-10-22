@@ -17,8 +17,6 @@ package manager
 import (
 	"context"
 	"errors"
-	"fmt"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,8 +30,8 @@ import (
 	"github.com/multigres/multigres/go/services/multipooler/internal/executor"
 )
 
-// PROTOTYPE STUB: the store of the prototype metadata, registered as the pooler's store of
-// serving state and directory of backing connections.
+// PROTOTYPE STUB: the store of the prototype's admission and routing metadata, registered as
+// the pooler's store of serving state.
 
 // isUndefinedTable reports whether err is PostgreSQL's undefined_table: the metadata
 // tables have not been created, because nothing has ever been fenced.
@@ -42,11 +40,10 @@ func isUndefinedTable(err error) bool {
 	return errors.As(err, &diag) && diag.Code == mterrors.PgSSUndefinedTable
 }
 
-// prototypeStore keeps the cluster metadata of the prototype in throwaway tables on the default
-// primary, through the admin pool: the backing connections, the serving state of each
-// tablegroup, and the routing pointer. It is one store because it is one piece of
-// scaffolding: delete this file, and the tables with it, when the real tablegroup and
-// connection catalog lands.
+// prototypeStore keeps the admission and routing metadata of the prototype in throwaway tables
+// on the default primary, through the admin pool: the serving state of each tablegroup, and the
+// routing pointer. Delete this file, and the tables with it, when the real routing-rule
+// catalog lands. The backing connections are in connection_store.go.
 type prototypeStore struct {
 	query func(ctx context.Context, sql string, args ...any) (*sqltypes.Result, error)
 	exec  func(ctx context.Context, sql string) error
@@ -72,12 +69,11 @@ func prototypeStoreOf(pm *MultipoolerManager) *prototypeStore {
 
 func init() {
 	newServingStore = func(pm *MultipoolerManager) servingStore { return prototypeStoreOf(pm) }
-	newConnectionDirectory = func(pm *MultipoolerManager) connectionDirectory { return prototypeStoreOf(pm) }
 }
 
 // ensureSchema creates the tables if they do not exist; it is idempotent and one statement,
-// and runs once per process once it succeeded. Writes and the connection lookup run it
-// first, reads never do: reading creates nothing.
+// and runs once per process once it succeeded. Writes run it first, reads never do: reading
+// creates nothing.
 func (s *prototypeStore) ensureSchema(ctx context.Context) error {
 	if s.schemaReady.Load() {
 		return nil
@@ -89,81 +85,9 @@ func (s *prototypeStore) ensureSchema(ctx context.Context) error {
 	return nil
 }
 
-// BackingConnection reads the named connection and decodes its stored form, a plaintext
-// postgres:// URL, into the structured connection the contract carries.
-func (s *prototypeStore) BackingConnection(ctx context.Context, name string) (*multipoolerservicepb.BackingConnection, bool, error) {
-	if err := s.ensureSchema(ctx); err != nil {
-		return nil, false, err
-	}
-	result, err := s.query(ctx, "SELECT dsn, expected_system_identifier FROM multigres.proto_connections WHERE name = $1", name)
-	if err != nil {
-		return nil, false, err
-	}
-	if len(result.Rows) == 0 {
-		return nil, false, nil
-	}
-	var dsn, sysID string
-	if err := executor.ScanSingleRow(result, &dsn, &sysID); err != nil {
-		return nil, false, errors.Join(errors.New("decode backing connection"), err)
-	}
-	conn, err := parseBackingDSN(dsn)
-	if err != nil {
-		return nil, false, err
-	}
-	conn.Name = name
-	conn.ExpectedSystemIdentifier = sysID
-	return conn, true, nil
-}
-
-// parseBackingDSN decodes a stored connection URL:
-//
-//	postgres://user:password@host:port/database?sslmode=...&sslrootcert=...&sslnegotiation=...
-//
-// A URL that could name more than one server is refused here, before the pooler's own
-// validation, because the parameters that would do it (host, hostaddr, port,
-// target_session_attrs, load_balance_hosts) exist in this stored form and not in the
-// structured one.
-func parseBackingDSN(raw string) (*multipoolerservicepb.BackingConnection, error) {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return nil, errors.New("backing connection URL is not valid")
-	}
-	if u.Scheme != "postgres" && u.Scheme != "postgresql" {
-		return nil, errors.New("backing connection URL must use the postgres scheme")
-	}
-	if strings.Contains(u.Host, ",") {
-		return nil, errors.New("backing connection URL names more than one host; a single server is required")
-	}
-	q := u.Query()
-	for _, param := range []string{"host", "hostaddr", "port", "target_session_attrs", "load_balance_hosts"} {
-		if q.Has(param) {
-			return nil, fmt.Errorf("backing connection URL sets %q as a parameter; a single server given in the URL authority is required", param)
-		}
-	}
-	port := int32(5432)
-	if p := u.Port(); p != "" {
-		n, err := strconv.ParseInt(p, 10, 32)
-		if err != nil {
-			return nil, errors.New("backing connection URL has an invalid port")
-		}
-		port = int32(n)
-	}
-	password, _ := u.User.Password()
-	return &multipoolerservicepb.BackingConnection{
-		Host:           u.Hostname(),
-		Port:           port,
-		Database:       u.Path[min(1, len(u.Path)):],
-		User:           u.User.Username(),
-		Password:       password,
-		SslMode:        q.Get("sslmode"),
-		SslRootCert:    q.Get("sslrootcert"),
-		SslNegotiation: q.Get("sslnegotiation"),
-	}, nil
-}
-
 func (s *prototypeStore) GetRow(ctx context.Context, database, tablegroup string) (*servingRow, error) {
 	result, err := s.query(ctx,
-		"SELECT COALESCE(connection, ''), state, version, extract(epoch FROM updated_at)::text FROM multigres.proto_tablegroup_serving WHERE database = $1 AND tablegroup = $2",
+		"SELECT state, version, extract(epoch FROM updated_at)::text FROM multigres.proto_tablegroup_serving WHERE database = $1 AND tablegroup = $2",
 		database, tablegroup)
 	if isUndefinedTable(err) {
 		return nil, nil
@@ -174,12 +98,12 @@ func (s *prototypeStore) GetRow(ctx context.Context, database, tablegroup string
 	if len(result.Rows) == 0 {
 		return nil, nil
 	}
-	var connection, state, epoch string
+	var state, epoch string
 	var version int64
-	if err := executor.ScanSingleRow(result, &connection, &state, &version, &epoch); err != nil {
+	if err := executor.ScanSingleRow(result, &state, &version, &epoch); err != nil {
 		return nil, errors.Join(errors.New("decode tablegroup serving state"), err)
 	}
-	row := &servingRow{connection: connection, state: parseAdmissionState(state), version: version}
+	row := &servingRow{state: parseAdmissionState(state), version: version}
 	if secs, err := strconv.ParseFloat(epoch, 64); err == nil {
 		row.updatedAt = time.Unix(0, int64(secs*float64(time.Second)))
 	}

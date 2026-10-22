@@ -118,6 +118,15 @@ service MultipoolerService {
   // per-call authorization.
   rpc GetBackingConnection(GetBackingConnectionRequest) returns (GetBackingConnectionResponse);
 
+  // GetTablegroupBinding returns the name of the connection a tablegroup is bound to, or
+  // an empty name when the tablegroup is served by its managed cohort. It is served only
+  // by the default primary pooler. A pooler compares it with the connection it fronts
+  // before it admits application work, so a pooler that fronts one connection never
+  // serves a tablegroup that is bound to another. It carries no credential: the connection
+  // itself is read with GetBackingConnection. A tablegroup that does not exist is
+  // NOT_FOUND.
+  rpc GetTablegroupBinding(GetTablegroupBindingRequest) returns (GetTablegroupBindingResponse);
+
   // ---- Serving control (migration cutover) ----------------------------------
   //
   // The RPCs below are the control-plane interface used by a migration controller
@@ -951,6 +960,23 @@ message GetBackingConnectionResponse {
   BackingConnection connection = 1;
 }
 
+// GetTablegroupBindingRequest asks which connection a tablegroup is bound to.
+message GetTablegroupBindingRequest {
+  // database is the database the tablegroup belongs to.
+  string database = 1;
+
+  // tablegroup is the name of the tablegroup.
+  string tablegroup = 2;
+}
+
+// GetTablegroupBindingResponse names the connection a tablegroup is bound to.
+message GetTablegroupBindingResponse {
+  // backing_connection names the connection that backs the tablegroup, as
+  // GetBackingConnection knows it. Empty when the tablegroup is served by its managed
+  // cohort.
+  string backing_connection = 1;
+}
+
 // NotificationStreamRequest updates the subscribed channels for one gateway
 // client session.
 message NotificationStreamRequest {
@@ -991,9 +1017,7 @@ message TablegroupServingState {
   // tablegroup is the tablegroup name.
   string tablegroup = 1;
 
-  // backing_connection names the external connection that backs this
-  // tablegroup. Empty when it is served by its managed cohort.
-  string backing_connection = 2;
+  reserved 2;
 
   // state is the tablegroup's admission state. The tablegroup serves application
   // work only while it is UNFENCED; FENCING and FENCED both refuse it, and only

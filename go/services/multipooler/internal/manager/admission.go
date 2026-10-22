@@ -91,6 +91,9 @@ type admissionRuntime struct {
 	stopped atomic.Bool
 	// reader, when set, replaces the read from the default primary (tests).
 	reader func(ctx context.Context) (*multipoolerservicepb.TablegroupServingState, error)
+	// binding, when set, replaces the read of the connection the tablegroup is bound to
+	// (tests).
+	binding func(ctx context.Context) (name string, known bool, err error)
 }
 
 func (pm *MultipoolerManager) applicationGate() (poolerserver.ApplicationGate, error) {
@@ -285,13 +288,12 @@ func (pm *MultipoolerManager) enforceAdmission(ctx context.Context, expected *ad
 		}
 	}
 
+	if err := pm.checkTablegroupBinding(ctx); err != nil {
+		return nil, err
+	}
 	row, err := pm.readTablegroupServing(ctx)
 	if err != nil {
 		return nil, err
-	}
-	if row.GetBackingConnection() != pm.backingConnectionName() {
-		return nil, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
-			"tablegroup is backed by connection %q, this pooler by %q", row.GetBackingConnection(), pm.backingConnectionName())
 	}
 	if expected != nil && (row.GetState() != expected.state || row.GetVersion() != expected.version) {
 		return nil, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
@@ -389,7 +391,7 @@ func (pm *MultipoolerManager) readTablegroupServing(ctx context.Context) (*multi
 	// after a fence completed, opens without asking, as a pooler of a cluster that never
 	// fenced anything does.
 	if newServingStore == nil {
-		return pm.unfencedRowOfThisPooler(), nil
+		return unfencedRow(pm.record.ShardKey().GetTableGroup()), nil
 	}
 	req := &multipoolerservicepb.GetServingStateRequest{Database: key.GetDatabase(), Tablegroups: []string{key.GetTableGroup()}}
 	if pm.requireDefaultPrimary(key.GetDatabase()) == nil {
@@ -411,7 +413,7 @@ func (pm *MultipoolerManager) readTablegroupServing(ctx context.Context) (*multi
 			// constraint above (every pooler of a cluster that can fence runs a build that
 			// has the store): a failover onto an older default primary after a fence reopens
 			// the tablegroup.
-			row = pm.unfencedRowOfThisPooler()
+			row = unfencedRow(pm.record.ShardKey().GetTableGroup())
 			return nil
 		}
 		if err != nil {
@@ -432,18 +434,6 @@ const (
 	stateFencing  = multipoolerservicepb.AdmissionState_ADMISSION_STATE_FENCING
 	stateFenced   = multipoolerservicepb.AdmissionState_ADMISSION_STATE_FENCED
 )
-
-// unfencedRowOfThisPooler is the unfenced row that stands for a tablegroup with no persisted
-// state because there is no store to ask (no store built in, or a default primary that answers
-// Unimplemented): there is no connection to disagree with, so the pooler's own is the one it is
-// "backed by". This is not what a store with no row for the tablegroup says: that row names no
-// connection, and an unmanaged pooler needs a row that names its own before it opens, so that
-// where a store exists the connection a tablegroup is backed by is always a recorded fact.
-func (pm *MultipoolerManager) unfencedRowOfThisPooler() *multipoolerservicepb.TablegroupServingState {
-	row := unfencedRow(pm.record.ShardKey().GetTableGroup())
-	row.BackingConnection = pm.backingConnectionName()
-	return row
-}
 
 // unfencedRow is what a tablegroup that has no persisted admission state reads as:
 // unfenced, at version zero.

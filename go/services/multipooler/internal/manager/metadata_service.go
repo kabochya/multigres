@@ -30,6 +30,10 @@ type connectionDirectory interface {
 	// BackingConnection returns the named connection, and false when there is none of
 	// that name. Its Name is set by the caller.
 	BackingConnection(ctx context.Context, name string) (conn *multipoolerservicepb.BackingConnection, found bool, err error)
+	// TablegroupBinding returns the name of the connection the tablegroup is bound to,
+	// empty when it is served by its managed cohort, and false when there is no such
+	// tablegroup.
+	TablegroupBinding(ctx context.Context, tablegroup string) (connection string, found bool, err error)
 }
 
 // newConnectionDirectory builds the directory the default primary reads connections
@@ -86,4 +90,31 @@ func (pm *MultipoolerManager) backingConnection(ctx context.Context, name string
 	}
 	conn.Name = name
 	return &multipoolerservicepb.GetBackingConnectionResponse{Connection: conn}, nil
+}
+
+// GetTablegroupBinding returns the name of the connection a tablegroup is bound to from the
+// default primary's metadata, empty for a tablegroup served by its managed cohort.
+func (pm *MultipoolerManager) GetTablegroupBinding(ctx context.Context, req *multipoolerservicepb.GetTablegroupBindingRequest) (*multipoolerservicepb.GetTablegroupBindingResponse, error) {
+	if err := pm.requireDefaultPrimary(req.GetDatabase()); err != nil {
+		return nil, err
+	}
+	return pm.tablegroupBinding(ctx, req.GetTablegroup())
+}
+
+// tablegroupBinding reads the binding of the named tablegroup from the directory.
+func (pm *MultipoolerManager) tablegroupBinding(ctx context.Context, tablegroup string) (*multipoolerservicepb.GetTablegroupBindingResponse, error) {
+	if tablegroup == "" {
+		return nil, mterrors.New(mtrpcpb.Code_INVALID_ARGUMENT, "tablegroup is required")
+	}
+	if newConnectionDirectory == nil {
+		return nil, mterrors.New(mtrpcpb.Code_UNIMPLEMENTED, "no directory of backing connections is configured")
+	}
+	name, found, err := newConnectionDirectory(pm).TablegroupBinding(ctx, tablegroup)
+	if err != nil {
+		return nil, mterrors.Wrap(err, "read tablegroup binding")
+	}
+	if !found {
+		return nil, mterrors.Errorf(mtrpcpb.Code_NOT_FOUND, "tablegroup %q not found", tablegroup)
+	}
+	return &multipoolerservicepb.GetTablegroupBindingResponse{BackingConnection: name}, nil
 }

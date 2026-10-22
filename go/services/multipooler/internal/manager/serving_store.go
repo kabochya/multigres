@@ -27,10 +27,9 @@ import (
 
 // servingRow is one tablegroup's persisted serving row.
 type servingRow struct {
-	connection string
-	state      multipoolerservicepb.AdmissionState
-	version    int64
-	updatedAt  time.Time
+	state     multipoolerservicepb.AdmissionState
+	version   int64
+	updatedAt time.Time
 }
 
 // closed reports whether the tablegroup refuses application work.
@@ -38,11 +37,10 @@ func (r *servingRow) closed() bool { return r.state != stateUnfenced }
 
 func (r *servingRow) proto(tablegroup string) *multipoolerservicepb.TablegroupServingState {
 	return &multipoolerservicepb.TablegroupServingState{
-		Tablegroup:        tablegroup,
-		BackingConnection: r.connection,
-		State:             r.state,
-		Version:           r.version,
-		UpdatedAt:         timestampOrNil(r.updatedAt),
+		Tablegroup: tablegroup,
+		State:      r.state,
+		Version:    r.version,
+		UpdatedAt:  timestampOrNil(r.updatedAt),
 	}
 }
 

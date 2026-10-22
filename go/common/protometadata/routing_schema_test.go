@@ -38,7 +38,7 @@ func TestEnsureSchemaIsOneIdempotentStatementUnderAnAdvisoryLock(t *testing.T) {
 	sql := statements[0]
 	require.Less(t, strings.Index(sql, "pg_advisory_xact_lock"), strings.Index(sql, "CREATE TABLE"), "the lock comes before any table")
 	require.Equal(t, strings.Count(sql, "CREATE TABLE"), strings.Count(sql, "CREATE TABLE IF NOT EXISTS"), "every table is created only if missing")
-	for _, table := range []string{"proto_connections", "proto_tablegroup_serving", "proto_routing"} {
+	for _, table := range []string{"proto_tablegroup_serving", "proto_routing"} {
 		require.Contains(t, sql, "multigres."+table)
 	}
 	require.Contains(t, sql, "'UNFENCED', 'FENCING', 'FENCED'", "the state column admits the three admission states")

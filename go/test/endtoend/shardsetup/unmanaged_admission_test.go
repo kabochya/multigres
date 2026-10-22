@@ -66,12 +66,13 @@ func setServingRowState(t *testing.T, s *ShardSetup, tablegroup, backing string,
 		_, err := conn.Exec(ctx, sql)
 		return err
 	}))
-	_, err := conn.Exec(ctx, `INSERT INTO multigres.proto_tablegroup_serving (database, tablegroup, connection, state, version)
-VALUES ($1, $2, NULLIF($3, ''), $4, $5)
+	_, err := conn.Exec(ctx, `INSERT INTO multigres.proto_tablegroup_serving (database, tablegroup, state, version)
+VALUES ($1, $2, $3, $4)
 ON CONFLICT (database, tablegroup) DO UPDATE
-SET connection = EXCLUDED.connection, state = EXCLUDED.state, version = EXCLUDED.version, updated_at = now()`,
-		s.Database, tablegroup, backing, strings.TrimPrefix(state.String(), "ADMISSION_STATE_"), version)
+SET state = EXCLUDED.state, version = EXCLUDED.version, updated_at = now()`,
+		s.Database, tablegroup, strings.TrimPrefix(state.String(), "ADMISSION_STATE_"), version)
 	require.NoError(t, err)
+	bindTablegroup(t, s, tablegroup, backing)
 }
 
 // refreshAdmission calls RefreshAdmission on one pooler, as the coordinator does.

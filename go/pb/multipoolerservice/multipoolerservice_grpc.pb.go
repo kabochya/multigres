@@ -50,6 +50,7 @@ const (
 	MultipoolerService_StreamPoolerHealth_FullMethodName        = "/multipoolerservice.MultipoolerService/StreamPoolerHealth"
 	MultipoolerService_NotificationStream_FullMethodName        = "/multipoolerservice.MultipoolerService/NotificationStream"
 	MultipoolerService_GetBackingConnection_FullMethodName      = "/multipoolerservice.MultipoolerService/GetBackingConnection"
+	MultipoolerService_GetTablegroupBinding_FullMethodName      = "/multipoolerservice.MultipoolerService/GetTablegroupBinding"
 	MultipoolerService_GetServingState_FullMethodName           = "/multipoolerservice.MultipoolerService/GetServingState"
 	MultipoolerService_StartFence_FullMethodName                = "/multipoolerservice.MultipoolerService/StartFence"
 	MultipoolerService_CommitFence_FullMethodName               = "/multipoolerservice.MultipoolerService/CommitFence"
@@ -137,6 +138,14 @@ type MultipoolerServiceClient interface {
 	// protected only by the transport's authentication, and there is no
 	// per-call authorization.
 	GetBackingConnection(ctx context.Context, in *GetBackingConnectionRequest, opts ...grpc.CallOption) (*GetBackingConnectionResponse, error)
+	// GetTablegroupBinding returns the name of the connection a tablegroup is bound to, or
+	// an empty name when the tablegroup is served by its managed cohort. It is served only
+	// by the default primary pooler. A pooler compares it with the connection it fronts
+	// before it admits application work, so a pooler that fronts one connection never
+	// serves a tablegroup that is bound to another. It carries no credential: the connection
+	// itself is read with GetBackingConnection. A tablegroup that does not exist is
+	// NOT_FOUND.
+	GetTablegroupBinding(ctx context.Context, in *GetTablegroupBindingRequest, opts ...grpc.CallOption) (*GetTablegroupBindingResponse, error)
 	// GetServingState returns the authoritative routing and admission metadata.
 	// Use it to decide which version to pass, and to reconcile an interrupted
 	// operation, including after the migration controller itself changes leader.
@@ -423,6 +432,16 @@ func (c *multipoolerServiceClient) GetBackingConnection(ctx context.Context, in 
 	return out, nil
 }
 
+func (c *multipoolerServiceClient) GetTablegroupBinding(ctx context.Context, in *GetTablegroupBindingRequest, opts ...grpc.CallOption) (*GetTablegroupBindingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetTablegroupBindingResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_GetTablegroupBinding_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *multipoolerServiceClient) GetServingState(ctx context.Context, in *GetServingStateRequest, opts ...grpc.CallOption) (*GetServingStateResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetServingStateResponse)
@@ -562,6 +581,14 @@ type MultipoolerServiceServer interface {
 	// protected only by the transport's authentication, and there is no
 	// per-call authorization.
 	GetBackingConnection(context.Context, *GetBackingConnectionRequest) (*GetBackingConnectionResponse, error)
+	// GetTablegroupBinding returns the name of the connection a tablegroup is bound to, or
+	// an empty name when the tablegroup is served by its managed cohort. It is served only
+	// by the default primary pooler. A pooler compares it with the connection it fronts
+	// before it admits application work, so a pooler that fronts one connection never
+	// serves a tablegroup that is bound to another. It carries no credential: the connection
+	// itself is read with GetBackingConnection. A tablegroup that does not exist is
+	// NOT_FOUND.
+	GetTablegroupBinding(context.Context, *GetTablegroupBindingRequest) (*GetTablegroupBindingResponse, error)
 	// GetServingState returns the authoritative routing and admission metadata.
 	// Use it to decide which version to pass, and to reconcile an interrupted
 	// operation, including after the migration controller itself changes leader.
@@ -710,6 +737,9 @@ func (UnimplementedMultipoolerServiceServer) NotificationStream(grpc.BidiStreami
 }
 func (UnimplementedMultipoolerServiceServer) GetBackingConnection(context.Context, *GetBackingConnectionRequest) (*GetBackingConnectionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetBackingConnection not implemented")
+}
+func (UnimplementedMultipoolerServiceServer) GetTablegroupBinding(context.Context, *GetTablegroupBindingRequest) (*GetTablegroupBindingResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetTablegroupBinding not implemented")
 }
 func (UnimplementedMultipoolerServiceServer) GetServingState(context.Context, *GetServingStateRequest) (*GetServingStateResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetServingState not implemented")
@@ -937,6 +967,24 @@ func _MultipoolerService_GetBackingConnection_Handler(srv interface{}, ctx conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MultipoolerService_GetTablegroupBinding_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetTablegroupBindingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MultipoolerServiceServer).GetTablegroupBinding(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MultipoolerService_GetTablegroupBinding_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MultipoolerServiceServer).GetTablegroupBinding(ctx, req.(*GetTablegroupBindingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _MultipoolerService_GetServingState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetServingStateRequest)
 	if err := dec(in); err != nil {
@@ -1079,6 +1127,10 @@ var MultipoolerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetBackingConnection",
 			Handler:    _MultipoolerService_GetBackingConnection_Handler,
+		},
+		{
+			MethodName: "GetTablegroupBinding",
+			Handler:    _MultipoolerService_GetTablegroupBinding_Handler,
 		},
 		{
 			MethodName: "GetServingState",

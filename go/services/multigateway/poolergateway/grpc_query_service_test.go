@@ -228,6 +228,10 @@ func (m *mockMultipoolerServiceClient) GetBackingConnection(ctx context.Context,
 	return nil, nil
 }
 
+func (m *mockMultipoolerServiceClient) GetTablegroupBinding(ctx context.Context, in *multipoolerservice.GetTablegroupBindingRequest, opts ...grpc.CallOption) (*multipoolerservice.GetTablegroupBindingResponse, error) {
+	return nil, nil
+}
+
 func (m *mockMultipoolerServiceClient) GetServingState(ctx context.Context, in *multipoolerservice.GetServingStateRequest, opts ...grpc.CallOption) (*multipoolerservice.GetServingStateResponse, error) {
 	return nil, nil
 }
