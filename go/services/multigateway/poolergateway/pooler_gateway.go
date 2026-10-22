@@ -121,7 +121,7 @@ type PoolerGateway struct {
 	cache *poolerwatch.PoolerCache[*poolerConnection]
 
 	// appRouting, when set, steers application targets to the tablegroup the
-	// default primary's routing pointer names. See app_routing.go.
+	// default primary's routing resolves to. See app_routing.go.
 	appRouting *AppRouting
 
 	// logger for debugging

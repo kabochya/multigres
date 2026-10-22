@@ -34,12 +34,12 @@ import (
 // manager drives it from the persisted admission state; nothing else may reopen
 // it.
 type ApplicationGate interface {
-	// EnableAdmissionControl closes the gate and makes every role or serving
-	// change close it again until the admission state is read. Call it once,
-	// before any application work. externalBackend is true for an unmanaged
-	// pooler, whose source is writable whatever role the pooler reports: a probe
-	// failure makes it report UNKNOWN, and it must not be taken for a standby.
-	EnableAdmissionControl(externalBackend bool)
+	// EnableAdmissionControl closes the gate. When closesOnRoleChange is true it also
+	// makes every role or serving change close it again until the admission state is
+	// read. Call it once, before any application work. closesOnRoleChange is false for
+	// a backend that is writable whatever role the pooler reports (an external source): a
+	// probe failure makes it report UNKNOWN, and it must not be taken for a standby.
+	EnableAdmissionControl(closesOnRoleChange bool)
 	// AdmissionGeneration returns a token that changes whenever the gate closes.
 	AdmissionGeneration() uint64
 	// OpenApplication opens the gate only if no close happened since generation
@@ -143,10 +143,10 @@ func (s *QueryPoolerServer) notifyRequestsLocked() {
 }
 
 // EnableAdmissionControl implements ApplicationGate.
-func (s *QueryPoolerServer) EnableAdmissionControl(externalBackend bool) {
+func (s *QueryPoolerServer) EnableAdmissionControl(closesOnRoleChange bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.externalBackend = externalBackend
+	s.closesOnRoleChange = closesOnRoleChange
 	s.admissionControlled = true
 	s.applicationBlocked = true
 	s.admissionGeneration++

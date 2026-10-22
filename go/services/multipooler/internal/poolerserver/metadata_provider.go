@@ -21,19 +21,12 @@ import (
 	multipoolerservicepb "github.com/multigres/multigres/go/pb/multipoolerservice"
 )
 
-// MetadataProvider serves the manager's control-plane calls: the cluster metadata held on
-// the default primary, and the coordination of admission. They are independent of
-// application query admission: a closed gate must never block the call that reopens it.
+// MetadataProvider serves the manager's cluster metadata held on the default primary: the
+// backing connections, and the binding of a tablegroup to one. These calls are independent of
+// application query admission.
 type MetadataProvider interface {
 	GetBackingConnection(ctx context.Context, req *multipoolerservicepb.GetBackingConnectionRequest) (*multipoolerservicepb.GetBackingConnectionResponse, error)
 	GetTablegroupBinding(ctx context.Context, req *multipoolerservicepb.GetTablegroupBindingRequest) (*multipoolerservicepb.GetTablegroupBindingResponse, error)
-	GetServingState(ctx context.Context, req *multipoolerservicepb.GetServingStateRequest) (*multipoolerservicepb.GetServingStateResponse, error)
-	StartFence(ctx context.Context, req *multipoolerservicepb.StartFenceRequest) (*multipoolerservicepb.StartFenceResponse, error)
-	CommitFence(ctx context.Context, req *multipoolerservicepb.CommitFenceRequest) (*multipoolerservicepb.CommitFenceResponse, error)
-	UnfenceTablegroup(ctx context.Context, req *multipoolerservicepb.UnfenceTablegroupRequest) (*multipoolerservicepb.UnfenceTablegroupResponse, error)
-	FlipRouting(ctx context.Context, req *multipoolerservicepb.FlipRoutingRequest) (*multipoolerservicepb.FlipRoutingResponse, error)
-	// RefreshAdmission re-reads and applies this pooler's application admission.
-	RefreshAdmission(ctx context.Context, req *multipoolerservicepb.RefreshAdmissionRequest) (*multipoolerservicepb.RefreshAdmissionResponse, error)
 }
 
 // MetadataProvider returns the manager's metadata service, or an error when the

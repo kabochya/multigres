@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -36,47 +37,46 @@ import (
 	multipoolerservicepb "github.com/multigres/multigres/go/pb/multipoolerservice"
 )
 
-// The admission coordinator runs on the default primary. It owns the decisions
-// "fence this tablegroup", "unfence it" and "move application traffic", commits
-// them durably, and drives every member of the tablegroup to enforce them. It provides
-// primitives that are safe by construction and reports facts; the migrator owns policy
-// (how long to wait, whether to retry or give up, when to reopen).
+// The admission coordinator runs on the default primary. It owns the decisions "fence this
+// scope", "unfence it" and "move application traffic", commits them durably, and drives every
+// member of the tablegroup to enforce them. It provides primitives that are safe by construction
+// and reports facts; the migrator owns policy (how long to wait, whether to retry or give up, when
+// to reopen).
 //
-// A tablegroup's row is a state, UNFENCED, FENCING or FENCED, and a version that goes up
-// by one every time the tablegroup is fenced or unfenced. Fence and unfence are
-// compare-and-sets on the version the caller read, so a delayed call cannot undo what
-// came after it. Each call also recognizes the
-// exact row its own success produced, so a retry of it succeeds without writing again,
-// while anything else is rejected: only the coordinator's compare-and-set changes the
-// version, callers only pass it back. The persisted row is the source of truth: poolers
-// re-read it themselves, so a stale or restarted coordinator cannot make a pooler apply
-// anything.
+// A scope's fence is a state, UNFENCED, FENCING or FENCED, and a version that goes up by one every
+// time the scope is fenced or unfenced, and it is held by one operation. Fence and unfence are
+// compare-and-sets on the version the caller read, so a delayed call cannot undo what came after
+// it. Each call also recognizes the exact row its own success produced, so a retry of it succeeds
+// without writing again, while anything else is rejected: only the coordinator's compare-and-set
+// changes the version, callers only pass it back. The persisted fence is the source of truth:
+// poolers re-read it themselves, so a stale or restarted coordinator cannot make a pooler apply
+// anything. A scope with no fence is unfenced at version zero, and an unfence leaves an UNFENCED
+// fence, at the next version, until CleanupOperation deletes the operation's fences.
 //
-// A fence has two calls, and each asks every member the same thing: to apply the row (which closes
+// A fence has two calls, and each asks every member the same thing: to apply the fence (which closes
 // its gate) and say what it holds. StartFence begins an attempt: it commits FENCING, asks the
 // members, and returns at once, whatever they hold. CommitFence, called as often as the migrator
 // likes, asks them again from a fresh listing, again without waiting, which also closes a member
 // that missed the start, and writes FENCED, at the same version, only when every member holds
 // nothing. The version is the attempt: the start and an unfence begin a new one, the commit
-// completes the current one, and every response returns the row, so the caller passes back what it
-// got. Everything between the two calls is the migrator's: waiting, deciding what to
-// do about the connections that hold the fence, giving up. What Multigres keeps is the
-// safety check inside CommitFence. FENCING is a fence that is started, whose commit has
-// not succeeded, or whose coordinator was lost; a flip refuses it, so a migrator that
-// takes it for a completed fence still cannot move the traffic. Every member is asked,
-// not only the writable one: a replica can be promoted while the fence runs, and one that
-// read UNFENCED before FENCING was written would otherwise be left open. That is closed
-// by invariants enforced elsewhere (see fanOut). Every member is asked even when one
-// fails; a start succeeds only if all closed, and a commit only if all are clean. A fence
-// never undoes itself: when it cannot complete, the row stays FENCING and the per-member
-// results tell the caller why, and the caller asks again or unfences. An unfence has no
-// acknowledgement barrier: a pooler opens once it reads UNFENCED.
+// completes the current one, and every response returns the fence, so the caller passes back what
+// it got. Everything between the two calls is the migrator's: waiting, deciding what to do about
+// the connections that hold the fence, giving up. What Multigres keeps is the safety check inside
+// CommitFence. FENCING is a fence that is started, whose commit has not succeeded, or whose
+// coordinator was lost; a routing switch refuses it, so a migrator that takes it for a completed
+// fence still cannot move the traffic. Every member is asked, not only the writable one: a replica
+// can be promoted while the fence runs, and one that read UNFENCED before FENCING was written would
+// otherwise be left open. That is closed by invariants enforced elsewhere (see fanOut). Every
+// member is asked even when one fails; a start succeeds only if all closed, and a commit only if
+// all are clean. A fence never undoes itself: when it cannot complete, the fence stays FENCING and
+// the per-member results tell the caller why, and the caller asks again or unfences. An unfence has
+// no acknowledgement barrier: a pooler opens once it reads UNFENCED.
 //
-// A coordinator that dies, or stops being the default primary, in the middle of a fence
-// leaves the tablegroup FENCING. Nothing in the system undoes that: the migrator is the
-// one waiting on the call, gets the error, reads GetServingState and, if the tablegroup is
-// fenced and the cutover has not flipped, unfences it at the version it read (see the
-// migrator's on-error policy in proto/multipoolerservice.proto).
+// A coordinator that dies, or stops being the default primary, in the middle of a fence leaves the
+// scope FENCING. Nothing in the system undoes that: the migrator is the one waiting on the call,
+// gets the error, reads GetRoutingState and, if the scope is fenced and the traffic has not
+// switched, unfences it at the version it read (see the migrator's on-error policy in
+// proto/multipoolerservice.proto).
 
 const (
 	// defaultMemberCallTimeout is what a member is given to answer a close or a report, both
@@ -116,7 +116,7 @@ type poolerRefresher interface {
 }
 
 type admissionCoordinator struct {
-	store     servingStore
+	store     routingStore
 	members   membership
 	refresher poolerRefresher
 	logger    *slog.Logger
@@ -173,42 +173,102 @@ func (e *FenceIncompleteError) GRPCStatus() *status.Status {
 	return st
 }
 
-// StartFence begins a fence of one tablegroup: it writes FENCING and asks every member to close
-// and say what it holds, and succeeds when every member answered, whatever it holds. It does not
-// wait for work and it does not end anything. A start that some member did not answer leaves the
-// row FENCING, and the error says what each member answered; asking again reaches the members
-// that missed it.
+// requestScope checks the operation and the scope of a request and returns them: the operation
+// as a canonical UUID, and the tablegroup the scope names. Only a whole tablegroup is a scope
+// today.
+func requestScope(operationID string, scope *multipoolerservicepb.AdmissionScope) (op, tablegroup string, err error) {
+	op, err = canonicalOperationID(operationID)
+	if err != nil {
+		return "", "", err
+	}
+	if scope.GetTablegroup() == "" {
+		return "", "", mterrors.New(mtrpcpb.Code_INVALID_ARGUMENT, "the tablegroup of the scope is required")
+	}
+	if scope.GetShard() != "" || scope.GetTable() != "" {
+		return "", "", mterrors.New(mtrpcpb.Code_UNIMPLEMENTED, "only a tablegroup scope is supported: shard and table scopes are not implemented")
+	}
+	return op, scope.GetTablegroup(), nil
+}
+
+// canonicalOperationID returns the operation id in the form PostgreSQL gives a UUID back, so that
+// what a caller passes compares equal to what is stored.
+func canonicalOperationID(operationID string) (string, error) {
+	id, err := uuid.Parse(operationID)
+	if err != nil {
+		return "", mterrors.Errorf(mtrpcpb.Code_INVALID_ARGUMENT, "operation_id must be a UUID: %v", err)
+	}
+	return id.String(), nil
+}
+
+// describeFence says what a scope's fence is, for a message.
+func describeFence(f *fenceRow) string {
+	if f == nil {
+		return "unfenced with no fence (version 0)"
+	}
+	return fmt.Sprintf("%s at version %d, held by operation %s", f.state, f.version, f.operationID)
+}
+
+// unknownTablegroup is the NOT_FOUND of a tablegroup the catalog does not have, or nil when it has
+// it. It is checked only when the scope has no fence: a fence is proof that the tablegroup exists.
+func (c *admissionCoordinator) unknownTablegroup(ctx context.Context, tablegroup string) error {
+	ok, err := c.store.TablegroupExists(ctx, tablegroup)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return mterrors.Errorf(mtrpcpb.Code_NOT_FOUND, "tablegroup %q is not in the catalog", tablegroup)
+	}
+	return nil
+}
+
+// StartFence begins a fence of one scope for an operation: it writes FENCING and asks every member
+// to close and say what it holds, and succeeds when every member answered, whatever it holds. It
+// does not wait for work and it does not end anything. A start that some member did not answer
+// leaves the fence FENCING, and the error says what each member answered; asking again reaches the
+// members that missed it.
 //
-// A tablegroup whose durability policy, or the control home's, needs fewer than two nodes
-// is refused before anything is written: with one node there is nothing that keeps the
-// tablegroup available while its only node is replaced. So is a tablegroup that has more
-// than one unmanaged pooler: exactly one is supported per tablegroup.
+// A tablegroup whose durability policy, or the control home's, needs fewer than two nodes is
+// refused before anything is written: with one node there is nothing that keeps the tablegroup
+// available while its only node is replaced. So is a tablegroup that has more than one unmanaged
+// pooler: exactly one is supported per tablegroup.
 func (c *admissionCoordinator) StartFence(ctx context.Context, req *multipoolerservicepb.StartFenceRequest) (*multipoolerservicepb.StartFenceResponse, error) {
-	if req.GetTablegroup() == "" {
-		return nil, mterrors.New(mtrpcpb.Code_INVALID_ARGUMENT, "tablegroup is required")
+	op, tg, err := requestScope(req.GetOperationId(), req.GetScope())
+	if err != nil {
+		return nil, err
 	}
 	if req.GetExpectedVersion() < 0 {
 		return nil, mterrors.New(mtrpcpb.Code_INVALID_ARGUMENT, "expected_version must not be negative")
 	}
-	db, tg, expected := req.GetDatabase(), req.GetTablegroup(), req.GetExpectedVersion()
-	row, err := c.store.GetRow(ctx, db, tg)
+	db, expected := req.GetDatabase(), req.GetExpectedVersion()
+	snap, err := c.store.Snapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if row == nil {
-		// Never fenced: UNFENCED at version zero.
-		row = &servingRow{state: stateUnfenced}
+	cur := snap.fenceOf(tg)
+	if cur == nil {
+		if err := c.unknownTablegroup(ctx, tg); err != nil {
+			return nil, err
+		}
 	}
-	// The version is the attempt, and the caller passes back the one it read. The rows this call
+	curVersion := int64(0)
+	if cur != nil {
+		curVersion = cur.version
+	}
+	// The version is the attempt, and the caller passes back the one it read. The fences this call
 	// accepts are the ones its own success, or a repeat of it, leaves:
-	//   UNFENCED at v:            begin a new attempt: write FENCING at v+1, then ask the members;
+	//   none or UNFENCED at v:    begin a new attempt: write FENCING at v+1, then ask the members. An
+	//                             UNFENCED fence that another operation left is taken over, in the
+	//                             same write;
 	//   FENCING at v or at v+1:   the attempt, repeated (the caller read it, or its first reply was
 	//                             lost): ask the members again;
 	//   FENCED at v or at v+1:    already done: succeed, and ask nobody.
-	// Anything else is rejected, so a delayed repeat of a fence that was undone cannot fence
-	// again.
+	// The last two only for this operation's own fence. Anything else is rejected, so a delayed
+	// repeat of a fence that was undone cannot fence again, and an operation cannot touch a scope
+	// that another one holds.
+	own := cur != nil && cur.operationID == op
+	var row fenceRow
 	switch {
-	case row.state == stateUnfenced && row.version == expected:
+	case (cur == nil || cur.state == stateUnfenced) && curVersion == expected:
 		if err := c.checkDurability(ctx, db, tg); err != nil {
 			return nil, err
 		}
@@ -218,37 +278,38 @@ func (c *admissionCoordinator) StartFence(ctx context.Context, req *multipoolers
 		if err := c.isLeader(); err != nil {
 			return nil, err
 		}
-		ok, err := c.store.CompareAndSet(ctx, db, tg, stateUnfenced, expected, stateFencing, expected+1)
+		ok, err := c.store.WriteFence(ctx, fenceWrite{tablegroup: tg, operationID: op, prev: cur, state: stateFencing, version: expected + 1})
 		if err != nil {
-			return nil, mterrors.Wrap(err, "persist the fence; outcome uncertain, re-read with GetServingState")
+			return nil, mterrors.Wrap(err, "persist the fence; outcome uncertain, re-read with GetRoutingState")
 		}
 		if !ok {
-			return nil, mterrors.New(mtrpcpb.Code_ABORTED, "serving state changed concurrently; re-read and retry")
+			return nil, mterrors.New(mtrpcpb.Code_ABORTED, "the fence changed concurrently; re-read and retry")
 		}
-		row.state, row.version, row.updatedAt = stateFencing, expected+1, time.Now()
-	case row.state == stateFencing && (row.version == expected || row.version == expected+1):
+		row = fenceRow{operationID: op, tablegroup: tg, state: stateFencing, version: expected + 1, updatedAt: time.Now()}
+	case own && cur.state == stateFencing && (cur.version == expected || cur.version == expected+1):
 		// The attempt, repeated.
-	case row.state == stateFenced && (row.version == expected || row.version == expected+1):
-		return &multipoolerservicepb.StartFenceResponse{State: row.proto(tg)}, nil
+		row = *cur
+	case own && cur.state == stateFenced && (cur.version == expected || cur.version == expected+1):
+		return &multipoolerservicepb.StartFenceResponse{Fence: cur.proto()}, nil
 	default:
 		return nil, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
-			"tablegroup %q is %s at version %d, not UNFENCED at the expected version %d, nor FENCING or FENCED at it or the version after; read GetServingState and decide",
-			tg, row.state, row.version, expected)
+			"scope %q is %s for operation %s, not unfenced at the expected version %d, nor FENCING or FENCED for the operation at it or the version after; read GetRoutingState and decide",
+			tg, describeFence(cur), op, expected)
 	}
 
 	results, err := c.fanOut(ctx, db, tg, func(ctx context.Context, p poolerRef) *multipoolerservicepb.MemberFenceResult {
-		return c.askOne(ctx, p, db, tg, row.version)
+		return c.askOne(ctx, p, db, op, tg, row.version)
 	})
 	if err != nil {
 		return nil, err
 	}
-	resp := &multipoolerservicepb.StartFenceResponse{State: row.proto(tg), Members: results}
+	resp := &multipoolerservicepb.StartFenceResponse{Fence: row.proto(), Members: results}
 	if notOK := unreachable(results); len(notOK) > 0 {
 		if c.logger != nil {
 			c.logger.WarnContext(ctx, "fence started; a member did not answer", "tablegroup", tg, "version", row.version, "unreachable", len(notOK))
 		}
 		return nil, &FenceIncompleteError{
-			message: fmt.Sprintf("tablegroup %q is FENCING at version %d but %d of %d members did not answer (%s); call StartFence again to reach them, or unfence at that version",
+			message: fmt.Sprintf("scope %q is FENCING at version %d but %d of %d members did not answer (%s); call StartFence again to reach them, or unfence at that version",
 				tg, row.version, len(notOK), len(results), strings.Join(notOK, "; ")),
 			Details: resp,
 		}
@@ -256,85 +317,93 @@ func (c *admissionCoordinator) StartFence(ctx context.Context, req *multipoolers
 	return resp, nil
 }
 
-// CommitFence completes the current fence attempt, when every member holds nothing: it asks
-// every member, from a fresh listing, to apply the row and say what it holds (which closes a
-// member that missed the start), and writes FENCED, at the same version, only if all are clean. It
-// waits for nothing. When one is not, it writes nothing and the error says what each member
-// answered; the migrator asks again when it likes.
+// CommitFence completes the current fence attempt, when every member holds nothing: it asks every
+// member, from a fresh listing, to apply the fence and say what it holds (which closes a member
+// that missed the start), and writes FENCED, at the same version, only if all are clean. It waits
+// for nothing. When one is not, it writes nothing and the error says what each member answered; the
+// migrator asks again when it likes.
 func (c *admissionCoordinator) CommitFence(ctx context.Context, req *multipoolerservicepb.CommitFenceRequest) (*multipoolerservicepb.CommitFenceResponse, error) {
-	if req.GetTablegroup() == "" {
-		return nil, mterrors.New(mtrpcpb.Code_INVALID_ARGUMENT, "tablegroup is required")
+	op, tg, err := requestScope(req.GetOperationId(), req.GetScope())
+	if err != nil {
+		return nil, err
 	}
 	if req.GetVersion() <= 0 {
 		return nil, mterrors.New(mtrpcpb.Code_INVALID_ARGUMENT, "version must be the version of a fence")
 	}
-	db, tg, version := req.GetDatabase(), req.GetTablegroup(), req.GetVersion()
-	row, err := c.store.GetRow(ctx, db, tg)
+	db, version := req.GetDatabase(), req.GetVersion()
+	snap, err := c.store.Snapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if row == nil {
-		row = &servingRow{state: stateUnfenced}
+	cur := snap.fenceOf(tg)
+	if cur == nil {
+		if err := c.unknownTablegroup(ctx, tg); err != nil {
+			return nil, err
+		}
 	}
-	// The rows this call accepts: FENCING at the version, which it commits, and FENCED at
-	// it, which is success. Nothing else is a fence of that version.
+	// The fences this call accepts: FENCING for the operation at the version, which it commits,
+	// and FENCED at it, which is success. Nothing else is a fence of that version.
+	own := cur != nil && cur.operationID == op
 	switch {
-	case row.state == stateFenced && row.version == version:
-		return &multipoolerservicepb.CommitFenceResponse{State: row.proto(tg)}, nil
-	case row.state == stateFencing && row.version == version:
+	case own && cur.state == stateFenced && cur.version == version:
+		return &multipoolerservicepb.CommitFenceResponse{Fence: cur.proto()}, nil
+	case own && cur.state == stateFencing && cur.version == version:
 	default:
 		return nil, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
-			"tablegroup %q is %s at version %d, not FENCING or FENCED at the version %d to commit; read GetServingState and decide",
-			tg, row.state, row.version, version)
+			"scope %q is %s for operation %s, not FENCING or FENCED for the operation at the version %d to commit; read GetRoutingState and decide",
+			tg, describeFence(cur), op, version)
 	}
 
 	results, err := c.fanOut(ctx, db, tg, func(ctx context.Context, p poolerRef) *multipoolerservicepb.MemberFenceResult {
-		return c.askOne(ctx, p, db, tg, version)
+		return c.askOne(ctx, p, db, op, tg, version)
 	})
 	if err != nil {
 		return nil, err
 	}
-	resp := &multipoolerservicepb.CommitFenceResponse{State: row.proto(tg), Members: results}
+	resp := &multipoolerservicepb.CommitFenceResponse{Fence: cur.proto(), Members: results}
 	if notOK := notCompleted(results, multipoolerservicepb.MemberFenceResult_STATUS_CLEAN); len(notOK) > 0 {
 		// Another commit of this same fence may have completed it while the members were asked:
-		// a member that already sees FENCED refuses the refresh of this one. If the row says
-		// FENCED at the version, the fence is done, which is what this call was after.
-		if current, rerr := c.store.GetRow(ctx, db, tg); rerr == nil && current != nil && current.state == stateFenced && current.version == version {
-			resp.State = current.proto(tg)
-			return resp, nil
+		// a member that already sees FENCED refuses the refresh of this one. If the fence says
+		// FENCED at the version, it is done, which is what this call was after.
+		if now, rerr := c.store.Snapshot(ctx); rerr == nil {
+			if f := now.fenceOf(tg); f != nil && f.operationID == op && f.state == stateFenced && f.version == version {
+				resp.Fence = f.proto()
+				return resp, nil
+			}
 		}
 		if c.logger != nil {
-			c.logger.InfoContext(ctx, "fence not complete; the tablegroup stays FENCING", "tablegroup", tg, "version", version, "not_clean", len(notOK))
+			c.logger.InfoContext(ctx, "fence not complete; the scope stays FENCING", "tablegroup", tg, "version", version, "not_clean", len(notOK))
 		}
 		return nil, &FenceIncompleteError{
-			message: fmt.Sprintf("tablegroup %q is FENCING at version %d but %d of %d members are not clean (%s); call CommitFence again, or unfence at that version",
+			message: fmt.Sprintf("scope %q is FENCING at version %d but %d of %d members are not clean (%s); call CommitFence again, or unfence at that version",
 				tg, version, len(notOK), len(results), strings.Join(notOK, "; ")),
 			Details: resp,
 		}
 	}
 
-	// Every member is clean: the fence is complete, and only now is it FENCED. The version
-	// does not change.
+	// Every member is clean: the fence is complete, and only now is it FENCED. The version does
+	// not change.
 	if err := c.isLeader(); err != nil {
 		return nil, mterrors.Errorf(mtrpcpb.Code_ABORTED,
-			"every member is clean, but this pooler is no longer the default primary, so it cannot complete the fence (%v); the row stays FENCING at version %d: call CommitFence through the new default primary", err, version)
+			"every member is clean, but this pooler is no longer the default primary, so it cannot complete the fence (%v); the fence stays FENCING at version %d: call CommitFence through the new default primary", err, version)
 	}
-	// A false result means the row is no longer FENCING at this version. Another commit may
+	// A false result means the fence is no longer FENCING at this version. Another commit may
 	// have completed this very fence first, which is success; the read below tells.
-	if _, err := c.store.CompareAndSet(ctx, db, tg, stateFencing, version, stateFenced, version); err != nil {
-		return nil, mterrors.Wrap(err, "persist the completed fence; outcome uncertain, re-read with GetServingState")
+	if _, err := c.store.WriteFence(ctx, fenceWrite{tablegroup: tg, operationID: op, prev: cur, state: stateFenced, version: version}); err != nil {
+		return nil, mterrors.Wrap(err, "persist the completed fence; outcome uncertain, re-read with GetRoutingState")
 	}
-	// The row is read again before success is reported: success needs FENCED at the version
-	// the members closed for, whoever wrote it.
-	current, err := c.store.GetRow(ctx, db, tg)
+	// The fence is read again before success is reported: success needs FENCED at the version the
+	// members closed for, whoever wrote it.
+	after, err := c.store.Snapshot(ctx)
 	if err != nil {
-		return nil, mterrors.Wrap(err, "read back the fence; outcome uncertain, re-read with GetServingState")
+		return nil, mterrors.Wrap(err, "read back the fence; outcome uncertain, re-read with GetRoutingState")
 	}
-	if current == nil || current.state != stateFenced || current.version != version {
+	current := after.fenceOf(tg)
+	if current == nil || current.operationID != op || current.state != stateFenced || current.version != version {
 		return nil, mterrors.Errorf(mtrpcpb.Code_ABORTED,
-			"tablegroup %q is not FENCED at version %d; the serving state changed during the commit; re-read with GetServingState", tg, version)
+			"scope %q is not FENCED at version %d for operation %s; the state changed during the commit; re-read with GetRoutingState", tg, version, op)
 	}
-	resp.State = current.proto(tg)
+	resp.Fence = current.proto()
 	return resp, nil
 }
 
@@ -399,49 +468,57 @@ func (c *admissionCoordinator) checkDurability(ctx context.Context, db, tg strin
 	return nil
 }
 
-// UnfenceTablegroup sets the row back to UNFENCED and asks the members to reopen on a
-// best-effort basis. expected_version is the version the fence has, and the row may be
-// FENCING or FENCED. A retry is recognized by the row its own success leaves, UNFENCED at
-// the version after: it asks the members again and writes nothing.
-func (c *admissionCoordinator) UnfenceTablegroup(ctx context.Context, req *multipoolerservicepb.UnfenceTablegroupRequest) (*multipoolerservicepb.UnfenceTablegroupResponse, error) {
-	if req.GetTablegroup() == "" {
-		return nil, mterrors.New(mtrpcpb.Code_INVALID_ARGUMENT, "tablegroup is required")
+// UnfenceScope writes UNFENCED over the operation's fence of the scope, at the next version, and
+// asks the members to reopen on a best-effort basis. expected_version is the version the fence has,
+// and it may be FENCING or FENCED. A retry is recognized by the fence its own success leaves,
+// UNFENCED at the version after: it asks the members again and writes nothing. The UNFENCED fence
+// stays until CleanupOperation.
+func (c *admissionCoordinator) UnfenceScope(ctx context.Context, req *multipoolerservicepb.UnfenceScopeRequest) (*multipoolerservicepb.UnfenceScopeResponse, error) {
+	op, tg, err := requestScope(req.GetOperationId(), req.GetScope())
+	if err != nil {
+		return nil, err
 	}
 	if req.GetExpectedVersion() < 0 {
 		return nil, mterrors.New(mtrpcpb.Code_INVALID_ARGUMENT, "expected_version must not be negative")
 	}
-	db, tg, expected := req.GetDatabase(), req.GetTablegroup(), req.GetExpectedVersion()
-	row, err := c.store.GetRow(ctx, db, tg)
+	db, expected := req.GetDatabase(), req.GetExpectedVersion()
+	snap, err := c.store.Snapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if row == nil {
-		row = &servingRow{state: stateUnfenced}
+	cur := snap.fenceOf(tg)
+	if cur == nil {
+		if err := c.unknownTablegroup(ctx, tg); err != nil {
+			return nil, err
+		}
 	}
+	own := cur != nil && cur.operationID == op
+	var row fenceRow
 	switch {
-	case row.closed() && row.version == expected:
+	case own && cur.closed() && cur.version == expected:
 		if err := c.isLeader(); err != nil {
 			return nil, err
 		}
-		ok, err := c.store.CompareAndSet(ctx, db, tg, row.state, expected, stateUnfenced, expected+1)
+		ok, err := c.store.WriteFence(ctx, fenceWrite{tablegroup: tg, operationID: op, prev: cur, state: stateUnfenced, version: expected + 1})
 		if err != nil {
-			return nil, mterrors.Wrap(err, "persist the unfence; outcome uncertain, re-read with GetServingState")
+			return nil, mterrors.Wrap(err, "persist the unfence; outcome uncertain, re-read with GetRoutingState")
 		}
 		if !ok {
-			return nil, mterrors.New(mtrpcpb.Code_ABORTED, "serving state changed concurrently; re-read and retry")
+			return nil, mterrors.New(mtrpcpb.Code_ABORTED, "the fence changed concurrently; re-read and retry")
 		}
-		row.state, row.version, row.updatedAt = stateUnfenced, expected+1, time.Now()
-	case row.state == stateUnfenced && row.version == expected+1:
+		row = fenceRow{operationID: op, tablegroup: tg, state: stateUnfenced, version: expected + 1, updatedAt: time.Now()}
+	case own && cur.state == stateUnfenced && cur.version == expected+1:
 		// Already UNFENCED at the version this unfence would have produced: done. Write
 		// nothing; the members are asked again, since the reply that was lost may have
 		// been the one that told them.
+		row = *cur
 	default:
 		return nil, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
-			"tablegroup %q is %s at version %d, not FENCING or FENCED at the expected version %d, nor UNFENCED at the version after; read GetServingState and decide",
-			tg, row.state, row.version, expected)
+			"scope %q is %s for operation %s, not FENCING or FENCED for the operation at the expected version %d, nor UNFENCED at the version after; read GetRoutingState and decide",
+			tg, describeFence(cur), op, expected)
 	}
-	resp := &multipoolerservicepb.UnfenceTablegroupResponse{State: row.proto(tg)}
-	for _, p := range c.reopen(ctx, db, tg, row.version) {
+	resp := &multipoolerservicepb.UnfenceScopeResponse{Fence: row.proto()}
+	for _, p := range c.reopen(ctx, db, op, tg, row.version) {
 		resp.Unreached = append(resp.Unreached, p.id)
 	}
 	return resp, nil
@@ -450,7 +527,7 @@ func (c *admissionCoordinator) UnfenceTablegroup(ctx context.Context, req *multi
 // reopen asks every member of the tablegroup to re-read its row, which now says
 // UNFENCED at version, on a best-effort basis, and returns the members it could not
 // reach. Nothing waits for them: a pooler opens once it reads UNFENCED.
-func (c *admissionCoordinator) reopen(ctx context.Context, db, tg string, version int64) []poolerRef {
+func (c *admissionCoordinator) reopen(ctx context.Context, db, op, tg string, version int64) []poolerRef {
 	snapshot, err := c.members.Snapshot(ctx, db, tg)
 	if err != nil {
 		if c.logger != nil {
@@ -468,7 +545,7 @@ func (c *admissionCoordinator) reopen(ctx context.Context, db, tg string, versio
 			callCtx, cancel := context.WithTimeout(ctx, c.reopenCallTimeout())
 			defer cancel()
 			_, err := c.refresher.Refresh(callCtx, p, &multipoolerservicepb.RefreshAdmissionRequest{
-				Database: db, Tablegroup: tg, ExpectedState: stateUnfenced, ExpectedVersion: version,
+				Database: db, OperationId: op, Scope: &multipoolerservicepb.AdmissionScope{Tablegroup: tg}, ExpectedState: stateUnfenced, ExpectedVersion: version,
 			})
 			if err != nil {
 				if c.logger != nil {
@@ -579,11 +656,11 @@ func (c *admissionCoordinator) fanOut(ctx context.Context, db, tg string, ask fu
 // and answers with what is still running or held. The answer must be exactly the pooler we asked,
 // for exactly the fence we are running; if it is not, or the call failed, the member is
 // unreachable. A member that holds something is busy, with the details it gave.
-func (c *admissionCoordinator) askOne(ctx context.Context, p poolerRef, db, tg string, version int64) *multipoolerservicepb.MemberFenceResult {
+func (c *admissionCoordinator) askOne(ctx context.Context, p poolerRef, db, op, tg string, version int64) *multipoolerservicepb.MemberFenceResult {
 	callCtx, cancel := context.WithTimeout(ctx, c.memberCallTimeout())
 	defer cancel()
 	resp, err := c.refresher.Refresh(callCtx, p, &multipoolerservicepb.RefreshAdmissionRequest{
-		Database: db, Tablegroup: tg, ExpectedState: stateFencing, ExpectedVersion: version,
+		Database: db, OperationId: op, Scope: &multipoolerservicepb.AdmissionScope{Tablegroup: tg}, ExpectedState: stateFencing, ExpectedVersion: version,
 	})
 	switch {
 	case err != nil:
@@ -635,59 +712,4 @@ func failureOf(err error) string {
 		return st.Code().String() + ": " + st.Message()
 	}
 	return err.Error()
-}
-
-// FlipRouting atomically moves application traffic between two tablegroups whose fences
-// are complete (FENCED); FENCING does not qualify.
-// Success means the routing metadata committed; it does not unfence anything.
-func (c *admissionCoordinator) FlipRouting(ctx context.Context, req *multipoolerservicepb.FlipRoutingRequest) (*multipoolerservicepb.FlipRoutingResponse, error) {
-	from, to := req.GetFromTablegroup(), req.GetToTablegroup()
-	if from == "" || to == "" || from == to {
-		return nil, mterrors.New(mtrpcpb.Code_INVALID_ARGUMENT, "distinct from and to tablegroups are required")
-	}
-	if req.GetExpectedRoutingVersion() < 0 {
-		return nil, mterrors.New(mtrpcpb.Code_INVALID_ARGUMENT, "expected_routing_version must not be negative")
-	}
-	db := req.GetDatabase()
-	app, version, found, err := c.store.GetRouting(ctx, db)
-	if err != nil {
-		return nil, err
-	}
-	if !found {
-		return nil, mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "database has no routing pointer")
-	}
-	if app == to && version == req.GetExpectedRoutingVersion()+1 {
-		// A retry of a flip that committed: the traffic is already on to_tablegroup at the
-		// version this flip produced. Nothing to write.
-		return &multipoolerservicepb.FlipRoutingResponse{AppTablegroup: app, RoutingVersion: version}, nil
-	}
-	if app != from || version != req.GetExpectedRoutingVersion() {
-		return nil, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
-			"routing is %q at version %d, not %q at the expected version %d; read GetServingState and decide",
-			app, version, from, req.GetExpectedRoutingVersion())
-	}
-	for _, name := range []string{from, to} {
-		row, err := c.store.GetRow(ctx, db, name)
-		if err != nil {
-			return nil, err
-		}
-		switch {
-		case row == nil || row.state == stateUnfenced:
-			return nil, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION, "tablegroup %q is UNFENCED, a flip requires both tablegroups FENCED", name)
-		case row.state != stateFenced:
-			return nil, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
-				"tablegroup %q is %s at version %d: its fence is not complete, a flip requires both tablegroups FENCED; retry the fence, or unfence it", name, row.state, row.version)
-		}
-	}
-	if err := c.isLeader(); err != nil {
-		return nil, err
-	}
-	app, version, moved, err := c.store.MoveRouting(ctx, db, from, to, req.GetExpectedRoutingVersion())
-	if err != nil {
-		return nil, mterrors.Wrap(err, "commit routing; outcome uncertain, re-read with GetServingState")
-	}
-	if !moved {
-		return nil, mterrors.New(mtrpcpb.Code_ABORTED, "routing or admission state changed concurrently; re-read and retry")
-	}
-	return &multipoolerservicepb.FlipRoutingResponse{AppTablegroup: app, RoutingVersion: version}, nil
 }

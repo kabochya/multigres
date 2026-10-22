@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -39,71 +40,111 @@ import (
 // The tablegroups of these tests are "alpha" and "beta": the coordinator is generic over
 // the tablegroup it fences, and nothing in it may depend on the name "default".
 
-// memStore is an in-memory servingStore with the same conditional semantics as the SQL
-// store.
+// opA and opB are the operations of these tests.
+const (
+	opA = "0a0a0a0a-0000-4000-8000-00000000000a"
+	opB = "0b0b0b0b-0000-4000-8000-00000000000b"
+)
+
+// memStore is an in-memory routingStore with the same conditional semantics as the SQL store.
 type memStore struct {
-	mu         sync.Mutex
-	rows       map[string]*servingRow
-	app        string
-	appVersion int64
-	hasApp     bool
-	// uncertainNext makes the next CompareAndSet apply and then report an error, like a
+	mu     sync.Mutex
+	fences map[string]*fenceRow
+	nextID int64
+	// tablegroups are the tablegroups of the catalog, each with the shard "0-inf".
+	tablegroups map[string]bool
+	home        string
+	version     int64
+	rules       []ruleRow
+	// uncertainNext makes the next WriteFence apply and then report an error, like a
 	// commit whose acknowledgment was lost.
 	uncertainNext bool
-	// beforeCAS runs just before a compare-and-set, letting a test inject a concurrent
+	// beforeCAS runs just before a write of a fence, letting a test inject a concurrent
 	// writer; afterCAS runs just after one that succeeded.
 	beforeCAS func()
 	afterCAS  func()
 	writes    int
-	// readErr is returned by GetRow.
+	// readErr is returned by Snapshot.
 	readErr error
 }
 
 func newMemStore() *memStore {
-	return &memStore{rows: map[string]*servingRow{}}
+	return &memStore{fences: map[string]*fenceRow{}, tablegroups: map[string]bool{}}
 }
 
-// add sets a tablegroup's row; fenced stands for a completed fence, FENCED.
+// add sets the fence of a tablegroup, held by operation A; fenced stands for a completed fence,
+// FENCED. The tablegroup is in the catalog.
 func (s *memStore) add(tg string, fenced bool, version int64) {
 	s.addState(tg, stateOf(fenced), version)
 }
 
 func (s *memStore) addState(tg string, state multipoolerservicepb.AdmissionState, version int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.rows[tg] = &servingRow{state: state, version: version, updatedAt: time.Now()}
+	s.addHeld(opA, tg, state, version)
 }
 
-func (s *memStore) GetRow(_ context.Context, _, tg string) (*servingRow, error) {
+// addHeld sets the fence of a tablegroup, held by an operation.
+func (s *memStore) addHeld(op, tg string, state multipoolerservicepb.AdmissionState, version int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tablegroups[tg] = true
+	s.nextID++
+	s.fences[tg] = &fenceRow{id: s.nextID, operationID: op, tablegroup: tg, state: state, version: version, updatedAt: time.Now()}
+}
+
+// addTablegroup puts a tablegroup in the catalog, with no fence.
+func (s *memStore) addTablegroup(tg string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tablegroups[tg] = true
+}
+
+func (s *memStore) Snapshot(context.Context) (*routingSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.readErr != nil {
 		return nil, s.readErr
 	}
-	r, ok := s.rows[tg]
-	if !ok {
-		return nil, nil
+	snap := &routingSnapshot{routingVersion: s.version, home: s.home, rules: append([]ruleRow(nil), s.rules...)}
+	for _, f := range s.fences {
+		snap.fences = append(snap.fences, *f)
 	}
-	c := *r
-	return &c, nil
+	sort.Slice(snap.fences, func(i, j int) bool { return snap.fences[i].id < snap.fences[j].id })
+	return snap, nil
 }
 
-func (s *memStore) CompareAndSet(_ context.Context, _, tg string, prevState multipoolerservicepb.AdmissionState, prevVersion int64, nextState multipoolerservicepb.AdmissionState, nextVersion int64) (bool, error) {
+func (s *memStore) TablegroupExists(_ context.Context, tg string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tablegroups[tg], nil
+}
+
+func (s *memStore) ShardExists(_ context.Context, tg, shard string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tablegroups[tg] && shard == "0-inf", nil
+}
+
+func (s *memStore) WriteFence(_ context.Context, w fenceWrite) (bool, error) {
 	if s.beforeCAS != nil {
 		s.beforeCAS()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r := s.rows[tg]
-	if r == nil && prevState == stateUnfenced && prevVersion == 0 {
-		// A tablegroup that was never fenced has no row: the fence creates it.
-		r = &servingRow{state: stateUnfenced}
-		s.rows[tg] = r
-	}
-	if r == nil || r.state != prevState || r.version != prevVersion {
+	cur := s.fences[w.tablegroup]
+	switch {
+	case w.prev == nil:
+		// A scope that was never fenced has no fence: the write creates it, unless another operation
+		// has since.
+		if cur != nil || !s.tablegroups[w.tablegroup] {
+			return false, nil
+		}
+		s.nextID++
+		cur = &fenceRow{id: s.nextID, tablegroup: w.tablegroup}
+		s.fences[w.tablegroup] = cur
+	case cur == nil || cur.id != w.prev.id || cur.operationID != w.prev.operationID || cur.state != w.prev.state || cur.version != w.prev.version:
 		return false, nil
 	}
-	r.state, r.version, r.updatedAt = nextState, nextVersion, time.Now()
+	cur.operationID, cur.state, cur.version, cur.updatedAt = w.operationID, w.state, w.version, time.Now()
 	s.writes++
 	if s.afterCAS != nil {
 		after := s.afterCAS
@@ -116,21 +157,77 @@ func (s *memStore) CompareAndSet(_ context.Context, _, tg string, prevState mult
 	return true, nil
 }
 
-func (s *memStore) GetRouting(context.Context, string) (string, int64, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.app, s.appVersion, s.hasApp, nil
+// fencedFor reports whether the tablegroup's fence is FENCED and held by the operation.
+func (s *memStore) fencedFor(op, tg string) bool {
+	f := s.fences[tg]
+	return f != nil && f.operationID == op && f.state == stateFenced
 }
 
-func (s *memStore) MoveRouting(_ context.Context, _, from, to string, expectedVersion int64) (string, int64, bool, error) {
+func (s *memStore) ruleIndex(op string) int {
+	for i, r := range s.rules {
+		if r.operationID == op {
+			return i
+		}
+	}
+	return -1
+}
+
+func (s *memStore) SwitchRouting(_ context.Context, op string, rule ruleRow, expected int64) (int64, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	f, t := s.rows[from], s.rows[to]
-	if !s.hasApp || s.app != from || s.appVersion != expectedVersion || f == nil || t == nil || f.state != stateFenced || t.state != stateFenced {
-		return "", 0, false, nil
+	if s.version != expected || s.home != rule.from || rule.from == "default" || len(s.rules) > 0 ||
+		!s.fencedFor(op, rule.from) || !s.fencedFor(op, rule.to) {
+		return 0, false, nil
 	}
-	s.app, s.appVersion = to, s.appVersion+1
-	return s.app, s.appVersion, true, nil
+	s.version++
+	rule.operationID, rule.createdVersion = op, s.version
+	s.rules = append(s.rules, rule)
+	return s.version, true, nil
+}
+
+func (s *memStore) RevertRouting(_ context.Context, op string, expected int64) (int64, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.ruleIndex(op)
+	if i < 0 || s.version != expected || !s.fencedFor(op, s.rules[i].from) || !s.fencedFor(op, s.rules[i].to) {
+		return 0, false, nil
+	}
+	s.version++
+	s.rules = append(s.rules[:i], s.rules[i+1:]...)
+	return s.version, true, nil
+}
+
+func (s *memStore) FoldRouting(_ context.Context, op string, expected int64) (int64, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := s.ruleIndex(op)
+	if i < 0 || s.version != expected || s.home != s.rules[i].from {
+		return 0, false, nil
+	}
+	s.version++
+	s.home = s.rules[i].to
+	s.rules = append(s.rules[:i], s.rules[i+1:]...)
+	return s.version, true, nil
+}
+
+func (s *memStore) CleanupOperation(_ context.Context, op string) (int64, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	blocked := s.ruleIndex(op) >= 0
+	for _, f := range s.fences {
+		blocked = blocked || (f.operationID == op && f.state == stateFencing)
+	}
+	if blocked {
+		return 0, true, nil
+	}
+	var deleted int64
+	for tg, f := range s.fences {
+		if f.operationID == op {
+			delete(s.fences, tg)
+			deleted++
+		}
+	}
+	return deleted, false, nil
 }
 
 // fakeMembers returns a mutable snapshot.
@@ -256,9 +353,9 @@ func (h *coordHarness) leaderCheck() error {
 func newCoordHarness(t *testing.T) *coordHarness {
 	t.Helper()
 	h := &coordHarness{store: newMemStore(), members: &fakeMembers{}, refresh: &fakeRefresher{}}
-	h.store.add("alpha", false, 0)
-	h.store.add("beta", false, 0)
-	h.store.app, h.store.hasApp = "alpha", true
+	h.store.addTablegroup("alpha")
+	h.store.addTablegroup("beta")
+	h.store.home = "alpha"
 	// A tablegroup of a writable member and a replica.
 	h.members.set(ref("w"), ref("r"))
 	h.c = &admissionCoordinator{
@@ -271,22 +368,34 @@ func newCoordHarness(t *testing.T) *coordHarness {
 	return h
 }
 
-func (h *coordHarness) startTG(tg string, version int64) (*multipoolerservicepb.StartFenceResponse, error) {
+func scopeOf(tg string) *multipoolerservicepb.AdmissionScope {
+	return &multipoolerservicepb.AdmissionScope{Tablegroup: tg}
+}
+
+func (h *coordHarness) startAs(op, tg string, version int64) (*multipoolerservicepb.StartFenceResponse, error) {
 	h.refresh.stage.Store("start")
 	return h.c.StartFence(context.Background(), &multipoolerservicepb.StartFenceRequest{
-		Database: "db", Tablegroup: tg, ExpectedVersion: version,
+		Database: "db", OperationId: op, Scope: scopeOf(tg), ExpectedVersion: version,
 	})
+}
+
+func (h *coordHarness) startTG(tg string, version int64) (*multipoolerservicepb.StartFenceResponse, error) {
+	return h.startAs(opA, tg, version)
 }
 
 func (h *coordHarness) start(version int64) (*multipoolerservicepb.StartFenceResponse, error) {
 	return h.startTG("alpha", version)
 }
 
-func (h *coordHarness) commitTG(tg string, version int64) (*multipoolerservicepb.CommitFenceResponse, error) {
+func (h *coordHarness) commitAs(op, tg string, version int64) (*multipoolerservicepb.CommitFenceResponse, error) {
 	h.refresh.stage.Store("commit")
 	return h.c.CommitFence(context.Background(), &multipoolerservicepb.CommitFenceRequest{
-		Database: "db", Tablegroup: tg, Version: version,
+		Database: "db", OperationId: op, Scope: scopeOf(tg), Version: version,
 	})
+}
+
+func (h *coordHarness) commitTG(tg string, version int64) (*multipoolerservicepb.CommitFenceResponse, error) {
+	return h.commitAs(opA, tg, version)
 }
 
 func (h *coordHarness) commit(version int64) (*multipoolerservicepb.CommitFenceResponse, error) {
@@ -300,34 +409,60 @@ func (h *coordHarness) fenceTG(tg string, version int64) (*multipoolerservicepb.
 	if err != nil {
 		return nil, err
 	}
-	return h.commitTG(tg, started.GetState().GetVersion())
+	return h.commitTG(tg, started.GetFence().GetVersion())
 }
 
 func (h *coordHarness) fence(version int64) (*multipoolerservicepb.CommitFenceResponse, error) {
 	return h.fenceTG("alpha", version)
 }
 
-func (h *coordHarness) unfenceTG(tg string, version int64) (*multipoolerservicepb.UnfenceTablegroupResponse, error) {
-	return h.c.UnfenceTablegroup(context.Background(), &multipoolerservicepb.UnfenceTablegroupRequest{
-		Database: "db", Tablegroup: tg, ExpectedVersion: version,
+func (h *coordHarness) unfenceAs(op, tg string, version int64) (*multipoolerservicepb.UnfenceScopeResponse, error) {
+	return h.c.UnfenceScope(context.Background(), &multipoolerservicepb.UnfenceScopeRequest{
+		Database: "db", OperationId: op, Scope: scopeOf(tg), ExpectedVersion: version,
 	})
 }
 
-func (h *coordHarness) unfence(version int64) (*multipoolerservicepb.UnfenceTablegroupResponse, error) {
+func (h *coordHarness) unfenceTG(tg string, version int64) (*multipoolerservicepb.UnfenceScopeResponse, error) {
+	return h.unfenceAs(opA, tg, version)
+}
+
+func (h *coordHarness) unfence(version int64) (*multipoolerservicepb.UnfenceScopeResponse, error) {
 	return h.unfenceTG("alpha", version)
 }
 
-func (h *coordHarness) flip(from, to string, version int64) (*multipoolerservicepb.FlipRoutingResponse, error) {
-	return h.c.FlipRouting(context.Background(), &multipoolerservicepb.FlipRoutingRequest{
-		Database: "db", FromTablegroup: from, ToTablegroup: to, ExpectedRoutingVersion: version,
+// switchRouting moves the traffic of from to to, for operation A.
+func (h *coordHarness) switchRouting(from, to string, version int64) (*multipoolerservicepb.SwitchRoutingResponse, error) {
+	return h.c.SwitchRouting(context.Background(), &multipoolerservicepb.SwitchRoutingRequest{
+		Database: "db", OperationId: opA, ExpectedRoutingVersion: version,
+		Rule: &multipoolerservicepb.RoutingRule{FromTablegroup: from, ToTablegroup: to, ToShard: "0-inf"},
 	})
 }
 
-func (h *coordHarness) row(t *testing.T, tg string) *servingRow {
+func (h *coordHarness) revertRouting(version int64) (*multipoolerservicepb.RevertRoutingResponse, error) {
+	return h.c.RevertRouting(context.Background(), &multipoolerservicepb.RevertRoutingRequest{
+		Database: "db", OperationId: opA, ExpectedRoutingVersion: version,
+	})
+}
+
+func (h *coordHarness) foldRouting(version int64) (*multipoolerservicepb.FoldRoutingResponse, error) {
+	return h.c.FoldRouting(context.Background(), &multipoolerservicepb.FoldRoutingRequest{
+		Database: "db", OperationId: opA, ExpectedRoutingVersion: version,
+	})
+}
+
+func (h *coordHarness) cleanup(op string) (*multipoolerservicepb.CleanupOperationResponse, error) {
+	return h.c.CleanupOperation(context.Background(), &multipoolerservicepb.CleanupOperationRequest{Database: "db", OperationId: op})
+}
+
+// row returns the fence of a tablegroup; a tablegroup with no fence is unfenced at version zero.
+func (h *coordHarness) row(t *testing.T, tg string) *fenceRow {
 	t.Helper()
-	r, err := h.store.GetRow(context.Background(), "db", tg)
+	snap, err := h.store.Snapshot(context.Background())
 	require.NoError(t, err)
-	return r
+	if f := snap.fenceOf(tg); f != nil {
+		return f
+	}
+	return &fenceRow{tablegroup: tg, state: stateUnfenced}
 }
 
 // notClean requires that a start or a commit did not complete, and returns the per-member
@@ -368,8 +503,8 @@ func TestCoordinatorFenceCompletesWhenEveryMemberIsClean(t *testing.T) {
 	h := newCoordHarness(t)
 	resp, err := h.fence(0)
 	require.NoError(t, err)
-	require.Equal(t, stateFenced, resp.State.State)
-	require.EqualValues(t, 1, resp.State.Version, "the fence moved the version")
+	require.Equal(t, stateFenced, resp.Fence.State)
+	require.EqualValues(t, 1, resp.Fence.Version, "the fence moved the version")
 	require.Len(t, resp.Members, 2, "every member answered, the replica as well as the writable one")
 	for _, m := range resp.Members {
 		require.Equal(t, multipoolerservicepb.MemberFenceResult_STATUS_CLEAN, m.Status)
@@ -390,20 +525,21 @@ func TestCoordinatorIsGenericOverTheTablegroup(t *testing.T) {
 	require.NoError(t, err)
 	dst, err := h.fenceTG("beta", 0)
 	require.NoError(t, err)
-	moved, err := h.flip("alpha", "beta", 0)
+	moved, err := h.switchRouting("alpha", "beta", 0)
 	require.NoError(t, err)
-	require.Equal(t, "beta", moved.AppTablegroup)
-	_, err = h.unfenceTG("beta", dst.State.Version)
+	require.Equal(t, "beta", moved.EffectiveTablegroup)
+	unfenced, err := h.unfenceTG("beta", dst.Fence.Version)
 	require.NoError(t, err)
 	require.Equal(t, stateFenced, h.row(t, "alpha").state, "the source stays fenced")
 
-	_, err = h.fenceTG("beta", h.row(t, "beta").version)
+	// The rollback: fence the destination again, put the traffic back, unfence the source.
+	_, err = h.fenceTG("beta", unfenced.Fence.Version)
 	require.NoError(t, err)
-	moved, err = h.flip("beta", "alpha", 1)
+	reverted, err := h.revertRouting(1)
 	require.NoError(t, err)
-	require.Equal(t, "alpha", moved.AppTablegroup)
-	require.EqualValues(t, 2, moved.RoutingVersion)
-	_, err = h.unfenceTG("alpha", src.State.Version)
+	require.Equal(t, "alpha", reverted.EffectiveTablegroup)
+	require.EqualValues(t, 2, reverted.RoutingVersion)
+	_, err = h.unfenceTG("alpha", src.Fence.Version)
 	require.NoError(t, err)
 	require.Equal(t, stateUnfenced, h.row(t, "alpha").state)
 }
@@ -421,8 +557,8 @@ func TestCoordinatorStartAsksEveryMemberAndSucceedsWhateverTheyHold(t *testing.T
 	}
 	resp, err := h.start(0)
 	require.NoError(t, err)
-	require.Equal(t, stateFencing, resp.State.State, "a start does not complete the fence")
-	require.EqualValues(t, 1, resp.State.Version)
+	require.Equal(t, stateFencing, resp.Fence.State, "a start does not complete the fence")
+	require.EqualValues(t, 1, resp.Fence.Version)
 	require.Len(t, resp.Members, 2)
 	got := map[string]multipoolerservicepb.MemberFenceResult_Status{}
 	for _, m := range resp.Members {
@@ -462,12 +598,12 @@ func TestCoordinatorStartIsIdempotent(t *testing.T) {
 	h.refresh.behave = nil
 	resp, err := h.start(0)
 	require.NoError(t, err, "the same start, repeated, reaches the member that missed it")
-	require.EqualValues(t, 1, resp.State.Version)
+	require.EqualValues(t, 1, resp.Fence.Version)
 	require.Equal(t, 2, h.refresh.fencesTo("w"), "the repeat asks every member again")
 	require.EqualValues(t, 1, h.store.writes, "and writes nothing")
 	again, err := h.start(1)
 	require.NoError(t, err, "so is a start that names the version of the row it read, which is FENCING")
-	require.EqualValues(t, 1, again.State.Version)
+	require.EqualValues(t, 1, again.Fence.Version)
 	require.EqualValues(t, 1, h.store.writes)
 
 	_, err = h.commit(1)
@@ -475,7 +611,7 @@ func TestCoordinatorStartIsIdempotent(t *testing.T) {
 	asked := h.refresh.fencesTo("w")
 	done, err := h.start(0)
 	require.NoError(t, err, "a start of a fence that is complete succeeds")
-	require.Equal(t, stateFenced, done.State.State)
+	require.Equal(t, stateFenced, done.Fence.State)
 	require.Empty(t, done.Members, "and asks nobody")
 	done, err = h.start(1)
 	require.NoError(t, err, "whichever of the two versions it names")
@@ -528,8 +664,8 @@ func TestCoordinatorCommitNeverUndoesTheFenceAndSaysWhatEachMemberAnswered(t *te
 			h.refresh.behave = nil
 			resp, err := h.commit(1)
 			require.NoError(t, err)
-			require.Equal(t, stateFenced, resp.State.State)
-			require.EqualValues(t, 1, resp.State.Version, "the version does not change")
+			require.Equal(t, stateFenced, resp.Fence.State)
+			require.EqualValues(t, 1, resp.Fence.Version, "the version does not change")
 			require.Equal(t, 2, h.refresh.reportsTo("w"), "the second commit asks every member again")
 			require.Equal(t, writes+1, h.store.writes, "and writes only the completion")
 		})
@@ -626,8 +762,8 @@ func TestCoordinatorUnfenceNeedsNoAcknowledgement(t *testing.T) {
 	}
 	resp, err := h.unfence(1)
 	require.NoError(t, err, "an unfence has no acknowledgement barrier")
-	require.Equal(t, stateUnfenced, resp.State.State)
-	require.EqualValues(t, 2, resp.State.Version)
+	require.Equal(t, stateUnfenced, resp.Fence.State)
+	require.EqualValues(t, 2, resp.Fence.Version)
 	require.Len(t, resp.Unreached, 1)
 	require.Equal(t, "r", resp.Unreached[0].GetName(), "the member it could not ask is reported")
 	require.Equal(t, stateUnfenced, h.row(t, "alpha").state)
@@ -647,16 +783,16 @@ func TestCoordinatorUnfenceNeedsTheVersionOfTheFence(t *testing.T) {
 
 	first, err := h.fence(0)
 	require.NoError(t, err)
-	_, err = h.unfence(first.State.Version)
+	_, err = h.unfence(first.Fence.Version)
 	require.NoError(t, err)
 	second, err := h.fence(2)
 	require.NoError(t, err)
 
 	// The delayed unfence of the first fence cannot open the second.
-	_, err = h.unfence(first.State.Version)
+	_, err = h.unfence(first.Fence.Version)
 	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
 	require.Equal(t, stateFenced, h.row(t, "alpha").state)
-	_, err = h.unfence(second.State.Version)
+	_, err = h.unfence(second.Fence.Version)
 	require.NoError(t, err)
 }
 
@@ -666,7 +802,7 @@ func TestCoordinatorAFenceLeftByADeadCoordinatorIsResumedOrUnfenced(t *testing.T
 
 	resp, err := h.commit(7)
 	require.NoError(t, err, "a started fence is committed at the version it has")
-	require.EqualValues(t, 7, resp.State.Version, "and the version is not written again")
+	require.EqualValues(t, 7, resp.Fence.Version, "and the version is not written again")
 	require.Equal(t, 1, h.refresh.reportsTo("w"))
 
 	h.store.addState("alpha", stateFencing, 9)
@@ -895,8 +1031,8 @@ func TestCoordinatorUncertainCommitThenReread(t *testing.T) {
 	require.NoError(t, err)
 	resp, err := h.commit(1)
 	require.NoError(t, err)
-	require.Equal(t, stateFenced, resp.State.State)
-	require.EqualValues(t, 1, resp.State.Version)
+	require.Equal(t, stateFenced, resp.Fence.State)
+	require.EqualValues(t, 1, resp.Fence.Version)
 }
 
 // TestCoordinatorUncertainCompletionIsResumed: the write that completes the fence is the one
@@ -915,7 +1051,7 @@ func TestCoordinatorUncertainCompletionIsResumed(t *testing.T) {
 	require.Equal(t, stateFenced, h.row(t, "alpha").state)
 	resp, err := h.commit(1)
 	require.NoError(t, err)
-	require.Equal(t, stateFenced, resp.State.State)
+	require.Equal(t, stateFenced, resp.Fence.State)
 	require.Equal(t, 1, h.refresh.reportsTo("w"), "a commit of a complete fence asks nobody")
 }
 
@@ -935,10 +1071,7 @@ func TestCoordinatorConcurrentWriterLosesTheCompareAndSet(t *testing.T) {
 	h := newCoordHarness(t)
 	h.store.beforeCAS = func() {
 		// Someone else fences first.
-		h.store.mu.Lock()
-		h.store.rows["alpha"].state = stateFencing
-		h.store.rows["alpha"].version = 1
-		h.store.mu.Unlock()
+		h.store.addHeld(opB, "alpha", stateFencing, 1)
 		h.store.beforeCAS = nil
 	}
 	_, err := h.start(0)
@@ -950,17 +1083,17 @@ func TestCoordinatorConcurrentWriterLosesTheCompareAndSet(t *testing.T) {
 // commit whose row changed meanwhile do not complete it: the completion is a compare-and-set
 // on the state and the version, and it fails.
 func TestCoordinatorFenceIsNotCompletedOverAChangedRow(t *testing.T) {
-	for name, move := range map[string]func(r *servingRow){
-		"unfenced meanwhile":   func(r *servingRow) { r.state, r.version = stateUnfenced, 2 },
-		"another fence":        func(r *servingRow) { r.state, r.version = stateFencing, 3 },
-		"another version only": func(r *servingRow) { r.version = 5 },
+	for name, move := range map[string]func(r *fenceRow){
+		"unfenced meanwhile":   func(r *fenceRow) { r.state, r.version = stateUnfenced, 2 },
+		"another fence":        func(r *fenceRow) { r.state, r.version = stateFencing, 3 },
+		"another version only": func(r *fenceRow) { r.version = 5 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newCoordHarness(t)
 			h.refresh.behave = func(ctx context.Context, p poolerRef, req *multipoolerservicepb.RefreshAdmissionRequest) (*multipoolerservicepb.RefreshAdmissionResponse, error) {
 				if h.refresh.committing() && p.name() == "r" {
 					h.store.mu.Lock()
-					move(h.store.rows["alpha"])
+					move(h.store.fences["alpha"])
 					h.store.mu.Unlock()
 				}
 				return honestAck(p, req), nil
@@ -985,7 +1118,7 @@ func TestCoordinatorACommitThatLosesToAnotherCommitSucceeds(t *testing.T) {
 		if p.name() == "r" {
 			// The other commit completes the fence; this member now reads FENCED.
 			h.store.mu.Lock()
-			h.store.rows["alpha"].state = stateFenced
+			h.store.fences["alpha"].state = stateFenced
 			h.store.mu.Unlock()
 			return nil, mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "persisted admission is FENCED, not the expected FENCING")
 		}
@@ -993,8 +1126,8 @@ func TestCoordinatorACommitThatLosesToAnotherCommitSucceeds(t *testing.T) {
 	}
 	resp, err := h.commit(1)
 	require.NoError(t, err, "the fence is complete at the version")
-	require.Equal(t, stateFenced, resp.State.State)
-	require.EqualValues(t, 1, resp.State.Version)
+	require.Equal(t, stateFenced, resp.Fence.State)
+	require.EqualValues(t, 1, resp.Fence.Version)
 }
 
 // TestCoordinatorTwoCommitsOfTheSameFenceBothSucceed: the loser of the compare-and-set that
@@ -1006,14 +1139,14 @@ func TestCoordinatorTwoCommitsOfTheSameFenceBothSucceed(t *testing.T) {
 	h.store.beforeCAS = func() {
 		// The other resume completes the fence first.
 		h.store.mu.Lock()
-		h.store.rows["alpha"].state = stateFenced
+		h.store.fences["alpha"].state = stateFenced
 		h.store.mu.Unlock()
 		h.store.beforeCAS = nil
 	}
 	resp, err := h.commit(1)
 	require.NoError(t, err, "the fence is complete at the version this call committed")
-	require.Equal(t, stateFenced, resp.State.State)
-	require.EqualValues(t, 1, resp.State.Version)
+	require.Equal(t, stateFenced, resp.Fence.State)
+	require.EqualValues(t, 1, resp.Fence.Version)
 	require.Zero(t, h.store.writes, "the loser wrote nothing")
 }
 
@@ -1026,13 +1159,13 @@ func TestCoordinatorACompleteFenceIsSuccessAndAsksNobody(t *testing.T) {
 
 	started, err := h.start(4)
 	require.NoError(t, err)
-	require.Equal(t, stateFenced, started.State.State)
-	require.EqualValues(t, 5, started.State.Version)
+	require.Equal(t, stateFenced, started.Fence.State)
+	require.EqualValues(t, 5, started.Fence.Version)
 	require.Empty(t, started.Members)
 
 	committed, err := h.commit(5)
 	require.NoError(t, err)
-	require.Equal(t, stateFenced, committed.State.State)
+	require.Equal(t, stateFenced, committed.Fence.State)
 	require.Empty(t, committed.Members)
 
 	_, err = h.start(6)
@@ -1051,7 +1184,7 @@ func TestCoordinatorFenceIsReadBackBeforeItSucceeds(t *testing.T) {
 		// Right after the completion, someone unfences.
 		h.store.mu.Lock()
 		defer h.store.mu.Unlock()
-		if r := h.store.rows["alpha"]; r.state == stateFenced {
+		if r := h.store.fences["alpha"]; r.state == stateFenced {
 			r.state, r.version = stateUnfenced, 2
 		}
 	}
@@ -1063,7 +1196,7 @@ func TestCoordinatorFenceIsReadBackBeforeItSucceeds(t *testing.T) {
 	h.store.afterCAS = func() {
 		h.store.mu.Lock()
 		defer h.store.mu.Unlock()
-		if h.store.rows["alpha"].state == stateFenced {
+		if h.store.fences["alpha"].state == stateFenced {
 			h.store.readErr = errors.New("connection lost")
 		}
 	}
@@ -1071,67 +1204,138 @@ func TestCoordinatorFenceIsReadBackBeforeItSucceeds(t *testing.T) {
 	require.ErrorContains(t, err, "read back the fence")
 }
 
-func TestCoordinatorFlipNeedsBothSidesFencedAndTheRoutingVersion(t *testing.T) {
+func TestCoordinatorSwitchNeedsBothSidesFencedAndTheRoutingVersion(t *testing.T) {
 	h := newCoordHarness(t)
-	_, err := h.flip("alpha", "beta", 0)
+	_, err := h.switchRouting("alpha", "beta", 0)
 	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
 	require.ErrorContains(t, err, "requires both tablegroups FENCED")
 
 	_, err = h.fenceTG("alpha", 0)
 	require.NoError(t, err)
-	_, err = h.flip("alpha", "beta", 0)
+	_, err = h.switchRouting("alpha", "beta", 0)
 	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
 	_, err = h.fenceTG("beta", 0)
 	require.NoError(t, err)
 
-	_, err = h.flip("beta", "alpha", 0)
+	_, err = h.switchRouting("beta", "alpha", 0)
 	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
-	require.ErrorContains(t, err, "not \"beta\"", "from must be where the pointer is")
-	_, err = h.flip("alpha", "beta", 4)
+	require.ErrorContains(t, err, "the home tablegroup is \"alpha\"", "from must be where the traffic is")
+	_, err = h.switchRouting("alpha", "beta", 4)
 	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
 	require.ErrorContains(t, err, "expected version 4", "and the routing version must be the one the caller read")
 
-	moved, err := h.flip("alpha", "beta", 0)
+	moved, err := h.switchRouting("alpha", "beta", 0)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, moved.RoutingVersion)
+	require.Equal(t, "beta", moved.EffectiveTablegroup)
+	require.Equal(t, "alpha", h.store.home, "the home is untouched until the fold")
+	require.Len(t, h.store.rules, 1)
+	require.EqualValues(t, 1, h.store.rules[0].createdVersion)
 }
 
-// TestCoordinatorFlipRetryAfterTheMoveSucceeds: a flip whose reply was lost is repeated, and
-// finds the traffic already on the destination at the version after the one it expected; that
-// is its own success, and nothing is written. A flip the other way, or a stale one, is not.
-func TestCoordinatorFlipRetryAfterTheMoveSucceeds(t *testing.T) {
+// TestCoordinatorSwitchPreconditions: the rule's source is the home tablegroup and not the default
+// one, no other rule exists, a tablegroup or a shard that is not in the catalog is NOT_FOUND, and
+// a fence of another operation is not this operation's.
+func TestCoordinatorSwitchPreconditions(t *testing.T) {
+	t.Run("not the home", func(t *testing.T) {
+		h := newCoordHarness(t)
+		h.store.addTablegroup("gamma")
+		h.store.home = "gamma"
+		for _, tg := range []string{"alpha", "beta"} {
+			_, err := h.fenceTG(tg, 0)
+			require.NoError(t, err)
+		}
+		_, err := h.switchRouting("alpha", "beta", 0)
+		requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	})
+	t.Run("the default tablegroup cannot be routed away", func(t *testing.T) {
+		h := newCoordHarness(t)
+		h.store.addTablegroup("default")
+		h.store.home = "default"
+		for _, tg := range []string{"default", "beta"} {
+			_, err := h.fenceTG(tg, 0)
+			require.NoError(t, err)
+		}
+		_, err := h.switchRouting("default", "beta", 0)
+		requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+		require.ErrorContains(t, err, "default tablegroup")
+	})
+	t.Run("at most one rule", func(t *testing.T) {
+		h := newCoordHarness(t)
+		h.store.addTablegroup("gamma")
+		for _, tg := range []string{"alpha", "beta"} {
+			_, err := h.fenceTG(tg, 0)
+			require.NoError(t, err)
+		}
+		_, err := h.switchRouting("alpha", "beta", 0)
+		require.NoError(t, err)
+		// Another operation, from the same home, cannot add a second rule.
+		h.store.addHeld(opB, "alpha", stateFenced, 1)
+		h.store.addHeld(opB, "gamma", stateFenced, 1)
+		_, err = h.c.SwitchRouting(context.Background(), &multipoolerservicepb.SwitchRoutingRequest{
+			Database: "db", OperationId: opB, ExpectedRoutingVersion: 1,
+			Rule: &multipoolerservicepb.RoutingRule{FromTablegroup: "alpha", ToTablegroup: "gamma", ToShard: "0-inf"},
+		})
+		requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	})
+	t.Run("unknown tablegroup and shard", func(t *testing.T) {
+		h := newCoordHarness(t)
+		for _, tg := range []string{"alpha", "beta"} {
+			_, err := h.fenceTG(tg, 0)
+			require.NoError(t, err)
+		}
+		_, err := h.switchRouting("alpha", "zeta", 0)
+		requireCode(t, mtrpcpb.Code_NOT_FOUND, err)
+		_, err = h.c.SwitchRouting(context.Background(), &multipoolerservicepb.SwitchRoutingRequest{
+			Database: "db", OperationId: opA,
+			Rule: &multipoolerservicepb.RoutingRule{FromTablegroup: "alpha", ToTablegroup: "beta", ToShard: "9-9"},
+		})
+		requireCode(t, mtrpcpb.Code_NOT_FOUND, err)
+	})
+	t.Run("a fence of another operation", func(t *testing.T) {
+		h := newCoordHarness(t)
+		_, err := h.fenceTG("alpha", 0)
+		require.NoError(t, err)
+		h.store.addHeld(opB, "beta", stateFenced, 1)
+		_, err = h.switchRouting("alpha", "beta", 0)
+		requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+		require.ErrorContains(t, err, opB)
+	})
+}
+
+// TestCoordinatorSwitchRetryAfterTheMoveSucceeds: a switch whose reply was lost is repeated, and
+// finds the rule of its operation at the version after the one it expected; that is its own
+// success, and nothing is written. A stale one, or another rule, is not.
+func TestCoordinatorSwitchRetryAfterTheMoveSucceeds(t *testing.T) {
 	h := newCoordHarness(t)
 	_, err := h.fenceTG("alpha", 0)
 	require.NoError(t, err)
 	_, err = h.fenceTG("beta", 0)
 	require.NoError(t, err)
-	first, err := h.flip("alpha", "beta", 0)
+	first, err := h.switchRouting("alpha", "beta", 0)
 	require.NoError(t, err)
 
 	// The destination may already have been unfenced by then.
 	_, err = h.unfenceTG("beta", 1)
 	require.NoError(t, err)
 
-	again, err := h.flip("alpha", "beta", 0)
-	require.NoError(t, err, "a retry of the flip that committed")
-	require.Equal(t, first.AppTablegroup, again.AppTablegroup)
+	again, err := h.switchRouting("alpha", "beta", 0)
+	require.NoError(t, err, "a retry of the switch that committed")
+	require.Equal(t, first.EffectiveTablegroup, again.EffectiveTablegroup)
 	require.Equal(t, first.RoutingVersion, again.RoutingVersion)
-	require.Equal(t, "beta", h.store.app)
-	require.EqualValues(t, 1, h.store.appVersion, "and nothing was written")
+	require.EqualValues(t, 1, h.store.version, "and nothing was written")
 
-	_, err = h.flip("alpha", "beta", 1)
+	_, err = h.switchRouting("alpha", "beta", 1)
 	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
-	_, err = h.flip("beta", "alpha", 1)
-	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err) // moving it back needs both sides fenced again
-	_, err = h.flip("alpha", "beta", 5)
+	_, err = h.switchRouting("alpha", "beta", 5)
 	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
 }
 
-// TestCoordinatorFlipRefusesAnIncompleteFence: a tablegroup that is FENCING, however it got
-// there (a member was busy, the coordinator was lost), is not a completed fence and the flip
+// TestCoordinatorSwitchRefusesAnIncompleteFence: a tablegroup that is FENCING, however it got
+// there (a member was busy, the coordinator was lost), is not a completed fence and the switch
 // refuses it, so a migrator that takes it for one cannot move the traffic. A fence that is
-// started again and committed completes, and then the flip is accepted.
-func TestCoordinatorFlipRefusesAnIncompleteFence(t *testing.T) {
+// started again and committed completes, and then the switch is accepted.
+func TestCoordinatorSwitchRefusesAnIncompleteFence(t *testing.T) {
 	h := newCoordHarness(t)
 	_, err := h.fenceTG("alpha", 0)
 	require.NoError(t, err)
@@ -1145,13 +1349,13 @@ func TestCoordinatorFlipRefusesAnIncompleteFence(t *testing.T) {
 	notClean(t, err)
 	require.Equal(t, stateFencing, h.row(t, "beta").state)
 
-	_, err = h.flip("alpha", "beta", 0)
+	_, err = h.switchRouting("alpha", "beta", 0)
 	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
 	require.ErrorContains(t, err, "its fence is not complete")
-	require.Equal(t, "alpha", h.store.app, "the traffic did not move")
+	require.Empty(t, h.store.rules, "the traffic did not move")
 
 	// The store, asked directly for the same move, refuses it too.
-	_, _, moved, err := h.store.MoveRouting(context.Background(), "db", "alpha", "beta", 0)
+	_, moved, err := h.store.SwitchRouting(context.Background(), opA, ruleRow{from: "alpha", to: "beta", toShard: "0-inf"}, 0)
 	require.NoError(t, err)
 	require.False(t, moved, "the store refuses it as well")
 
@@ -1159,8 +1363,151 @@ func TestCoordinatorFlipRefusesAnIncompleteFence(t *testing.T) {
 	_, err = h.fenceTG("beta", 0)
 	require.NoError(t, err, "the same fence, started again and committed, completes")
 	require.Equal(t, stateFenced, h.row(t, "beta").state)
-	_, err = h.flip("alpha", "beta", 0)
+	_, err = h.switchRouting("alpha", "beta", 0)
 	require.NoError(t, err)
+}
+
+// TestCoordinatorRevertDeletesTheRuleUnderTheSameFenceChecks: a revert needs the routing version
+// and both fences FENCED for the operation, puts the traffic back on the home, and a retry of one
+// that committed succeeds.
+func TestCoordinatorRevertDeletesTheRuleUnderTheSameFenceChecks(t *testing.T) {
+	h := newCoordHarness(t)
+	_, err := h.revertRouting(0)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err) // no rule
+
+	src, err := h.fenceTG("alpha", 0)
+	require.NoError(t, err)
+	dst, err := h.fenceTG("beta", 0)
+	require.NoError(t, err)
+	_, err = h.switchRouting("alpha", "beta", 0)
+	require.NoError(t, err)
+	_, err = h.unfenceTG("beta", dst.Fence.Version)
+	require.NoError(t, err)
+
+	_, err = h.revertRouting(1)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	require.ErrorContains(t, err, "is unfenced", "the destination has to be fenced again")
+
+	_, err = h.fenceTG("beta", h.row(t, "beta").version)
+	require.NoError(t, err)
+	_, err = h.revertRouting(0)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	require.ErrorContains(t, err, "expected version 0")
+
+	reverted, err := h.revertRouting(1)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, reverted.RoutingVersion)
+	require.Equal(t, "alpha", reverted.EffectiveTablegroup)
+	require.Empty(t, h.store.rules)
+
+	again, err := h.revertRouting(1)
+	require.NoError(t, err, "a retry of the revert that committed")
+	require.EqualValues(t, 2, again.RoutingVersion)
+	_, err = h.revertRouting(5)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	require.EqualValues(t, 2, h.store.version, "and nothing was written")
+
+	// The source is fenced still, at the version the cutover left it.
+	require.Equal(t, stateFenced, h.row(t, "alpha").state)
+	require.Equal(t, src.Fence.Version, h.row(t, "alpha").version)
+}
+
+// TestCoordinatorFoldMovesTheHomeWithoutMovingTheTraffic: a fold needs no fence, makes the
+// destination the home and deletes the rule, and the traffic is where it was; a retry of one that
+// committed succeeds.
+func TestCoordinatorFoldMovesTheHomeWithoutMovingTheTraffic(t *testing.T) {
+	h := newCoordHarness(t)
+	_, err := h.foldRouting(0)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err) // no rule
+
+	_, err = h.fenceTG("alpha", 0)
+	require.NoError(t, err)
+	dst, err := h.fenceTG("beta", 0)
+	require.NoError(t, err)
+	_, err = h.switchRouting("alpha", "beta", 0)
+	require.NoError(t, err)
+	_, err = h.unfenceTG("beta", dst.Fence.Version)
+	require.NoError(t, err)
+
+	before, err := h.store.Snapshot(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "beta", before.effective())
+
+	_, err = h.foldRouting(0)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	folded, err := h.foldRouting(1)
+	require.NoError(t, err, "no fence is needed: the source is fenced and the destination is not")
+	require.EqualValues(t, 2, folded.RoutingVersion)
+	require.Equal(t, "beta", folded.HomeTablegroup)
+	require.Empty(t, h.store.rules)
+
+	after, err := h.store.Snapshot(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "beta", after.effective(), "the traffic is where it was")
+	require.Equal(t, "beta", after.home)
+
+	again, err := h.foldRouting(1)
+	require.NoError(t, err, "a retry of the fold that committed")
+	require.EqualValues(t, 2, again.RoutingVersion)
+	require.EqualValues(t, 2, h.store.version, "and nothing was written")
+}
+
+// TestCoordinatorFoldRefusesToChangeWhereTheTrafficGoes: the fold resolves the traffic before and
+// after and refuses if they differ: a rule that does not apply to the home would be folded into a
+// home that moves the traffic.
+func TestCoordinatorFoldRefusesToChangeWhereTheTrafficGoes(t *testing.T) {
+	h := newCoordHarness(t)
+	h.store.addTablegroup("gamma")
+	h.store.rules = []ruleRow{{operationID: opA, from: "beta", to: "gamma", toShard: "0-inf", createdVersion: 1}}
+	h.store.version = 1
+	_, err := h.foldRouting(1)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	require.ErrorContains(t, err, "not the home tablegroup")
+	require.Equal(t, "alpha", h.store.home)
+	require.Len(t, h.store.rules, 1)
+}
+
+// TestCoordinatorCleanupDeletesTheOperationsFences: cleanup is refused while the operation has a
+// rule or a FENCING fence, deletes every other fence of the operation, FENCED ones included, and
+// touches nobody else's.
+func TestCoordinatorCleanupDeletesTheOperationsFences(t *testing.T) {
+	h := newCoordHarness(t)
+	h.store.addTablegroup("gamma")
+	src, err := h.fenceTG("alpha", 0)
+	require.NoError(t, err)
+	dst, err := h.fenceTG("beta", 0)
+	require.NoError(t, err)
+	h.store.addHeld(opB, "gamma", stateFenced, 3)
+	_, err = h.switchRouting("alpha", "beta", 0)
+	require.NoError(t, err)
+
+	_, err = h.cleanup(opA)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	require.ErrorContains(t, err, "revert or fold it first")
+
+	_, err = h.unfenceTG("beta", dst.Fence.Version)
+	require.NoError(t, err)
+	folded, err := h.foldRouting(1)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, folded.RoutingVersion)
+
+	// A scope that is FENCING blocks it.
+	h.store.addHeld(opA, "alpha", stateFencing, src.Fence.Version)
+	_, err = h.cleanup(opA)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	require.ErrorContains(t, err, "FENCING")
+	h.store.addHeld(opA, "alpha", stateFenced, src.Fence.Version)
+
+	deleted, err := h.cleanup(opA)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, deleted.FencesDeleted, "the source's FENCED fence and the destination's UNFENCED one")
+	require.Equal(t, stateUnfenced, h.row(t, "alpha").state, "the source is unfenced again, with no fence")
+	require.Zero(t, h.row(t, "alpha").version)
+	require.Equal(t, stateFenced, h.row(t, "gamma").state, "another operation's fence is untouched")
+
+	again, err := h.cleanup(opA)
+	require.NoError(t, err, "cleaning up what is already clean succeeds")
+	require.Zero(t, again.FencesDeleted)
 }
 
 // TestCoordinatorRefusesMoreThanOneUnmanagedMember: exactly one unmanaged
@@ -1200,54 +1547,81 @@ func TestCoordinatorRefusesMoreThanOneUnmanagedMember(t *testing.T) {
 	require.Equal(t, stateFencing, h.row(t, "alpha").state, "the fence is left FENCING, not completed")
 }
 
-func TestCoordinatorFlipChecksAreRepeatedWhereTheyCommit(t *testing.T) {
+func TestCoordinatorSwitchChecksAreRepeatedWhereTheyCommit(t *testing.T) {
 	h := newCoordHarness(t)
 	_, err := h.fenceTG("alpha", 0)
 	require.NoError(t, err)
 	_, err = h.fenceTG("beta", 0)
 	require.NoError(t, err)
 	// One side is unfenced between the coordinator's check and the commit.
-	h.store.mu.Lock()
 	moveStore := h.store
-	h.store.mu.Unlock()
-	h.c.store = &flipRacingStore{memStore: moveStore, beforeMove: func() {
+	h.c.store = &switchRacingStore{memStore: moveStore, beforeMove: func() {
 		moveStore.mu.Lock()
-		moveStore.rows["beta"].state = stateUnfenced
+		moveStore.fences["beta"].state = stateUnfenced
 		moveStore.mu.Unlock()
 	}}
-	_, err = h.flip("alpha", "beta", 0)
+	_, err = h.switchRouting("alpha", "beta", 0)
 	requireCode(t, mtrpcpb.Code_ABORTED, err)
-	require.Equal(t, "alpha", h.store.app, "the pointer did not move")
+	require.Empty(t, h.store.rules, "the traffic did not move")
 }
 
-// flipRacingStore changes the world just before the flip commits.
-type flipRacingStore struct {
+// switchRacingStore changes the world just before the switch commits.
+type switchRacingStore struct {
 	*memStore
 	beforeMove func()
 }
 
-func (s *flipRacingStore) MoveRouting(ctx context.Context, db, from, to string, expectedVersion int64) (string, int64, bool, error) {
+func (s *switchRacingStore) SwitchRouting(ctx context.Context, op string, rule ruleRow, expectedVersion int64) (int64, bool, error) {
 	s.beforeMove()
-	return s.memStore.MoveRouting(ctx, db, from, to, expectedVersion)
+	return s.memStore.SwitchRouting(ctx, op, rule, expectedVersion)
 }
 
 func TestCoordinatorValidatesRequests(t *testing.T) {
 	h := newCoordHarness(t)
 	ctx := context.Background()
-	_, err := h.c.StartFence(ctx, &multipoolerservicepb.StartFenceRequest{Database: "db"})
+	_, err := h.c.StartFence(ctx, &multipoolerservicepb.StartFenceRequest{Database: "db", OperationId: opA})
 	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, err)
-	_, err = h.c.StartFence(ctx, &multipoolerservicepb.StartFenceRequest{Database: "db", Tablegroup: "alpha", ExpectedVersion: -1})
+	_, err = h.c.StartFence(ctx, &multipoolerservicepb.StartFenceRequest{Database: "db", OperationId: opA, Scope: scopeOf("alpha"), ExpectedVersion: -1})
 	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, err)
-	_, err = h.c.CommitFence(ctx, &multipoolerservicepb.CommitFenceRequest{Database: "db", Version: 1})
+	_, err = h.c.StartFence(ctx, &multipoolerservicepb.StartFenceRequest{Database: "db", Scope: scopeOf("alpha")})
 	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, err)
-	_, err = h.c.CommitFence(ctx, &multipoolerservicepb.CommitFenceRequest{Database: "db", Tablegroup: "alpha"})
+	_, err = h.c.StartFence(ctx, &multipoolerservicepb.StartFenceRequest{Database: "db", OperationId: "not-a-uuid", Scope: scopeOf("alpha")})
 	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, err)
-	_, err = h.c.UnfenceTablegroup(ctx, &multipoolerservicepb.UnfenceTablegroupRequest{Database: "db"})
+	_, err = h.c.CommitFence(ctx, &multipoolerservicepb.CommitFenceRequest{Database: "db", OperationId: opA, Version: 1})
 	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, err)
-	_, err = h.c.FlipRouting(ctx, &multipoolerservicepb.FlipRoutingRequest{Database: "db", FromTablegroup: "alpha", ToTablegroup: "alpha"})
+	_, err = h.c.CommitFence(ctx, &multipoolerservicepb.CommitFenceRequest{Database: "db", OperationId: opA, Scope: scopeOf("alpha")})
 	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, err)
-	_, err = h.c.FlipRouting(ctx, &multipoolerservicepb.FlipRoutingRequest{Database: "db", FromTablegroup: "alpha"})
+	_, err = h.c.UnfenceScope(ctx, &multipoolerservicepb.UnfenceScopeRequest{Database: "db", OperationId: opA})
 	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, err)
+	_, err = h.c.SwitchRouting(ctx, &multipoolerservicepb.SwitchRoutingRequest{
+		Database: "db", OperationId: opA,
+		Rule: &multipoolerservicepb.RoutingRule{FromTablegroup: "alpha", ToTablegroup: "alpha", ToShard: "0-inf"},
+	})
+	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, err)
+	_, err = h.c.SwitchRouting(ctx, &multipoolerservicepb.SwitchRoutingRequest{
+		Database: "db", OperationId: opA,
+		Rule: &multipoolerservicepb.RoutingRule{FromTablegroup: "alpha", ToTablegroup: "beta"},
+	})
+	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, err)
+	_, err = h.c.RevertRouting(ctx, &multipoolerservicepb.RevertRoutingRequest{Database: "db", OperationId: "x"})
+	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, err)
+	_, err = h.c.FoldRouting(ctx, &multipoolerservicepb.FoldRoutingRequest{Database: "db", OperationId: opA, ExpectedRoutingVersion: -1})
+	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, err)
+	_, err = h.c.CleanupOperation(ctx, &multipoolerservicepb.CleanupOperationRequest{Database: "db"})
+	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, err)
+
+	// A shard or a table is not a scope yet.
+	for _, scope := range []*multipoolerservicepb.AdmissionScope{
+		{Tablegroup: "alpha", Shard: "0-inf"}, {Tablegroup: "alpha", Table: "t"},
+	} {
+		_, err = h.c.StartFence(ctx, &multipoolerservicepb.StartFenceRequest{Database: "db", OperationId: opA, Scope: scope})
+		requireCode(t, mtrpcpb.Code_UNIMPLEMENTED, err)
+		_, err = h.c.CommitFence(ctx, &multipoolerservicepb.CommitFenceRequest{Database: "db", OperationId: opA, Scope: scope, Version: 1})
+		requireCode(t, mtrpcpb.Code_UNIMPLEMENTED, err)
+		_, err = h.c.UnfenceScope(ctx, &multipoolerservicepb.UnfenceScopeRequest{Database: "db", OperationId: opA, Scope: scope})
+		requireCode(t, mtrpcpb.Code_UNIMPLEMENTED, err)
+	}
+	require.Zero(t, h.store.writes)
 }
 
 func TestCoordinatorNamesNoTablegroupSpecially(t *testing.T) {
@@ -1257,23 +1631,108 @@ func TestCoordinatorNamesNoTablegroupSpecially(t *testing.T) {
 	h.store.add("default", false, 0)
 	resp, err := h.fenceTG("default", 0)
 	require.NoError(t, err)
-	require.Equal(t, stateFenced, resp.State.State)
+	require.Equal(t, stateFenced, resp.Fence.State)
 	require.Equal(t, stateUnfenced, h.row(t, "alpha").state)
 }
 
-func TestCoordinatorFenceOfATablegroupNeverFencedCreatesItsRow(t *testing.T) {
+func TestCoordinatorFenceOfATablegroupNeverFencedCreatesItsFence(t *testing.T) {
 	h := newCoordHarness(t)
+	h.store.addTablegroup("gamma")
 	resp, err := h.fenceTG("gamma", 0)
 	require.NoError(t, err)
-	require.Equal(t, stateFenced, resp.State.State)
-	require.EqualValues(t, 1, resp.State.Version)
+	require.Equal(t, stateFenced, resp.Fence.State)
+	require.EqualValues(t, 1, resp.Fence.Version)
+	require.Equal(t, opA, resp.Fence.OperationId)
+	require.Equal(t, "gamma", resp.Fence.Scope.Tablegroup)
 
+	h.store.addTablegroup("delta")
 	_, err = h.fenceTG("delta", 3)
 	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	h.store.addTablegroup("epsilon")
 	_, err = h.unfenceTG("epsilon", 0)
 	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
-	_, err = h.flip("alpha", "zeta", 0)
+}
+
+// TestCoordinatorFenceOfAnUnknownTablegroupIsNotFound: a scope with no fence is checked against
+// the catalog, whichever call names it.
+func TestCoordinatorFenceOfAnUnknownTablegroupIsNotFound(t *testing.T) {
+	h := newCoordHarness(t)
+	_, err := h.startTG("zeta", 0)
+	requireCode(t, mtrpcpb.Code_NOT_FOUND, err)
+	_, err = h.commitTG("zeta", 1)
+	requireCode(t, mtrpcpb.Code_NOT_FOUND, err)
+	_, err = h.unfenceTG("zeta", 0)
+	requireCode(t, mtrpcpb.Code_NOT_FOUND, err)
+	require.Zero(t, h.store.writes)
+}
+
+// TestCoordinatorOneOperationHoldsAScope: another operation takes a scope over only while the
+// holder's fence is UNFENCED, in the write that fences it at the next version; a scope that is
+// FENCING or FENCED for another operation is refused, as is every call on a fence that is not
+// the operation's own. An unfence leaves the fence UNFENCED, and cleanup removes it.
+func TestCoordinatorOneOperationHoldsAScope(t *testing.T) {
+	h := newCoordHarness(t)
+	started, err := h.startAs(opA, "alpha", 0)
+	require.NoError(t, err)
+
+	// Another operation cannot touch a scope that is FENCING, however it names the version.
+	for _, version := range []int64{0, 1} {
+		_, err = h.startAs(opB, "alpha", version)
+		requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+		require.ErrorContains(t, err, opA)
+	}
+	_, err = h.commitAs(opB, "alpha", 1)
 	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	_, err = h.unfenceAs(opB, "alpha", 1)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	_, err = h.commitAs(opA, "alpha", started.Fence.Version)
+	require.NoError(t, err)
+	_, err = h.startAs(opB, "alpha", 1)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err) // FENCED for another operation
+
+	// The holder unfences: the fence stays, UNFENCED at the next version.
+	_, err = h.unfenceAs(opA, "alpha", 1)
+	require.NoError(t, err)
+	require.Equal(t, stateUnfenced, h.row(t, "alpha").state)
+	require.EqualValues(t, 2, h.row(t, "alpha").version)
+	require.Equal(t, opA, h.row(t, "alpha").operationID)
+
+	// The other operation takes it over at the version it read, and no other.
+	_, err = h.startAs(opB, "alpha", 1)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	taken, err := h.startAs(opB, "alpha", 2)
+	require.NoError(t, err)
+	require.Equal(t, opB, taken.Fence.OperationId)
+	require.Equal(t, stateFencing, taken.Fence.State)
+	require.EqualValues(t, 3, taken.Fence.Version)
+	require.Equal(t, opB, h.row(t, "alpha").operationID)
+
+	// The first operation is out: its calls on the scope are refused now.
+	_, err = h.startAs(opA, "alpha", 2)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	_, err = h.unfenceAs(opA, "alpha", 1)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+
+	// Cleanup removes only the operation's own fences.
+	deleted, err := h.cleanup(opA)
+	require.NoError(t, err)
+	require.Zero(t, deleted.FencesDeleted)
+	require.Equal(t, opB, h.row(t, "alpha").operationID)
+}
+
+// TestCoordinatorTakeoverLosesToAConcurrentWriter: the takeover is a compare-and-set on the fence
+// the caller read, so a holder that fences again in between wins, and the taker is ABORTED.
+func TestCoordinatorTakeoverLosesToAConcurrentWriter(t *testing.T) {
+	h := newCoordHarness(t)
+	h.store.addHeld(opB, "alpha", stateUnfenced, 4)
+	h.store.beforeCAS = func() {
+		h.store.beforeCAS = nil
+		h.store.addHeld(opB, "alpha", stateFencing, 5)
+	}
+	_, err := h.startAs(opA, "alpha", 4)
+	requireCode(t, mtrpcpb.Code_ABORTED, err)
+	require.Equal(t, opB, h.row(t, "alpha").operationID)
+	require.Zero(t, h.refresh.fencesTo("w"))
 }
 
 // TestCoordinatorRefusesAFenceWhenEitherDurabilityPolicyIsTooWeak: the fenced tablegroup's
@@ -1449,18 +1908,18 @@ func TestCoordinatorRepeatingEveryCallEndsInTheSameState(t *testing.T) {
 	require.NoError(t, err)
 	again, err := h.start(0)
 	require.NoError(t, err, "a retry of the same start, whose reply was lost")
-	require.Equal(t, first.State.Version, again.State.Version)
-	committed, err := h.commit(first.State.Version)
+	require.Equal(t, first.Fence.Version, again.Fence.Version)
+	committed, err := h.commit(first.Fence.Version)
 	require.NoError(t, err)
-	again2, err := h.commit(first.State.Version)
+	again2, err := h.commit(first.Fence.Version)
 	require.NoError(t, err, "a retry of the same commit")
-	require.Equal(t, committed.State.Version, again2.State.Version)
+	require.Equal(t, committed.Fence.Version, again2.Fence.Version)
 	_, err = h.start(0)
 	require.NoError(t, err, "a start after the commit is a success too")
 
-	_, err = h.unfence(first.State.Version)
+	_, err = h.unfence(first.Fence.Version)
 	require.NoError(t, err)
-	_, err = h.unfence(first.State.Version)
+	_, err = h.unfence(first.Fence.Version)
 	require.NoError(t, err, "the same unfence again")
 	require.EqualValues(t, 2, h.row(t, "alpha").version)
 	require.Equal(t, stateUnfenced, h.row(t, "alpha").state)
@@ -1506,7 +1965,7 @@ func TestDefaultPrimaryLostMidFenceLeavesItFencedForTheMigrator(t *testing.T) {
 	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
 	resp, err := h.fence(h.row(t, "alpha").version)
 	require.NoError(t, err, "a fresh fence at the current version works")
-	require.Equal(t, stateFenced, resp.State.State)
+	require.Equal(t, stateFenced, resp.Fence.State)
 }
 
 // TestCoordinatorBusyMemberResultSaysWhatHoldsIt: a member that is busy says what holds its

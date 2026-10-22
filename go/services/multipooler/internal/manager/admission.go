@@ -35,9 +35,9 @@ import (
 // Local application admission.
 //
 // Every pooler starts with its application gate closed and opens it only after
-// reading, from the default primary, the admission state of its tablegroup and finding
-// it unfenced. A tablegroup that has never been fenced has no row, and the metadata
-// tables may not exist; a missing row, a missing table and an old default primary that
+// reading, from the default primary, the admission fence of its tablegroup and finding
+// it unfenced. A tablegroup that has never been fenced has no fence, and the metadata
+// tables may not exist; no fence, a missing table and an old default primary that
 // answers Unimplemented all read as unfenced. A fenced row, and any other failure to
 // read, keep the gate closed. A pooler reads its row when it starts, when its role or
 // serving status changes (a managed pooler; an unmanaged one has no promotion to guard
@@ -70,8 +70,9 @@ type appliedAdmission struct {
 
 // admissionExpectation is what a refresh says the row now is.
 type admissionExpectation struct {
-	state   multipoolerservicepb.AdmissionState
-	version int64
+	operationID string
+	state       multipoolerservicepb.AdmissionState
+	version     int64
 }
 
 // admissionRuntime is the manager's admission state. serial serializes
@@ -90,7 +91,7 @@ type admissionRuntime struct {
 	// decision may open the gate again.
 	stopped atomic.Bool
 	// reader, when set, replaces the read from the default primary (tests).
-	reader func(ctx context.Context) (*multipoolerservicepb.TablegroupServingState, error)
+	reader func(ctx context.Context) (*multipoolerservicepb.AdmissionFence, error)
 	// binding, when set, replaces the read of the connection the tablegroup is bound to
 	// (tests).
 	binding func(ctx context.Context) (name string, known bool, err error)
@@ -102,13 +103,6 @@ func (pm *MultipoolerManager) applicationGate() (poolerserver.ApplicationGate, e
 		return nil, errors.New("application admission gate unavailable")
 	}
 	return g, nil
-}
-
-func (pm *MultipoolerManager) backingConnectionName() string {
-	if pm.config == nil {
-		return ""
-	}
-	return pm.config.BackingConnectionName
 }
 
 func (pm *MultipoolerManager) signalAdmission() {
@@ -125,18 +119,16 @@ func (pm *MultipoolerManager) signalAdmission() {
 	}
 }
 
-// admissionLifecycle withdraws the admission decision whenever a managed pooler's
-// routing role or serving status changes, including a backend reconnect, so that a
-// replica promoted while a fence runs reads its row before it opens. It is a pure sink:
-// it closes the gate and wakes the admission loop, nothing more. An unmanaged pooler's
-// source is writable whatever role it reports and there is no promotion to guard
-// against, so its decision stands across a reconnect: the gate stays as the row left it,
-// and requests are refused by the serving status while the backend is away.
+// admissionLifecycle withdraws the admission decision whenever the routing role or serving
+// status of a pooler whose backend asks for it changes, including a backend reconnect, so that
+// a replica promoted while a fence runs reads its fence before it opens. It is a pure sink:
+// it closes the gate and wakes the admission loop, nothing more. A backend that does not ask
+// for it (see admissionBackend) keeps its decision across a reconnect.
 type admissionLifecycle struct{ pm *MultipoolerManager }
 
 func (l admissionLifecycle) OnStateChange(_ context.Context, s servingstate.State) error {
 	pm := l.pm
-	if pm.IsUnmanaged() {
+	if !pm.admissionBackend.ClosesOnRoleChange() {
 		return nil
 	}
 	a := &pm.admission
@@ -195,11 +187,10 @@ func (pm *MultipoolerManager) runAdmission(ctx context.Context) {
 		if a.stopped.Load() {
 			return
 		}
-		// A managed pooler must be visible in topology before it reads anything:
-		// the coordinator fences the poolers it finds there, and one that opens
-		// from a read taken before it is listed could stay open past a fence
-		// committed without it. Unmanaged poolers register before they start.
-		if !pm.IsUnmanaged() && !pm.record.IsRegistered() {
+		// A pooler must be visible in topology before it reads anything: the coordinator
+		// fences the poolers it finds there, and one that opens from a read taken before
+		// it is listed could stay open past a fence committed without it.
+		if !pm.admissionBackend.RegisteredBeforeStart() && !pm.record.IsRegistered() {
 			continue
 		}
 		g, err := pm.applicationGate()
@@ -221,7 +212,7 @@ func (pm *MultipoolerManager) runAdmission(ctx context.Context) {
 	}
 }
 
-// RefreshAdmission re-reads the admission row of the pooler's tablegroup from the default
+// RefreshAdmission re-reads the admission fence of the pooler's tablegroup from the default
 // primary, applies it, and says what the pooler holds. The coordinator calls it on every member of
 // a tablegroup, for a start and for a commit alike, so a commit also closes a member that missed
 // the start; expected_state and expected_version are expectations, never permission. It waits for
@@ -229,13 +220,18 @@ func (pm *MultipoolerManager) runAdmission(ctx context.Context) {
 // or held.
 func (pm *MultipoolerManager) RefreshAdmission(ctx context.Context, req *multipoolerservicepb.RefreshAdmissionRequest) (*multipoolerservicepb.RefreshAdmissionResponse, error) {
 	key := pm.record.ShardKey()
-	if req.GetDatabase() != key.GetDatabase() || req.GetTablegroup() != key.GetTableGroup() {
-		return nil, mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "database or tablegroup does not match this pooler")
+	if req.GetDatabase() != key.GetDatabase() || req.GetScope().GetTablegroup() != key.GetTableGroup() ||
+		req.GetScope().GetShard() != "" || req.GetScope().GetTable() != "" {
+		return nil, mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "database or scope does not match this pooler")
 	}
 	if req.GetExpectedVersion() < 0 {
 		return nil, mterrors.New(mtrpcpb.Code_INVALID_ARGUMENT, "expected_version must not be negative")
 	}
-	applied, err := pm.enforceAdmission(ctx, &admissionExpectation{state: req.GetExpectedState(), version: req.GetExpectedVersion()})
+	operationID, err := canonicalOperationID(req.GetOperationId())
+	if err != nil {
+		return nil, err
+	}
+	applied, err := pm.enforceAdmission(ctx, &admissionExpectation{operationID: operationID, state: req.GetExpectedState(), version: req.GetExpectedVersion()})
 	if err != nil {
 		return nil, err
 	}
@@ -250,10 +246,10 @@ func (pm *MultipoolerManager) RefreshAdmission(ctx context.Context, req *multipo
 	return resp, nil
 }
 
-// enforceAdmission reads the authoritative row and makes the gate match it. expected
+// enforceAdmission reads the authoritative fence and makes the gate match it. expected
 // is what the caller has just committed and is driving to, or nil for the startup and
-// event reads; if the authoritative row differs the call fails without applying
-// anything. A fenced row closes the gate, however often the caller asks, which is what
+// event reads; if the authoritative fence differs the call fails without applying
+// anything. A fenced scope closes the gate, however often the caller asks, which is what
 // makes a repeated fence a resume; closing is the safe direction, and nothing here waits
 // for work to finish.
 func (pm *MultipoolerManager) enforceAdmission(ctx context.Context, expected *admissionExpectation) (*appliedAdmission, error) {
@@ -291,14 +287,14 @@ func (pm *MultipoolerManager) enforceAdmission(ctx context.Context, expected *ad
 	if err := pm.checkTablegroupBinding(ctx); err != nil {
 		return nil, err
 	}
-	row, err := pm.readTablegroupServing(ctx)
+	row, err := pm.readOwnFence(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if expected != nil && (row.GetState() != expected.state || row.GetVersion() != expected.version) {
+	if expected != nil && (row.GetState() != expected.state || row.GetVersion() != expected.version || row.GetOperationId() != expected.operationID) {
 		return nil, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
-			"persisted admission is %s at version %d, not the expected %s at version %d",
-			row.GetState(), row.GetVersion(), expected.state, expected.version)
+			"persisted admission is %s at version %d of operation %q, not the expected %s at version %d of operation %q",
+			row.GetState(), row.GetVersion(), row.GetOperationId(), expected.state, expected.version, expected.operationID)
 	}
 
 	// FENCING and FENCED both keep the gate closed; only the coordinator tells them apart.
@@ -313,7 +309,7 @@ func (pm *MultipoolerManager) enforceAdmission(ctx context.Context, expected *ad
 		} else {
 			g.CloseApplication()
 		}
-	} else if err := pm.admissionBackendReady(); err != nil && !pm.mayOpenLater() {
+	} else if err := pm.admissionBackend.ReadyToAdmit(); err != nil {
 		return nil, err
 	}
 
@@ -344,88 +340,66 @@ func (pm *MultipoolerManager) announceClosingGate() {
 	pm.healthStreamer.setAdmissionClosed(true)
 }
 
-// mayOpenLater reports whether the pooler may open before its backend is ready: a managed
-// pooler that is not the writable leader, which cannot commit and is refused by the
-// serving status until its backend is. A leader, and an unmanaged pooler, whose external
-// database is the writable one, must be ready.
-func (pm *MultipoolerManager) mayOpenLater() bool {
-	return !pm.IsUnmanaged() && pm.stateManager.RoutingRole() != clustermetadatapb.RoutingRole_ROUTING_ROLE_PRIMARY
-}
-
-// admissionBackendReady checks the pooler may admit application work at all: its
-// backend is usable, which for an unmanaged pooler means it passed identity
-// validation.
-func (pm *MultipoolerManager) admissionBackendReady() error {
-	h := pm.healthStreamer.getState()
-	if h.ServingStatus != clustermetadatapb.PoolerServingStatus_SERVING {
-		return mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "backend is not serving")
-	}
-	if pm.IsUnmanaged() {
-		if !h.BackendReady {
-			return mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "external backend is not ready")
-		}
-		return nil
-	}
-	switch pm.stateManager.RoutingRole() {
-	case clustermetadatapb.RoutingRole_ROUTING_ROLE_PRIMARY, clustermetadatapb.RoutingRole_ROUTING_ROLE_REPLICA:
-		return nil
-	default:
-		return mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "backend routing role is unavailable")
-	}
-}
-
-// readTablegroupServing reads this pooler's tablegroup row from the
-// authoritative copy: the default primary, or this pooler itself when it is the
-// default primary. A follower's copy is never a source of truth.
-func (pm *MultipoolerManager) readTablegroupServing(ctx context.Context) (*multipoolerservicepb.TablegroupServingState, error) {
+// readOwnFence reads this pooler's tablegroup's fence from the authoritative copy: the default
+// primary, or this pooler itself when it is the default primary. A follower's copy is never a
+// source of truth. A tablegroup with no fence reads as unfenced at version zero.
+func (pm *MultipoolerManager) readOwnFence(ctx context.Context) (*multipoolerservicepb.AdmissionFence, error) {
 	if pm.admission.reader != nil {
 		return pm.admission.reader(ctx)
 	}
 	key := pm.record.ShardKey()
-	// With no store of serving state built in, nothing can have fenced this tablegroup, on
-	// this pooler or on the default primary it would ask, which is the same build: it is
-	// unfenced, and there is nothing to read.
+	tablegroup := key.GetTableGroup()
+	// With no store built in, nothing can have fenced this tablegroup, on this pooler or on the
+	// default primary it would ask, which is the same build: it is unfenced, and there is nothing
+	// to read.
 	//
-	// This is a rule of the build, and an upgrade constraint: every pooler of a cluster that
-	// can fence must run a build that has the store. A member restarted onto one without it,
-	// after a fence completed, opens without asking, as a pooler of a cluster that never
-	// fenced anything does.
-	if newServingStore == nil {
-		return unfencedRow(pm.record.ShardKey().GetTableGroup()), nil
+	// This is a rule of the build, and an upgrade constraint: every pooler of a cluster that can
+	// fence must run a build that has the store. A member restarted onto one without it, after a
+	// fence completed, opens without asking, as a pooler of a cluster that never fenced anything
+	// does.
+	if newRoutingStore == nil {
+		return unfencedFence(tablegroup), nil
 	}
-	req := &multipoolerservicepb.GetServingStateRequest{Database: key.GetDatabase(), Tablegroups: []string{key.GetTableGroup()}}
+	req := &multipoolerservicepb.GetRoutingStateRequest{Database: key.GetDatabase()}
 	if pm.requireDefaultPrimary(key.GetDatabase()) == nil {
-		resp, err := pm.GetServingState(ctx, req)
+		resp, err := pm.GetRoutingState(ctx, req)
 		if err != nil {
 			return nil, err
 		}
-		return resp.GetTablegroups()[0], nil
+		return ownFenceOf(resp, tablegroup), nil
 	}
 	if pm.config == nil || pm.config.TopoClient == nil {
 		return nil, errors.New("default primary discovery unavailable")
 	}
-	var row *multipoolerservicepb.TablegroupServingState
+	var fence *multipoolerservicepb.AdmissionFence
 	err := pm.defaultPrimaryClient().with(ctx, func(c multipoolerservicepb.MultipoolerServiceClient) error {
-		resp, err := c.GetServingState(ctx, req)
+		resp, err := c.GetRoutingState(ctx, req)
 		if status.Code(err) == codes.Unimplemented {
-			// A default primary that does not serve admission state has never fenced
-			// anything: this tablegroup is unfenced. That holds only under the upgrade
-			// constraint above (every pooler of a cluster that can fence runs a build that
-			// has the store): a failover onto an older default primary after a fence reopens
-			// the tablegroup.
-			row = unfencedRow(pm.record.ShardKey().GetTableGroup())
+			// A default primary that does not serve admission state has never fenced anything:
+			// this tablegroup is unfenced. That holds only under the upgrade constraint above
+			// (every pooler of a cluster that can fence runs a build that has the store): a
+			// failover onto an older default primary after a fence reopens the tablegroup.
+			fence = unfencedFence(tablegroup)
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		if len(resp.GetTablegroups()) != 1 {
-			return errors.New("default primary returned an unexpected number of tablegroups")
-		}
-		row = resp.GetTablegroups()[0]
+		fence = ownFenceOf(resp, tablegroup)
 		return nil
 	})
-	return row, err
+	return fence, err
+}
+
+// ownFenceOf picks the fence of a tablegroup scope out of the routing state, and a tablegroup
+// that has none is unfenced.
+func ownFenceOf(resp *multipoolerservicepb.GetRoutingStateResponse, tablegroup string) *multipoolerservicepb.AdmissionFence {
+	for _, f := range resp.GetFences() {
+		if f.GetScope().GetTablegroup() == tablegroup && f.GetScope().GetShard() == "" && f.GetScope().GetTable() == "" {
+			return f
+		}
+	}
+	return unfencedFence(tablegroup)
 }
 
 // The admission states, as the manager names them.
@@ -435,54 +409,46 @@ const (
 	stateFenced   = multipoolerservicepb.AdmissionState_ADMISSION_STATE_FENCED
 )
 
-// unfencedRow is what a tablegroup that has no persisted admission state reads as:
-// unfenced, at version zero.
-func unfencedRow(tablegroup string) *multipoolerservicepb.TablegroupServingState {
-	return &multipoolerservicepb.TablegroupServingState{Tablegroup: tablegroup, State: stateUnfenced}
+// unfencedFence is what a tablegroup that has no fence reads as: unfenced, at version zero, held
+// by no operation.
+func unfencedFence(tablegroup string) *multipoolerservicepb.AdmissionFence {
+	return &multipoolerservicepb.AdmissionFence{Scope: &multipoolerservicepb.AdmissionScope{Tablegroup: tablegroup}, State: stateUnfenced}
 }
 
-// GetServingState returns the authoritative routing and admission metadata. Only
-// the default primary serves it. A tablegroup with no row, or no metadata tables at
-// all, is unfenced at version zero: reading never creates anything, and a cluster
-// that has never migrated anything has nothing to read.
-//
-// The tablegroup rows and the routing pointer are read by separate statements, so
-// the response is not a single snapshot. That is harmless: a caller treats it as
-// advice and every decision it leads to is re-checked where it is made
-// (MoveRouting re-checks the admission states in the statement that moves the
-// pointer; a pooler's admission read is of its own row only).
-func (pm *MultipoolerManager) GetServingState(ctx context.Context, req *multipoolerservicepb.GetServingStateRequest) (*multipoolerservicepb.GetServingStateResponse, error) {
+// GetRoutingState returns the authoritative routing and admission metadata. Only the default
+// primary serves it. A database with no fences and no rules, or no metadata tables at all, reads
+// as empty: reading never creates anything, and a cluster that has never migrated anything has
+// nothing to read.
+func (pm *MultipoolerManager) GetRoutingState(ctx context.Context, req *multipoolerservicepb.GetRoutingStateRequest) (*multipoolerservicepb.GetRoutingStateResponse, error) {
 	if err := pm.requireDefaultPrimary(req.GetDatabase()); err != nil {
 		return nil, err
 	}
-	store, err := pm.servingStore()
+	store, err := pm.routingStore()
 	if err != nil {
 		return nil, err
 	}
-	return readServingState(ctx, store, req)
+	return readRoutingState(ctx, store, req)
 }
 
-// readServingState reads the serving metadata from store. A tablegroup that has no row
-// reads as unfenced at version zero, and so does everything when the tables do not exist
-// yet: the store reports both as no row, and reading creates nothing.
-func readServingState(ctx context.Context, store servingReader, req *multipoolerservicepb.GetServingStateRequest) (*multipoolerservicepb.GetServingStateResponse, error) {
-	resp := &multipoolerservicepb.GetServingStateResponse{}
-	for _, name := range req.GetTablegroups() {
-		row, err := store.GetRow(ctx, req.GetDatabase(), name)
-		if err != nil {
-			return nil, err
-		}
-		if row == nil {
-			resp.Tablegroups = append(resp.Tablegroups, unfencedRow(name))
-			continue
-		}
-		resp.Tablegroups = append(resp.Tablegroups, row.proto(name))
-	}
-	app, version, _, err := store.GetRouting(ctx, req.GetDatabase())
+// readRoutingState reads the routing state from store, in one snapshot. The fences are always
+// returned: they change without a change of the routing_version.
+func readRoutingState(ctx context.Context, store routingReader, req *multipoolerservicepb.GetRoutingStateRequest) (*multipoolerservicepb.GetRoutingStateResponse, error) {
+	snap, err := store.Snapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
-	resp.AppTablegroup, resp.RoutingVersion = app, version
+	resp := &multipoolerservicepb.GetRoutingStateResponse{RoutingVersion: snap.routingVersion}
+	if req.GetSinceVersion() > 0 && req.GetSinceVersion() == snap.routingVersion {
+		resp.NotModified = true
+	} else {
+		resp.HomeTablegroup = snap.home
+		for _, r := range snap.rules {
+			resp.Rules = append(resp.Rules, r.proto())
+		}
+	}
+	for i := range snap.fences {
+		resp.Fences = append(resp.Fences, snap.fences[i].proto())
+	}
 	return resp, nil
 }
 
@@ -491,7 +457,7 @@ func (pm *MultipoolerManager) newAdmissionCoordinator() (*admissionCoordinator, 
 	if err != nil {
 		return nil, mterrors.Wrap(err, "default primary transport")
 	}
-	store, err := pm.servingStore()
+	store, err := pm.routingStore()
 	if err != nil {
 		return nil, err
 	}
@@ -544,11 +510,10 @@ func (pm *MultipoolerManager) requiredNodes(ctx context.Context, members members
 	return int(policy.GetRequiredCount()), true, nil
 }
 
-// StartFence starts the fence of a tablegroup. Only the default primary serves it. The
-// default tablegroup can be fenced too, as the destination of a migration: its
-// poolers then refuse application work, and the default primary, which is in the
-// fan-out like any other member, keeps serving this control plane, since admission
-// applies to application queries only.
+// StartFence starts the fence of a scope. Only the default primary serves it. The default
+// tablegroup can be fenced too, as the destination of a migration: its poolers then refuse
+// application work, and the default primary, which is in the fan-out like any other member, keeps
+// serving this control plane, since admission applies to application queries only.
 func (pm *MultipoolerManager) StartFence(ctx context.Context, req *multipoolerservicepb.StartFenceRequest) (*multipoolerservicepb.StartFenceResponse, error) {
 	c, err := pm.coordinatorFor(ctx, req.GetDatabase())
 	if err != nil {
@@ -557,8 +522,8 @@ func (pm *MultipoolerManager) StartFence(ctx context.Context, req *multipoolerse
 	return c.StartFence(ctx, req)
 }
 
-// CommitFence completes the fence of a tablegroup that was started. Only the default
-// primary serves it.
+// CommitFence completes the fence of a scope that was started. Only the default primary serves
+// it.
 func (pm *MultipoolerManager) CommitFence(ctx context.Context, req *multipoolerservicepb.CommitFenceRequest) (*multipoolerservicepb.CommitFenceResponse, error) {
 	c, err := pm.coordinatorFor(ctx, req.GetDatabase())
 	if err != nil {
@@ -567,23 +532,51 @@ func (pm *MultipoolerManager) CommitFence(ctx context.Context, req *multipoolers
 	return c.CommitFence(ctx, req)
 }
 
-// UnfenceTablegroup unfences a tablegroup. Only the default primary serves it.
-func (pm *MultipoolerManager) UnfenceTablegroup(ctx context.Context, req *multipoolerservicepb.UnfenceTablegroupRequest) (*multipoolerservicepb.UnfenceTablegroupResponse, error) {
+// UnfenceScope unfences a scope. Only the default primary serves it.
+func (pm *MultipoolerManager) UnfenceScope(ctx context.Context, req *multipoolerservicepb.UnfenceScopeRequest) (*multipoolerservicepb.UnfenceScopeResponse, error) {
 	c, err := pm.coordinatorFor(ctx, req.GetDatabase())
 	if err != nil {
 		return nil, err
 	}
-	return c.UnfenceTablegroup(ctx, req)
+	return c.UnfenceScope(ctx, req)
 }
 
-// FlipRouting moves application traffic between two fenced tablegroups. Only the
-// default primary serves it.
-func (pm *MultipoolerManager) FlipRouting(ctx context.Context, req *multipoolerservicepb.FlipRoutingRequest) (*multipoolerservicepb.FlipRoutingResponse, error) {
+// SwitchRouting moves application traffic between two fenced tablegroups. Only the default
+// primary serves it.
+func (pm *MultipoolerManager) SwitchRouting(ctx context.Context, req *multipoolerservicepb.SwitchRoutingRequest) (*multipoolerservicepb.SwitchRoutingResponse, error) {
 	c, err := pm.coordinatorFor(ctx, req.GetDatabase())
 	if err != nil {
 		return nil, err
 	}
-	return c.FlipRouting(ctx, req)
+	return c.SwitchRouting(ctx, req)
+}
+
+// RevertRouting puts application traffic back on the home tablegroup. Only the default primary
+// serves it.
+func (pm *MultipoolerManager) RevertRouting(ctx context.Context, req *multipoolerservicepb.RevertRoutingRequest) (*multipoolerservicepb.RevertRoutingResponse, error) {
+	c, err := pm.coordinatorFor(ctx, req.GetDatabase())
+	if err != nil {
+		return nil, err
+	}
+	return c.RevertRouting(ctx, req)
+}
+
+// FoldRouting completes a switched operation. Only the default primary serves it.
+func (pm *MultipoolerManager) FoldRouting(ctx context.Context, req *multipoolerservicepb.FoldRoutingRequest) (*multipoolerservicepb.FoldRoutingResponse, error) {
+	c, err := pm.coordinatorFor(ctx, req.GetDatabase())
+	if err != nil {
+		return nil, err
+	}
+	return c.FoldRouting(ctx, req)
+}
+
+// CleanupOperation deletes the fences of an operation. Only the default primary serves it.
+func (pm *MultipoolerManager) CleanupOperation(ctx context.Context, req *multipoolerservicepb.CleanupOperationRequest) (*multipoolerservicepb.CleanupOperationResponse, error) {
+	c, err := pm.coordinatorFor(ctx, req.GetDatabase())
+	if err != nil {
+		return nil, err
+	}
+	return c.CleanupOperation(ctx, req)
 }
 
 // coordinatorFor returns the admission coordinator, after checking that this pooler is

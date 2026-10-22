@@ -98,12 +98,12 @@ func scenarioFencedDefaultStillServesTheControlPlane(t *testing.T, f *migrationF
 	}
 
 	// The serving-control RPCs, on the fenced default primary.
-	st := ctl.state(ctx, "migrateTG", "default")
-	require.Equal(t, admFenced, st.Tablegroups[1].State)
+	st := ctl.state(ctx)
+	require.Equal(t, admFenced, stateOfFence(st, "default"))
 	backing, err := ctl.GetBackingConnection(ctx, &multipoolerservicepb.GetBackingConnectionRequest{Database: f.def.Database, ConnectionName: "mig-src"})
 	require.NoError(t, err, "GetBackingConnection")
 	require.Equal(t, "mig-src", backing.GetConnection().GetName())
-	refreshed, err := refreshAdmission(ctx, primary, f.def.Database, "default", true, destFence.State.Version)
+	refreshed, err := refreshAdmission(ctx, primary, f.def.Database, ctl.operation, "default", true, destFence.Fence.Version)
 	require.NoError(t, err, "RefreshAdmission")
 	require.Equal(t, admFenced, refreshed.State)
 
@@ -145,10 +145,10 @@ func scenarioFencedDefaultStillServesTheControlPlane(t *testing.T, f *migrationF
 	_, err = ctl.fence(ctx, "migrateTG")
 	require.NoError(t, err)
 	logOffset := gatewayLogSize(t, f.gatewayPort)
-	_, err = ctl.flip(ctx, "migrateTG", "default")
-	require.NoError(t, err, "FlipRouting with the default tablegroup as the destination")
+	_, err = ctl.switchRouting(ctx, "migrateTG", "default")
+	require.NoError(t, err, "SwitchRouting with the default tablegroup as the destination")
 
-	// The routing poll reads the new pointer from the fenced default primary: the
+	// The routing poll reads the new routing from the fenced default primary: the
 	// gateway learns it before anything is unfenced.
 	requireGatewayLogLine(t, f.gatewayPort, logOffset, "the gateway never read the new routing from the fenced default primary",
 		"application routing changed", `"tablegroup":"default"`)
@@ -180,7 +180,7 @@ func scenarioFencedDefaultStillServesTheControlPlane(t *testing.T, f *migrationF
 	_ = login.Close(ctx)
 
 	// Unfencing releases the held write, served by the default cohort.
-	_, err = ctl.unfenceAt(ctx, "default", destFence.State.Version)
+	_, err = ctl.unfenceAt(ctx, "default", destFence.Fence.Version)
 	require.NoError(t, err)
 	require.NoError(t, <-held)
 	assert.Equal(t, 1, rowCount(t, f.adminConn(f.def), -7))
@@ -324,7 +324,7 @@ func scenarioNotifyAfterTheCommit(t *testing.T, f *migrationFixture) {
 	started := time.Now()
 	s.runNotifyChecks("fenced", 2000)
 	t.Logf("the NOTIFY checks took %s with the default tablegroup fenced", time.Since(started).Round(time.Second))
-	_, err = f.control().unfenceAt(ctx, "default", notifyFence.State.Version)
+	_, err = f.control().unfenceAt(ctx, "default", notifyFence.Fence.Version)
 	require.NoError(t, err)
 
 	// After a cutover and its rollback the default tablegroup stays fenced, and nothing

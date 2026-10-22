@@ -40,9 +40,9 @@ func (pm *MultipoolerManager) checkTablegroupBinding(ctx context.Context) error 
 	if err != nil {
 		return err
 	}
-	if known && bound != pm.backingConnectionName() {
+	if known && bound != pm.admissionBackend.ConnectionName() {
 		return mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
-			"tablegroup is backed by connection %q, this pooler by %q", bound, pm.backingConnectionName())
+			"tablegroup is backed by connection %q, this pooler by %q", bound, pm.admissionBackend.ConnectionName())
 	}
 	return nil
 }

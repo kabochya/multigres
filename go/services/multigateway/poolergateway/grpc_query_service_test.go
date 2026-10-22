@@ -232,7 +232,27 @@ func (m *mockMultipoolerServiceClient) GetTablegroupBinding(ctx context.Context,
 	return nil, nil
 }
 
-func (m *mockMultipoolerServiceClient) GetServingState(ctx context.Context, in *multipoolerservice.GetServingStateRequest, opts ...grpc.CallOption) (*multipoolerservice.GetServingStateResponse, error) {
+func (m *mockMultipoolerServiceClient) GetRoutingState(ctx context.Context, in *multipoolerservice.GetRoutingStateRequest, opts ...grpc.CallOption) (*multipoolerservice.GetRoutingStateResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) UnfenceScope(ctx context.Context, in *multipoolerservice.UnfenceScopeRequest, opts ...grpc.CallOption) (*multipoolerservice.UnfenceScopeResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) SwitchRouting(ctx context.Context, in *multipoolerservice.SwitchRoutingRequest, opts ...grpc.CallOption) (*multipoolerservice.SwitchRoutingResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) RevertRouting(ctx context.Context, in *multipoolerservice.RevertRoutingRequest, opts ...grpc.CallOption) (*multipoolerservice.RevertRoutingResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) FoldRouting(ctx context.Context, in *multipoolerservice.FoldRoutingRequest, opts ...grpc.CallOption) (*multipoolerservice.FoldRoutingResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) CleanupOperation(ctx context.Context, in *multipoolerservice.CleanupOperationRequest, opts ...grpc.CallOption) (*multipoolerservice.CleanupOperationResponse, error) {
 	return nil, nil
 }
 
@@ -241,14 +261,6 @@ func (m *mockMultipoolerServiceClient) StartFence(ctx context.Context, in *multi
 }
 
 func (m *mockMultipoolerServiceClient) CommitFence(ctx context.Context, in *multipoolerservice.CommitFenceRequest, opts ...grpc.CallOption) (*multipoolerservice.CommitFenceResponse, error) {
-	return nil, nil
-}
-
-func (m *mockMultipoolerServiceClient) UnfenceTablegroup(ctx context.Context, in *multipoolerservice.UnfenceTablegroupRequest, opts ...grpc.CallOption) (*multipoolerservice.UnfenceTablegroupResponse, error) {
-	return nil, nil
-}
-
-func (m *mockMultipoolerServiceClient) FlipRouting(ctx context.Context, in *multipoolerservice.FlipRoutingRequest, opts ...grpc.CallOption) (*multipoolerservice.FlipRoutingResponse, error) {
 	return nil, nil
 }
 

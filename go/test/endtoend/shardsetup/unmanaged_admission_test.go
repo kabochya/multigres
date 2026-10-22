@@ -17,7 +17,6 @@ package shardsetup
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -26,13 +25,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/multigres/multigres/go/common/protometadata"
 	multipoolerservicepb "github.com/multigres/multigres/go/pb/multipoolerservice"
 )
 
-// setServingRow writes a tablegroup's persisted serving row on the default
-// primary, standing in for the coordinator that owns these writes. backing is the
-// backing connection name, empty for a managed cohort.
 // Admission states, as the e2e tests name them.
 const (
 	admUnfenced = multipoolerservicepb.AdmissionState_ADMISSION_STATE_UNFENCED
@@ -48,53 +43,20 @@ func admStateOf(fenced bool) multipoolerservicepb.AdmissionState {
 	return admUnfenced
 }
 
-// closedRow reports whether a tablegroup refuses application work: FENCING or FENCED.
-func closedRow(row *multipoolerservicepb.TablegroupServingState) bool {
-	return row.GetState() != admUnfenced
-}
-
-func setServingRow(t *testing.T, s *ShardSetup, tablegroup, backing string, fenced bool, version int64) {
-	setServingRowState(t, s, tablegroup, backing, admStateOf(fenced), version)
-}
-
-// setServingRowState writes a tablegroup's persisted serving row in the given state.
-func setServingRowState(t *testing.T, s *ShardSetup, tablegroup, backing string, state multipoolerservicepb.AdmissionState, version int64) {
-	t.Helper()
-	ctx := t.Context()
-	conn := s.ConnectPrimaryAdmin(t)
-	require.NoError(t, protometadata.EnsureSchema(ctx, func(ctx context.Context, sql string) error {
-		_, err := conn.Exec(ctx, sql)
-		return err
-	}))
-	_, err := conn.Exec(ctx, `INSERT INTO multigres.proto_tablegroup_serving (database, tablegroup, state, version)
-VALUES ($1, $2, $3, $4)
-ON CONFLICT (database, tablegroup) DO UPDATE
-SET state = EXCLUDED.state, version = EXCLUDED.version, updated_at = now()`,
-		s.Database, tablegroup, strings.TrimPrefix(state.String(), "ADMISSION_STATE_"), version)
-	require.NoError(t, err)
-	bindTablegroup(t, s, tablegroup, backing)
-}
-
 // refreshAdmission calls RefreshAdmission on one pooler, as the coordinator does.
-func refreshAdmission(ctx context.Context, grpcPort int, database, tablegroup string, fenced bool, version int64) (*multipoolerservicepb.RefreshAdmissionResponse, error) {
-	return refreshAdmissionWithin(ctx, grpcPort, database, tablegroup, fenced, version, 3*time.Second)
+func refreshAdmission(ctx context.Context, grpcPort int, database, operation, tablegroup string, fenced bool, version int64) (*multipoolerservicepb.RefreshAdmissionResponse, error) {
+	return refreshAdmissionState(ctx, grpcPort, database, operation, tablegroup, admStateOf(fenced), version)
 }
 
-// refreshAdmissionWithin is refreshAdmission with the drain timeout the coordinator would
-// pass on from its fence request.
-func refreshAdmissionWithin(ctx context.Context, grpcPort int, database, tablegroup string, fenced bool, version int64, drain time.Duration) (*multipoolerservicepb.RefreshAdmissionResponse, error) {
-	return refreshAdmissionState(ctx, grpcPort, database, tablegroup, admStateOf(fenced), version, drain)
-}
-
-// refreshAdmissionState is refreshAdmissionWithin naming the state the coordinator expects.
-func refreshAdmissionState(ctx context.Context, grpcPort int, database, tablegroup string, state multipoolerservicepb.AdmissionState, version int64, drain time.Duration) (*multipoolerservicepb.RefreshAdmissionResponse, error) {
+// refreshAdmissionState is refreshAdmission naming the state the coordinator expects.
+func refreshAdmissionState(ctx context.Context, grpcPort int, database, operation, tablegroup string, state multipoolerservicepb.AdmissionState, version int64) (*multipoolerservicepb.RefreshAdmissionResponse, error) {
 	conn, err := grpc.NewClient(fmt.Sprintf("127.0.0.1:%d", grpcPort), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
 	return multipoolerservicepb.NewMultipoolerServiceClient(conn).RefreshAdmission(ctx, &multipoolerservicepb.RefreshAdmissionRequest{
-		Database: database, Tablegroup: tablegroup, ExpectedState: state, ExpectedVersion: version,
+		Database: database, OperationId: operation, Scope: scopeOf(tablegroup), ExpectedState: state, ExpectedVersion: version,
 	})
 }
 

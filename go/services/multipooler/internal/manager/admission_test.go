@@ -43,8 +43,8 @@ type gatedController struct {
 	gate *poolerserver.QueryPoolerServer
 }
 
-func (g gatedController) EnableAdmissionControl(external bool) {
-	g.gate.EnableAdmissionControl(external)
+func (g gatedController) EnableAdmissionControl(closesOnRoleChange bool) {
+	g.gate.EnableAdmissionControl(closesOnRoleChange)
 }
 func (g gatedController) AdmissionGeneration() uint64     { return g.gate.AdmissionGeneration() }
 func (g gatedController) OpenApplication(gen uint64) bool { return g.gate.OpenApplication(gen) }
@@ -63,11 +63,14 @@ type admissionHarness struct {
 	pm    *MultipoolerManager
 	tg    string // the tablegroup of the pooler: the default one for a managed pooler
 	gate  *poolerserver.QueryPoolerServer
-	row   atomic.Pointer[multipoolerservicepb.TablegroupServingState]
+	row   atomic.Pointer[multipoolerservicepb.AdmissionFence]
 	bound atomic.Pointer[string] // the connection the tablegroup is bound to
 	err   atomic.Pointer[error]
 	reads atomic.Int32
 }
+
+// testOperation is the operation the harness's fences belong to.
+const testOperation = "6f9619ff-8b86-4011-b42d-00c04fc964ff"
 
 func newAdmissionHarness(t *testing.T, unmanaged bool) *admissionHarness {
 	t.Helper()
@@ -93,7 +96,7 @@ func newAdmissionHarness(t *testing.T, unmanaged bool) *admissionHarness {
 	gate := poolerserver.NewQueryPoolerServer(slog.New(slog.DiscardHandler), nil, initial.Id, tg, "0-inf", nil, 0, false)
 	// Serving, so admitted requests are not rejected for the serving state.
 	require.NoError(t, gate.OnStateChange(t.Context(), servingstate.State{ServingStatus: clustermetadatapb.PoolerServingStatus_SERVING}))
-	gate.EnableAdmissionControl(false)
+	gate.EnableAdmissionControl(true)
 	pm.qsc = gatedController{mockPoolerController: &mockPoolerController{}, gate: gate}
 
 	h := &admissionHarness{pm: pm, tg: tg, gate: gate}
@@ -105,7 +108,7 @@ func newAdmissionHarness(t *testing.T, unmanaged bool) *admissionHarness {
 	pm.admission.binding = func(context.Context) (string, bool, error) {
 		return *h.bound.Load(), true, nil
 	}
-	pm.admission.reader = func(context.Context) (*multipoolerservicepb.TablegroupServingState, error) {
+	pm.admission.reader = func(context.Context) (*multipoolerservicepb.AdmissionFence, error) {
 		h.reads.Add(1)
 		if e := h.err.Load(); e != nil {
 			return nil, *e
@@ -135,8 +138,8 @@ func (h *admissionHarness) setRow(fenced bool, version int64, backing string) {
 
 func (h *admissionHarness) setRowState(state multipoolerservicepb.AdmissionState, version int64, backing string) {
 	h.bound.Store(&backing)
-	h.row.Store(&multipoolerservicepb.TablegroupServingState{
-		Tablegroup: h.tg, State: state, Version: version,
+	h.row.Store(&multipoolerservicepb.AdmissionFence{
+		OperationId: testOperation, Scope: &multipoolerservicepb.AdmissionScope{Tablegroup: h.tg}, State: state, Version: version,
 	})
 }
 
@@ -146,7 +149,7 @@ func (h *admissionHarness) refresh(fenced bool, version int64) (*multipoolerserv
 
 func (h *admissionHarness) refreshState(state multipoolerservicepb.AdmissionState, version int64) (*multipoolerservicepb.RefreshAdmissionResponse, error) {
 	return h.pm.RefreshAdmission(context.Background(), &multipoolerservicepb.RefreshAdmissionRequest{
-		Database: "db", Tablegroup: h.tg, ExpectedState: state, ExpectedVersion: version,
+		Database: "db", OperationId: testOperation, Scope: &multipoolerservicepb.AdmissionScope{Tablegroup: h.tg}, ExpectedState: state, ExpectedVersion: version,
 	})
 }
 
@@ -281,13 +284,19 @@ func TestRefreshRejectsMismatchedBacking(t *testing.T) {
 
 func TestRefreshValidatesRequest(t *testing.T) {
 	h := newAdmissionHarness(t, true)
-	call := func(db, tg string, version int64) error {
-		_, err := h.pm.RefreshAdmission(t.Context(), &multipoolerservicepb.RefreshAdmissionRequest{Database: db, Tablegroup: tg, ExpectedState: stateFenced, ExpectedVersion: version})
+	call := func(db string, scope *multipoolerservicepb.AdmissionScope, operation string, version int64) error {
+		_, err := h.pm.RefreshAdmission(t.Context(), &multipoolerservicepb.RefreshAdmissionRequest{
+			Database: db, OperationId: operation, Scope: scope, ExpectedState: stateFenced, ExpectedVersion: version,
+		})
 		return err
 	}
-	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, call("other", h.tg, 1))
-	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, call("db", "otherTG", 1))
-	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, call("db", h.tg, -1))
+	own := &multipoolerservicepb.AdmissionScope{Tablegroup: h.tg}
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, call("other", own, testOperation, 1))
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, call("db", &multipoolerservicepb.AdmissionScope{Tablegroup: "otherTG"}, testOperation, 1))
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, call("db", &multipoolerservicepb.AdmissionScope{Tablegroup: h.tg, Shard: "0-inf"}, testOperation, 1))
+	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, call("db", own, testOperation, -1))
+	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, call("db", own, "not-a-uuid", 1))
+	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, call("db", own, "", 1))
 }
 
 // TestEveryPoolerIsAdmissionControlled: admission control needs no flag, so a pooler built
@@ -354,7 +363,7 @@ func TestOpenDecisionReadBeforeAChangeIsRejected(t *testing.T) {
 	h := newAdmissionHarness(t, false)
 	h.pm.record.registered.Store(true)
 	lifecycle := admissionLifecycle{h.pm}
-	h.pm.admission.reader = func(context.Context) (*multipoolerservicepb.TablegroupServingState, error) {
+	h.pm.admission.reader = func(context.Context) (*multipoolerservicepb.AdmissionFence, error) {
 		// The role changes while the read is in flight.
 		_ = lifecycle.OnStateChange(t.Context(), servingstate.State{
 			Routing: servingstate.RoutingState{Role: servingstate.RoutingRolePrimary}, ServingStatus: clustermetadatapb.PoolerServingStatus_SERVING,
@@ -409,11 +418,11 @@ func TestRefreshClosesAndReportsWithoutWaitingForWork(t *testing.T) {
 	require.True(t, h.gate.ApplicationOpen())
 }
 
-func TestGetServingStateOnlyServedByTheDefaultPrimary(t *testing.T) {
+func TestGetRoutingStateOnlyServedByTheDefaultPrimary(t *testing.T) {
 	h := newAdmissionHarness(t, true)
-	_, err := h.pm.GetServingState(t.Context(), &multipoolerservicepb.GetServingStateRequest{Database: "db"})
+	_, err := h.pm.GetRoutingState(t.Context(), &multipoolerservicepb.GetRoutingStateRequest{Database: "db"})
 	requireCode(t, mtrpcpb.Code_UNAVAILABLE, err) // not the default primary: retryable, after rediscovery
-	_, err = h.pm.GetServingState(t.Context(), &multipoolerservicepb.GetServingStateRequest{Database: "other"})
+	_, err = h.pm.GetRoutingState(t.Context(), &multipoolerservicepb.GetRoutingStateRequest{Database: "other"})
 	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, err)
 }
 
@@ -790,67 +799,81 @@ func TestAnUnmanagedPoolersDecisionStandsAcrossAReconnect(t *testing.T) {
 	require.Equal(t, reads, h.reads.Load())
 }
 
-// fakeServingReader is a store of serving state for tests.
-type fakeServingReader struct {
-	rows       map[string]*servingRow
-	app        string
-	appVersion int64
-	err        error
+// fakeRoutingReader is a store of routing state for tests.
+type fakeRoutingReader struct {
+	snap *routingSnapshot
+	err  error
 }
 
-func (f *fakeServingReader) GetRow(_ context.Context, _, tg string) (*servingRow, error) {
+func (f *fakeRoutingReader) Snapshot(context.Context) (*routingSnapshot, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
-	return f.rows[tg], nil
+	if f.snap == nil {
+		return &routingSnapshot{}, nil
+	}
+	return f.snap, nil
 }
 
-func (f *fakeServingReader) GetRouting(context.Context, string) (string, int64, bool, error) {
-	return f.app, f.appVersion, f.app != "", f.err
-}
+// TestRoutingStateReadsNoFenceAsUnfenced: a cluster that has never fenced anything has no
+// fence (or no tables for one, which the store reports as the same); that reads as an empty
+// state, in which every scope is unfenced. Any other failure is an error, never "unfenced".
+func TestRoutingStateReadsNoFenceAsUnfenced(t *testing.T) {
+	req := &multipoolerservicepb.GetRoutingStateRequest{Database: "db"}
 
-// TestServingStateReadsAMissingRowAsUnfenced: a cluster that has never fenced anything has no
-// row for the tablegroup (or no store of rows yet, which the store reports as the same); that
-// reads as unfenced at version zero. Any other failure is an error, never "unfenced".
-func TestServingStateReadsAMissingRowAsUnfenced(t *testing.T) {
-	req := &multipoolerservicepb.GetServingStateRequest{Database: "db", Tablegroups: []string{"default", "other"}}
-
-	t.Run("no row", func(t *testing.T) {
-		resp, err := readServingState(t.Context(), &fakeServingReader{}, req)
+	t.Run("nothing", func(t *testing.T) {
+		resp, err := readRoutingState(t.Context(), &fakeRoutingReader{}, req)
 		require.NoError(t, err)
-		require.Len(t, resp.GetTablegroups(), 2)
-		for _, tg := range resp.GetTablegroups() {
-			require.Equal(t, stateUnfenced, tg.GetState())
-			require.Zero(t, tg.GetVersion())
-		}
-		require.Equal(t, []string{"default", "other"}, []string{resp.GetTablegroups()[0].GetTablegroup(), resp.GetTablegroups()[1].GetTablegroup()})
-		require.Empty(t, resp.GetAppTablegroup())
+		require.Empty(t, resp.GetFences())
+		require.Empty(t, resp.GetRules())
+		require.Empty(t, resp.GetHomeTablegroup())
+		require.Zero(t, resp.GetRoutingVersion())
+		require.False(t, resp.GetNotModified())
+		require.Equal(t, stateUnfenced, ownFenceOf(resp, "other").GetState(), "a scope that is not listed is unfenced at version zero")
+		require.Zero(t, ownFenceOf(resp, "other").GetVersion())
 	})
 
-	t.Run("rows and routing", func(t *testing.T) {
-		store := &fakeServingReader{
-			rows: map[string]*servingRow{"other": {state: stateFenced, version: 4}},
-			app:  "default", appVersion: 7,
-		}
-		resp, err := readServingState(t.Context(), store, req)
+	snap := &routingSnapshot{
+		routingVersion: 7, home: "default",
+		rules:  []ruleRow{{operationID: testOperation, from: "default", to: "other", toShard: "0-inf", createdVersion: 7}},
+		fences: []fenceRow{{operationID: testOperation, tablegroup: "other", state: stateFenced, version: 4}},
+	}
+	t.Run("fences, rules and the home", func(t *testing.T) {
+		resp, err := readRoutingState(t.Context(), &fakeRoutingReader{snap: snap}, req)
 		require.NoError(t, err)
-		require.Equal(t, stateUnfenced, resp.GetTablegroups()[0].GetState())
-		require.Equal(t, stateFenced, resp.GetTablegroups()[1].GetState())
-		require.EqualValues(t, 4, resp.GetTablegroups()[1].GetVersion())
-		require.Equal(t, "default", resp.GetAppTablegroup())
+		require.Equal(t, "default", resp.GetHomeTablegroup())
 		require.EqualValues(t, 7, resp.GetRoutingVersion())
+		require.Len(t, resp.GetRules(), 1)
+		require.Equal(t, "other", resp.GetRules()[0].GetRule().GetToTablegroup())
+		fence := ownFenceOf(resp, "other")
+		require.Equal(t, stateFenced, fence.GetState())
+		require.EqualValues(t, 4, fence.GetVersion())
+		require.Equal(t, testOperation, fence.GetOperationId())
+		require.Equal(t, stateUnfenced, ownFenceOf(resp, "default").GetState())
+	})
+
+	t.Run("not modified keeps the fences, which change without the version", func(t *testing.T) {
+		resp, err := readRoutingState(t.Context(), &fakeRoutingReader{snap: snap}, &multipoolerservicepb.GetRoutingStateRequest{Database: "db", SinceVersion: 7})
+		require.NoError(t, err)
+		require.True(t, resp.GetNotModified())
+		require.Empty(t, resp.GetHomeTablegroup())
+		require.Empty(t, resp.GetRules())
+		require.Len(t, resp.GetFences(), 1)
+		resp, err = readRoutingState(t.Context(), &fakeRoutingReader{snap: snap}, &multipoolerservicepb.GetRoutingStateRequest{Database: "db", SinceVersion: 6})
+		require.NoError(t, err)
+		require.False(t, resp.GetNotModified(), "another version is read in full")
 	})
 
 	t.Run("any other failure is an error", func(t *testing.T) {
-		_, err := readServingState(t.Context(), &fakeServingReader{err: errors.New("permission denied")}, req)
+		_, err := readRoutingState(t.Context(), &fakeRoutingReader{err: errors.New("permission denied")}, req)
 		require.Error(t, err)
 	})
 
 	t.Run("no store configured", func(t *testing.T) {
-		defer func(old func(*MultipoolerManager) servingStore) { newServingStore = old }(newServingStore)
-		newServingStore = nil
+		defer func(old func(*MultipoolerManager) routingStore) { newRoutingStore = old }(newRoutingStore)
+		newRoutingStore = nil
 		pm, _ := newTestManagerWithMock(t, constants.DefaultTableGroup, "0-inf")
-		_, err := pm.servingStore()
+		_, err := pm.routingStore()
 		requireCode(t, mtrpcpb.Code_UNIMPLEMENTED, err)
 	})
 }

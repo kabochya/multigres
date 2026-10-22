@@ -55,30 +55,46 @@ func TestThePrototypeRoutingSourceIsRegisteredAndOffUnlessConfigured(t *testing.
 	require.NoError(t, off.Start(t.Context(), nil, nil, slog.Default()), "not configured: nothing started, nothing needed")
 }
 
-// routingServer answers GetServingState from a scripted pointer, as the default primary does.
+// routingServer answers GetRoutingState from a scripted state, as the default primary does.
 type routingServer struct {
 	multipoolerservicepb.MultipoolerServiceClient
 	mu      sync.Mutex
-	app     string
+	home    string
+	rules   []*multipoolerservicepb.RoutingRuleState
 	version int64
 	err     error
-	lastReq *multipoolerservicepb.GetServingStateRequest
+	lastReq *multipoolerservicepb.GetRoutingStateRequest
 }
 
-func (r *routingServer) GetServingState(_ context.Context, in *multipoolerservicepb.GetServingStateRequest, _ ...grpc.CallOption) (*multipoolerservicepb.GetServingStateResponse, error) {
+func (r *routingServer) GetRoutingState(_ context.Context, in *multipoolerservicepb.GetRoutingStateRequest, _ ...grpc.CallOption) (*multipoolerservicepb.GetRoutingStateResponse, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.lastReq = in
 	if r.err != nil {
 		return nil, r.err
 	}
-	return &multipoolerservicepb.GetServingStateResponse{AppTablegroup: r.app, RoutingVersion: r.version}, nil
+	if in.GetSinceVersion() > 0 && in.GetSinceVersion() == r.version {
+		return &multipoolerservicepb.GetRoutingStateResponse{RoutingVersion: r.version, NotModified: true}, nil
+	}
+	return &multipoolerservicepb.GetRoutingStateResponse{RoutingVersion: r.version, HomeTablegroup: r.home, Rules: r.rules}, nil
 }
 
-func (r *routingServer) set(app string, version int64, err error) {
+// set scripts a state with no rule: the home tablegroup receives the traffic.
+func (r *routingServer) set(home string, version int64, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.app, r.version, r.err = app, version, err
+	r.home, r.rules, r.version, r.err = home, nil, version, err
+}
+
+// setRule scripts a home tablegroup and a rule that moves its traffic.
+func (r *routingServer) setRule(home, to string, version int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.home, r.version, r.err = home, version, nil
+	r.rules = []*multipoolerservicepb.RoutingRuleState{{
+		OperationId: "0b0c0d0e-0000-4000-8000-000000000001", CreatedVersion: version,
+		Rule: &multipoolerservicepb.RoutingRule{FromTablegroup: home, ToTablegroup: to, ToShard: "0-inf"},
+	}}
 }
 
 // fakeControl reaches a default primary the test scripts, or none.
@@ -104,7 +120,7 @@ func currentOf(t *testing.T, sink *gatewayRouting) (string, bool) {
 	return sink.routing.Current()
 }
 
-func TestRoutingPollerAppliesTheDefaultPrimarysPointer(t *testing.T) {
+func TestRoutingPollerAppliesTheDefaultPrimarysRouting(t *testing.T) {
 	poller, sink, server := pollerFixture(t)
 	server.set("migrateTG", 1, nil)
 
@@ -113,12 +129,49 @@ func TestRoutingPollerAppliesTheDefaultPrimarysPointer(t *testing.T) {
 	require.True(t, known)
 	assert.Equal(t, "migrateTG", tg)
 	assert.Equal(t, "db", server.lastReq.GetDatabase())
-	assert.Empty(t, server.lastReq.GetTablegroups(), "the poller reads only the routing pointer")
+	assert.Zero(t, server.lastReq.GetSinceVersion(), "the first read asks for everything")
 
-	server.set("destTG", 2, nil)
+	// A rule that applies to the home tablegroup sends the traffic to its destination, once.
+	server.setRule("migrateTG", "destTG", 2)
 	poller.pollOnce(t.Context())
 	tg, _ = currentOf(t, sink)
 	assert.Equal(t, "destTG", tg)
+
+	// Nothing changed: the default primary answers not_modified and the poller keeps what it has.
+	poller.pollOnce(t.Context())
+	assert.EqualValues(t, 2, server.lastReq.GetSinceVersion(), "later reads name the version already applied")
+	tg, _ = currentOf(t, sink)
+	assert.Equal(t, "destTG", tg)
+
+	// A fold: the destination is the home tablegroup, and there is no rule.
+	server.set("destTG", 3, nil)
+	poller.pollOnce(t.Context())
+	tg, _ = currentOf(t, sink)
+	assert.Equal(t, "destTG", tg)
+
+	// A revert of a rule that applied to another tablegroup does not move the traffic.
+	server.setRule("otherTG", "elsewhere", 4)
+	poller.pollOnce(t.Context())
+	tg, _ = currentOf(t, sink)
+	assert.Equal(t, "elsewhere", tg, "the rule applies to the home tablegroup of that state")
+}
+
+func TestEffectiveTablegroupAppliesOnlyARuleOfTheHomeTablegroupAndOnlyOnce(t *testing.T) {
+	rule := func(from, to string) *multipoolerservicepb.RoutingRuleState {
+		return &multipoolerservicepb.RoutingRuleState{Rule: &multipoolerservicepb.RoutingRule{FromTablegroup: from, ToTablegroup: to}}
+	}
+	for name, tc := range map[string]struct {
+		resp *multipoolerservicepb.GetRoutingStateResponse
+		want string
+	}{
+		"no rule":                   {&multipoolerservicepb.GetRoutingStateResponse{HomeTablegroup: "a"}, "a"},
+		"a rule of the home":        {&multipoolerservicepb.GetRoutingStateResponse{HomeTablegroup: "a", Rules: []*multipoolerservicepb.RoutingRuleState{rule("a", "b")}}, "b"},
+		"a rule of another":         {&multipoolerservicepb.GetRoutingStateResponse{HomeTablegroup: "a", Rules: []*multipoolerservicepb.RoutingRuleState{rule("c", "d")}}, "a"},
+		"a rule is not followed on": {&multipoolerservicepb.GetRoutingStateResponse{HomeTablegroup: "a", Rules: []*multipoolerservicepb.RoutingRuleState{rule("a", "b"), rule("b", "c")}}, "b"},
+		"no home":                   {&multipoolerservicepb.GetRoutingStateResponse{}, ""},
+	} {
+		t.Run(name, func(t *testing.T) { assert.Equal(t, tc.want, effectiveTablegroup(tc.resp)) })
+	}
 }
 
 func TestRoutingPollerKeepsLastKnownRoutingOnFailureAndFailsClosedBefore(t *testing.T) {
@@ -130,7 +183,7 @@ func TestRoutingPollerKeepsLastKnownRoutingOnFailureAndFailsClosedBefore(t *test
 	_, known := currentOf(t, sink)
 	assert.False(t, known)
 
-	// An empty pointer (no routing row) is not routing either.
+	// An empty home tablegroup (no catalog state) is not routing either.
 	server.set("", 0, nil)
 	poller.pollOnce(t.Context())
 	_, known = currentOf(t, sink)

@@ -161,6 +161,62 @@ func scenarioCutoverAndRollbackUnderLoad(t *testing.T, f *migrationFixture) {
 	// it held then.
 	m.requireDestFrozen(ctx, "at the end of the test")
 	t.Logf("%d writes acknowledged across a cutover and a rollback; none lost or duplicated", len(ackedSet))
+
+	// The rollback is over. The destination is still fenced from it, and cleanup would delete that
+	// fence and leave its poolers closed with no fence to say why, so it is unfenced first; then
+	// the operation is cleaned up, and nothing of it is left in the catalog.
+	require.NoError(t, f.lib().UnfenceUntilReached(ctx, "default", m.destFenceVersion))
+	m.Cleanup(ctx)
+	requireNoRoutingState(t, f)
+	for name, inst := range f.def.Multipoolers {
+		requireAdmits(t, inst.Multipooler.GrpcPort, "default pooler "+name+" admits after the rollback")
+	}
+	requireAdmits(t, f.src.grpcPort, "the source admits after the rollback")
+}
+
+// scenarioCutoverCompleteAndCleanup: a cutover, then the fold, then the cleanup. The fold makes the
+// destination the home tablegroup and empties the routing without moving the traffic, and needs
+// no fence. The source stays FENCED through it, until its poolers are decommissioned, which a
+// gateway that has not seen the move could otherwise still reach. Cleanup deletes the fences, and
+// nothing of the operation is left.
+func scenarioCutoverCompleteAndCleanup(t *testing.T, f *migrationFixture) {
+	ctx := t.Context()
+	m := &migrator{f: f}
+	m.Cutover(ctx)
+	destText := portOf(t, f.def)
+	probe := appConnWhenRouted(t, f.gatewayPort)
+	require.Eventually(t, func() bool {
+		port, err := backendPort(ctx, probe)
+		return err == nil && port == destText
+	}, 30*time.Second, 200*time.Millisecond, "the gateway never moved to the destination")
+	state := f.control().state(ctx)
+	require.Len(t, state.Rules, 1, "after the cutover the routing is a rule")
+	require.Equal(t, "migrateTG", state.HomeTablegroup)
+
+	m.Complete(ctx)
+	require.False(t, admits(t, f.src.grpcPort), "the source stays fenced after the fold, until its poolers are decommissioned")
+	require.Equal(t, admFenced, stateOfFence(f.control().state(ctx), "migrateTG"))
+	port, err := backendPort(ctx, probe)
+	require.NoError(t, err)
+	require.Equal(t, destText, port, "the fold did not move the traffic")
+
+	// The source's poolers would be decommissioned here. The test reopens it instead, because the
+	// cluster it runs on is shared, and then cleans up.
+	require.NoError(t, f.lib().UnfenceUntilReached(ctx, "migrateTG", m.srcFenceVersion))
+	m.Cleanup(ctx)
+	requireNoRoutingState(t, f)
+}
+
+// requireNoRoutingState requires that no routing rule and no admission fence is left.
+func requireNoRoutingState(t *testing.T, f *migrationFixture) {
+	t.Helper()
+	ctx := t.Context()
+	conn := f.adminConn(f.def)
+	for _, table := range []string{"routing_rule", "admission_fence"} {
+		var n int
+		require.NoError(t, conn.QueryRow(ctx, "SELECT count(*) FROM multigres."+table).Scan(&n))
+		require.Zero(t, n, "multigres.%s is empty", table)
+	}
 }
 
 func portOf(t *testing.T, s *ShardSetup) string {
@@ -176,7 +232,7 @@ func portOf(t *testing.T, s *ShardSetup) string {
 // tablegroup, which is the destination and the cohort that holds the coordinator.
 // The fence is persisted before the members are asked, so it survives the failover, and
 // nothing undoes it: the migrator, which is waiting on the call, gets the error, reads
-// GetServingState, and unfences the tablegroup at the version it read, through the new
+// GetRoutingState, and unfences the tablegroup at the version it read, through the new
 // default primary. Then a fence at a fresh version works, and the delayed retry of the
 // first, which names the version before, is rejected.
 func TestDefaultPrimaryFailoverDuringFencing(t *testing.T) {
@@ -221,11 +277,11 @@ func defaultPrimaryFailoverDuringFencing(t *testing.T, fenced string) {
 	// The coordinator has decided: the fence is persisted, and the call is waiting on the
 	// open transaction.
 	require.Eventually(t, func() bool {
-		resp, err := f.control().tryState(ctx, fenced)
+		resp, err := f.control().tryState(ctx)
 		if err != nil {
 			return false
 		}
-		st := resp.Tablegroups[0]
+		st := fenceOrUnfenced(resp, fenced)
 		return st.State == admFencing && st.Version == before+1
 	}, 20*time.Second, 100*time.Millisecond)
 	select {
@@ -247,43 +303,45 @@ func defaultPrimaryFailoverDuringFencing(t *testing.T, fenced string) {
 	// The new default primary reads the same persisted row, and answers the control plane
 	// although its own tablegroup may be the one being fenced. Nothing undoes the fence.
 	_ = long.Close(ctx)
-	var st *multipoolerservicepb.TablegroupServingState
+	var st *multipoolerservicepb.AdmissionFence
 	require.Eventually(t, func() bool {
-		resp, err := f.control().tryState(ctx, fenced)
+		resp, err := f.control().tryState(ctx)
 		if err != nil {
 			return false
 		}
-		st = resp.Tablegroups[0]
+		st = fenceOrUnfenced(resp, fenced)
 		return true
 	}, 60*time.Second, 500*time.Millisecond)
 	require.Equal(t, admFencing, st.State, "a fence that was committed survives the failover of its coordinator, as FENCING: its members were not all confirmed clean")
 	require.EqualValues(t, before+1, st.Version)
 
-	// A flip refuses it, whichever way the migrator reached this state: the incomplete fence
-	// is not a completed one.
-	app := f.control().state(ctx).AppTablegroup
-	other := "default"
-	if app == "default" {
-		other = "migrateTG"
+	// The routing refuses it, whichever way the migrator reached this state: the incomplete fence
+	// is not a completed one. Before the cutover that is a switch from the source to the default
+	// tablegroup; after it, a revert of the rule.
+	effective := effectiveTablegroup(f.control().state(ctx))
+	if fenced == "default" {
+		_, err := f.control().revertRouting(ctx)
+		require.Equal(t, codes.FailedPrecondition, status.Code(err), "a revert must refuse a fence that is not complete: %v", err)
+	} else {
+		_, err := f.control().switchRouting(ctx, "migrateTG", "default")
+		require.Equal(t, codes.FailedPrecondition, status.Code(err), "a switch must refuse a fence that is not complete: %v", err)
 	}
-	_, err := f.control().flip(ctx, app, other)
-	require.Equal(t, codes.FailedPrecondition, status.Code(err), "a flip must refuse a fence that is not complete: %v", err)
-	require.Equal(t, app, f.control().state(ctx).AppTablegroup, "the traffic did not move")
+	require.Equal(t, effective, effectiveTablegroup(f.control().state(ctx)), "the traffic did not move")
 
 	// The migrator resumes the same fence through the new default primary: the transaction
 	// that held it is gone, every member is clean, and it completes at the version it has.
 	require.Eventually(t, func() bool {
 		resp, err := f.control().fenceAt(ctx, fenced, st.Version, 60*time.Second)
-		return err == nil && resp.State.State == admFenced && resp.State.Version == st.Version
+		return err == nil && resp.Fence.State == admFenced && resp.Fence.Version == st.Version
 	}, 90*time.Second, time.Second, "the resumed fence completes")
 
 	// The migrator's policy on any error: read the state; the tablegroup is fenced and the
-	// cutover has not flipped, so unfence it at the version read, and fence later at a fresh one.
+	// cutover has not switched, so unfence it at the version read, and fence later at a fresh one.
 	require.Eventually(t, func() bool {
 		_, err := f.control().unfenceAt(ctx, fenced, st.Version)
 		return err == nil
 	}, 90*time.Second, time.Second, "the migrator unfences the fence it found, through the new default primary")
-	st = f.control().state(ctx, fenced).Tablegroups[0]
+	st = f.control().fenceRow(ctx, fenced)
 	require.Equal(t, admUnfenced, st.State)
 	require.EqualValues(t, before+2, st.Version)
 	if fenced == "default" {
@@ -297,13 +355,13 @@ func defaultPrimaryFailoverDuringFencing(t *testing.T, fenced string) {
 
 	// The delayed retry of the fence, naming the version before it, is rejected; a fence at
 	// the current version works.
-	_, err = f.control().fenceAt(ctx, fenced, before, 30*time.Second)
+	_, err := f.control().fenceAt(ctx, fenced, before, 30*time.Second)
 	require.Equal(t, codes.FailedPrecondition, status.Code(err), "%v", err)
 	require.Eventually(t, func() bool {
 		resp, err := f.control().fenceAt(ctx, fenced, before+2, 30*time.Second)
-		return err == nil && resp.State.State == admFenced
+		return err == nil && resp.Fence.State == admFenced
 	}, 90*time.Second, time.Second, "a fence naming the current version must complete")
-	st = f.control().state(ctx, fenced).Tablegroups[0]
+	st = f.control().fenceRow(ctx, fenced)
 	require.Equal(t, admFenced, st.State)
 	require.EqualValues(t, before+3, st.Version)
 	if fenced == "migrateTG" {
@@ -313,7 +371,7 @@ func defaultPrimaryFailoverDuringFencing(t *testing.T, fenced string) {
 
 // TestDefaultPrimaryFailoverAfterCutover fails over the default primary after the
 // cutover, with writers running. The default cohort is the destination, so the
-// failover moves the coordinator and the routing pointer along with the application's
+// failover moves the coordinator and the routing along with the application's
 // data: all three must survive. It must not reopen the source, must not change the
 // persisted admission decisions or the routing, must not lose a write, and the new
 // primary's coordinator must be able to drive the rollback.
@@ -334,7 +392,7 @@ func TestDefaultPrimaryFailoverAfterCutover(t *testing.T) {
 	acked := w.ackedCount()
 	waitForAcks(t, w, acked+50)
 
-	before := f.control().state(ctx, "migrateTG", "default")
+	before := f.control().state(ctx)
 
 	logOffset := gatewayLogSize(t, f.gatewayPort)
 	failOverPrimary(t, f.def)
@@ -358,12 +416,13 @@ func TestDefaultPrimaryFailoverAfterCutover(t *testing.T) {
 
 	// Admission and routing are exactly as the cutover left them, as the new
 	// primary's coordinator reports them.
-	after := f.control().state(ctx, "migrateTG", "default")
-	require.Equal(t, before.AppTablegroup, after.AppTablegroup)
+	after := f.control().state(ctx)
+	require.Equal(t, effectiveTablegroup(before), effectiveTablegroup(after))
 	require.Equal(t, before.RoutingVersion, after.RoutingVersion)
-	for i := range before.Tablegroups {
-		require.Equal(t, before.Tablegroups[i].State, after.Tablegroups[i].State, before.Tablegroups[i].Tablegroup)
-		require.Equal(t, before.Tablegroups[i].Version, after.Tablegroups[i].Version, before.Tablegroups[i].Tablegroup)
+	require.Len(t, after.Rules, len(before.Rules))
+	for _, tg := range []string{"migrateTG", "default"} {
+		require.Equal(t, fenceOrUnfenced(before, tg).State, fenceOrUnfenced(after, tg).State, tg)
+		require.Equal(t, fenceOrUnfenced(before, tg).Version, fenceOrUnfenced(after, tg).Version, tg)
 	}
 	require.False(t, admits(t, f.src.grpcPort), "a default-primary failover must not reopen the source")
 
@@ -503,7 +562,7 @@ func scenarioSessionsHoldingState(t *testing.T, f *migrationFixture) {
 	require.Equal(t, destText, port)
 	require.NoError(t, prepared.QueryRow(ctx, "count_rows", int64(0)).Scan(&one), "Bind and Execute of a prepared statement across the flip")
 	sd, err = prepared.Prepare(ctx, "count_again", "SELECT id, writer FROM ledger")
-	require.NoError(t, err, "Parse and Describe across the flip")
+	require.NoError(t, err, "Parse and Describe across the switch")
 	require.Len(t, sd.Fields, 2)
 	port, err = backendPort(ctx, prepared)
 	require.NoError(t, err)
@@ -591,7 +650,7 @@ func requireSomeMemberBusy(t *testing.T, results map[string]*multipoolerservicep
 // decide.
 func requireStillFenced(t *testing.T, f *migrationFixture, tablegroup string, versionBefore int64, poolerPort int) {
 	t.Helper()
-	st := f.control().state(t.Context(), tablegroup).Tablegroups[0]
+	st := f.control().fenceRow(t.Context(), tablegroup)
 	require.Equal(t, admFencing, st.State, "a fence that could not complete stays FENCING")
 	require.EqualValues(t, versionBefore+1, st.Version, "and wrote nothing more")
 	require.False(t, admits(t, poolerPort), "the pooler's gate stays closed")
@@ -603,7 +662,7 @@ func requireStillFenced(t *testing.T, f *migrationFixture, tablegroup string, ve
 func giveUp(t *testing.T, f *migrationFixture, tablegroup string, versionBefore int64, poolerPort int) {
 	t.Helper()
 	require.NoError(t, f.lib().UnfenceUntilReached(t.Context(), tablegroup, versionBefore+1))
-	st := f.control().state(t.Context(), tablegroup).Tablegroups[0]
+	st := f.control().fenceRow(t.Context(), tablegroup)
 	require.Equal(t, admUnfenced, st.State)
 	require.EqualValues(t, versionBefore+2, st.Version, "the fence and the unfence each moved the version once")
 	requireAdmits(t, poolerPort, "the pooler admits again after the unfence")

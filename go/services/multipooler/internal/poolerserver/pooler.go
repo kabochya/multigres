@@ -84,14 +84,14 @@ type QueryPoolerServer struct {
 	// serving status and backend health: only the admission actuator may reopen
 	// it. admissionControlled is set once, before any work, by EnableAdmissionControl,
 	// which the manager calls on every pooler; it makes every role or serving-status
-	// change of a managed pooler close the gate until the persisted admission state is
+	// change of a pooler whose backend asks for it close the gate until the persisted admission state is
 	// read again. admissionGeneration orders closes against opens so a read begun
 	// before a change cannot open the gate afterwards. activeRequests counts
 	// admitted requests that have not finished.
 	applicationBlocked  bool
 	applicationShutdown bool // the gate was closed for good by ShutdownApplication
 	admissionControlled bool
-	externalBackend     bool // the backend is an external source; see EnableAdmissionControl
+	closesOnRoleChange  bool // a role or serving change closes the gate; see EnableAdmissionControl
 	admissionGeneration uint64
 	activeRequests      int
 	requestsChanged     chan struct{}
@@ -212,11 +212,11 @@ func (s *QueryPoolerServer) OnStateChange(ctx context.Context, state servingstat
 	routingRole := state.Routing.Role
 	servingStatus := state.ServingStatus
 	s.mu.Lock()
-	if s.admissionControlled && !s.externalBackend && (s.routingRole != routingRole || s.servingStatus != servingStatus) {
-		// A role or serving change invalidates the admission decision of a managed pooler,
-		// whose replica may have been promoted: an unmanaged pooler's source is writable
-		// whatever role it reports, so its decision stands. Close
-		// synchronously, before the new state is visible to any request.
+	if s.admissionControlled && s.closesOnRoleChange && (s.routingRole != routingRole || s.servingStatus != servingStatus) {
+		// A role or serving change invalidates the admission decision of a pooler whose
+		// backend asks for it (its replica may have been promoted); one whose backend does
+		// not keeps its decision. Close synchronously, before the new state is visible to
+		// any request.
 		s.applicationBlocked = true
 		s.admissionGeneration++
 	}

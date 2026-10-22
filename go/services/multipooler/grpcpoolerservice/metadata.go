@@ -25,17 +25,17 @@ import (
 	"github.com/multigres/multigres/go/services/multipooler/internal/poolerserver"
 )
 
-// serveMetadata runs one call of the manager's metadata service and converts its error for
-// gRPC. An error that carries a gRPC status with details, such as a fence's per-member
+// serveControl runs one call of one of the manager's control-plane services and converts its
+// error for gRPC. An error that carries a gRPC status with details, such as a fence's per-member
 // results, is passed through as it is; any other keeps the message context it was wrapped in.
-func serveMetadata[Req, Resp any](
+func serveControl[P, Req, Resp any](
 	ctx context.Context,
-	s *poolerService,
+	provider func() (P, error),
 	req Req,
-	call func(poolerserver.MetadataProvider, context.Context, Req) (Resp, error),
+	call func(P, context.Context, Req) (Resp, error),
 ) (Resp, error) {
 	var zero Resp
-	p, err := s.pooler.MetadataProvider()
+	p, err := provider()
 	if err != nil {
 		return zero, mterrors.ToGRPC(err)
 	}
@@ -52,10 +52,9 @@ func serveMetadata[Req, Resp any](
 	return resp, nil
 }
 
-// GetTablegroupBinding returns the connection a tablegroup is bound to. Only the default
-// primary serves it; the manager enforces that.
-func (s *poolerService) GetTablegroupBinding(ctx context.Context, req *multipoolerpb.GetTablegroupBindingRequest) (*multipoolerpb.GetTablegroupBindingResponse, error) {
-	return serveMetadata(ctx, s, req, poolerserver.MetadataProvider.GetTablegroupBinding)
+// serveMetadata runs one call of the manager's metadata service.
+func serveMetadata[Req, Resp any](ctx context.Context, s *poolerService, req Req, call func(poolerserver.MetadataProvider, context.Context, Req) (Resp, error)) (Resp, error) {
+	return serveControl(ctx, s.pooler.MetadataProvider, req, call)
 }
 
 // GetBackingConnection returns a named backing connection. Only the default
@@ -64,39 +63,8 @@ func (s *poolerService) GetBackingConnection(ctx context.Context, req *multipool
 	return serveMetadata(ctx, s, req, poolerserver.MetadataProvider.GetBackingConnection)
 }
 
-// GetServingState returns the authoritative routing and admission metadata. Only
-// the default primary serves it.
-func (s *poolerService) GetServingState(ctx context.Context, req *multipoolerpb.GetServingStateRequest) (*multipoolerpb.GetServingStateResponse, error) {
-	return serveMetadata(ctx, s, req, poolerserver.MetadataProvider.GetServingState)
-}
-
-// RefreshAdmission re-reads and applies this pooler's application admission. It
-// bypasses the application gate by construction: it is not a query-path request.
-func (s *poolerService) RefreshAdmission(ctx context.Context, req *multipoolerpb.RefreshAdmissionRequest) (*multipoolerpb.RefreshAdmissionResponse, error) {
-	return serveMetadata(ctx, s, req, poolerserver.MetadataProvider.RefreshAdmission)
-}
-
-// StartFence starts the fence of a tablegroup. Only the default primary serves it. A start
-// that some member did not complete carries the per-member results, which serveMetadata
-// passes through.
-func (s *poolerService) StartFence(ctx context.Context, req *multipoolerpb.StartFenceRequest) (*multipoolerpb.StartFenceResponse, error) {
-	return serveMetadata(ctx, s, req, poolerserver.MetadataProvider.StartFence)
-}
-
-// CommitFence completes the fence of a tablegroup when every member is clean. Only the
-// default primary serves it. A commit that some member did not allow carries the
-// per-member results, which serveMetadata passes through.
-func (s *poolerService) CommitFence(ctx context.Context, req *multipoolerpb.CommitFenceRequest) (*multipoolerpb.CommitFenceResponse, error) {
-	return serveMetadata(ctx, s, req, poolerserver.MetadataProvider.CommitFence)
-}
-
-// UnfenceTablegroup unfences a tablegroup. Only the default primary serves it.
-func (s *poolerService) UnfenceTablegroup(ctx context.Context, req *multipoolerpb.UnfenceTablegroupRequest) (*multipoolerpb.UnfenceTablegroupResponse, error) {
-	return serveMetadata(ctx, s, req, poolerserver.MetadataProvider.UnfenceTablegroup)
-}
-
-// FlipRouting moves application traffic between two fenced tablegroups. Only the
-// default primary serves it.
-func (s *poolerService) FlipRouting(ctx context.Context, req *multipoolerpb.FlipRoutingRequest) (*multipoolerpb.FlipRoutingResponse, error) {
-	return serveMetadata(ctx, s, req, poolerserver.MetadataProvider.FlipRouting)
+// GetTablegroupBinding returns the connection a tablegroup is bound to. Only the default
+// primary serves it; the manager enforces that.
+func (s *poolerService) GetTablegroupBinding(ctx context.Context, req *multipoolerpb.GetTablegroupBindingRequest) (*multipoolerpb.GetTablegroupBindingResponse, error) {
+	return serveMetadata(ctx, s, req, poolerserver.MetadataProvider.GetTablegroupBinding)
 }

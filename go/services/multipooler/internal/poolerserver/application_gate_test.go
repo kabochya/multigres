@@ -40,7 +40,7 @@ func newGatedTestServer(t *testing.T) *QueryPoolerServer {
 	s := newStartRequestTestServer()
 	s.servingStatus = clustermetadatapb.PoolerServingStatus_SERVING
 	s.routingRole = servingstate.RoutingRolePrimary // the writable leader: its server is checked
-	s.EnableAdmissionControl(false)
+	s.EnableAdmissionControl(true)
 	require.True(t, s.OpenApplication(s.AdmissionGeneration()))
 	return s
 }
@@ -54,7 +54,7 @@ func TestApplicationGateClosedByDefaultWhenAdmissionControlled(t *testing.T) {
 
 	s = newStartRequestTestServer()
 	s.servingStatus = clustermetadatapb.PoolerServingStatus_SERVING
-	s.EnableAdmissionControl(false)
+	s.EnableAdmissionControl(true)
 	// Closed until its admission state has been read: one signal, MTF02, whatever closed
 	// the gate.
 	_, err = s.BeginRequest(nil, RequestSingleQuery)
@@ -66,7 +66,7 @@ func TestApplicationGateClosedByDefaultWhenAdmissionControlled(t *testing.T) {
 func TestClosedGateStillAdmitsControlRequestsAndOpenReservedWork(t *testing.T) {
 	s := newStartRequestTestServer()
 	s.servingStatus = clustermetadatapb.PoolerServingStatus_SERVING
-	s.EnableAdmissionControl(false)
+	s.EnableAdmissionControl(true)
 
 	// Control and metadata requests (credential lookups) bypass the gate.
 	require.NoError(t, s.StartRequest(nil, RequestNewReservation))
@@ -160,7 +160,7 @@ func TestFenceNowClosesAnOpenGate(t *testing.T) {
 func TestControlRequestsPassAClosedGateOnlyWhenTheyReserveNothing(t *testing.T) {
 	s := newStartRequestTestServer()
 	s.servingStatus = clustermetadatapb.PoolerServingStatus_SERVING
-	s.EnableAdmissionControl(false)
+	s.EnableAdmissionControl(true)
 	control := &query.Target{Control: true}
 
 	release, err := s.BeginRequest(control, RequestSingleQuery)

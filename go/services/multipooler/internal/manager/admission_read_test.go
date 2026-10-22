@@ -33,7 +33,7 @@ import (
 // defaultLeaderStub is a default primary whose answer to GetServingState a test chooses.
 type defaultLeaderStub struct {
 	multipoolerservicepb.UnimplementedMultipoolerServiceServer
-	answer   func() (*multipoolerservicepb.GetServingStateResponse, error)
+	answer   func() (*multipoolerservicepb.GetRoutingStateResponse, error)
 	binding  func() (*multipoolerservicepb.GetTablegroupBindingResponse, error)
 	accepted *atomic.Int32
 }
@@ -52,7 +52,7 @@ func (l *countingListener) Accept() (net.Conn, error) {
 	return c, err
 }
 
-func (s *defaultLeaderStub) GetServingState(context.Context, *multipoolerservicepb.GetServingStateRequest) (*multipoolerservicepb.GetServingStateResponse, error) {
+func (s *defaultLeaderStub) GetRoutingState(context.Context, *multipoolerservicepb.GetRoutingStateRequest) (*multipoolerservicepb.GetRoutingStateResponse, error) {
 	return s.answer()
 }
 
@@ -93,26 +93,26 @@ func pointAtDefaultLeader(t *testing.T, h *admissionHarness, stub *defaultLeader
 	h.pm.config.TopoClient = ts
 	h.pm.admission.reader = nil
 	h.pm.admission.binding = nil
-	withAStoreOfServingState(t)
+	withARoutingStore(t)
 }
 
 // withNoStores makes the build one that has neither a store of serving state nor a directory
 // of backing connections.
 func withNoStores(t *testing.T) {
 	t.Helper()
-	oldServing, oldDirectory := newServingStore, newConnectionDirectory
-	newServingStore, newConnectionDirectory = nil, nil
-	t.Cleanup(func() { newServingStore, newConnectionDirectory = oldServing, oldDirectory })
+	oldServing, oldDirectory := newRoutingStore, newConnectionDirectory
+	newRoutingStore, newConnectionDirectory = nil, nil
+	t.Cleanup(func() { newRoutingStore, newConnectionDirectory = oldServing, oldDirectory })
 }
 
-// withAStoreOfServingState makes the build one that has a store of serving state, as the
+// withARoutingStore makes the build one that has a store of serving state, as the
 // default primary of a cluster that can fence does; without one no pooler reads admission
 // state at all.
-func withAStoreOfServingState(t *testing.T) {
+func withARoutingStore(t *testing.T) {
 	t.Helper()
-	old := newServingStore
-	newServingStore = func(*MultipoolerManager) servingStore { return nil }
-	t.Cleanup(func() { newServingStore = old })
+	old := newRoutingStore
+	newRoutingStore = func(*MultipoolerManager) routingStore { return nil }
+	t.Cleanup(func() { newRoutingStore = old })
 }
 
 // TestWithNoStoreOfServingStateEveryPoolerOpensWithoutReading: nothing can have fenced a
@@ -136,7 +136,7 @@ func TestWithNoStoreOfServingStateEveryPoolerOpensWithoutReading(t *testing.T) {
 	t.Run("the default primary reading its own state", func(t *testing.T) {
 		h := newAdmissionHarness(t, false)
 		h.pm.admission.reader = nil
-		row, err := h.pm.readTablegroupServing(t.Context())
+		row, err := h.pm.readOwnFence(t.Context())
 		require.NoError(t, err)
 		require.Equal(t, stateUnfenced, row.GetState())
 	})
@@ -144,54 +144,63 @@ func TestWithNoStoreOfServingStateEveryPoolerOpensWithoutReading(t *testing.T) {
 
 // TestAdmissionReadOfAnOldOrUnreachableDefaultLeader: a default primary that does not serve
 // admission state has never fenced anything, so its tablegroup reads as unfenced and the
-// pooler opens; a default primary that fails any other way, or says fenced, leaves the gate
+// pooler opens, as it does when no fence names its tablegroup; a default primary that fails any other way, or says fenced, leaves the gate
 // closed. A pooler never opens on a failure it cannot read as "never fenced".
 func TestAdmissionReadOfAnOldOrUnreachableDefaultLeader(t *testing.T) {
 	for name, tc := range map[string]struct {
-		answer func() (*multipoolerservicepb.GetServingStateResponse, error)
+		answer func() (*multipoolerservicepb.GetRoutingStateResponse, error)
 		opens  bool
 	}{
 		"unimplemented": {
-			answer: func() (*multipoolerservicepb.GetServingStateResponse, error) {
-				return nil, status.Error(codes.Unimplemented, "unknown method GetServingState")
+			answer: func() (*multipoolerservicepb.GetRoutingStateResponse, error) {
+				return nil, status.Error(codes.Unimplemented, "unknown method GetRoutingState")
 			},
 			opens: true,
 		},
 		"unfenced row": {
-			answer: func() (*multipoolerservicepb.GetServingStateResponse, error) {
-				return &multipoolerservicepb.GetServingStateResponse{Tablegroups: []*multipoolerservicepb.TablegroupServingState{{Tablegroup: "default", State: stateUnfenced, Version: 4}}}, nil
+			answer: func() (*multipoolerservicepb.GetRoutingStateResponse, error) {
+				return &multipoolerservicepb.GetRoutingStateResponse{Fences: []*multipoolerservicepb.AdmissionFence{{Scope: &multipoolerservicepb.AdmissionScope{Tablegroup: "default"}, State: stateUnfenced, Version: 4}}}, nil
 			},
 			opens: true,
 		},
 		"fenced row": {
-			answer: func() (*multipoolerservicepb.GetServingStateResponse, error) {
-				return &multipoolerservicepb.GetServingStateResponse{Tablegroups: []*multipoolerservicepb.TablegroupServingState{{Tablegroup: "default", State: stateFencing, Version: 5}}}, nil
+			answer: func() (*multipoolerservicepb.GetRoutingStateResponse, error) {
+				return &multipoolerservicepb.GetRoutingStateResponse{Fences: []*multipoolerservicepb.AdmissionFence{{Scope: &multipoolerservicepb.AdmissionScope{Tablegroup: "default"}, State: stateFencing, Version: 5}}}, nil
 			},
 		},
 		"unavailable": {
-			answer: func() (*multipoolerservicepb.GetServingStateResponse, error) {
+			answer: func() (*multipoolerservicepb.GetRoutingStateResponse, error) {
 				return nil, status.Error(codes.Unavailable, "the default primary is failing over")
 			},
 		},
 		"internal": {
-			answer: func() (*multipoolerservicepb.GetServingStateResponse, error) {
+			answer: func() (*multipoolerservicepb.GetRoutingStateResponse, error) {
 				return nil, status.Error(codes.Internal, "metadata unavailable")
 			},
 		},
 		"failed precondition": {
-			answer: func() (*multipoolerservicepb.GetServingStateResponse, error) {
+			answer: func() (*multipoolerservicepb.GetRoutingStateResponse, error) {
 				return nil, status.Error(codes.FailedPrecondition, "not the default primary")
 			},
 		},
 		"permission denied": {
-			answer: func() (*multipoolerservicepb.GetServingStateResponse, error) {
+			answer: func() (*multipoolerservicepb.GetRoutingStateResponse, error) {
 				return nil, status.Error(codes.PermissionDenied, "no")
 			},
 		},
-		"an answer for another number of tablegroups": {
-			answer: func() (*multipoolerservicepb.GetServingStateResponse, error) {
-				return &multipoolerservicepb.GetServingStateResponse{}, nil
+		"no fence at all": {
+			answer: func() (*multipoolerservicepb.GetRoutingStateResponse, error) {
+				return &multipoolerservicepb.GetRoutingStateResponse{}, nil
 			},
+			opens: true,
+		},
+		"a fence of another tablegroup": {
+			answer: func() (*multipoolerservicepb.GetRoutingStateResponse, error) {
+				return &multipoolerservicepb.GetRoutingStateResponse{Fences: []*multipoolerservicepb.AdmissionFence{
+					{Scope: &multipoolerservicepb.AdmissionScope{Tablegroup: "other"}, State: stateFenced, Version: 2},
+				}}, nil
+			},
+			opens: true,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -220,22 +229,22 @@ func TestAdmissionReadOfAnOldOrUnreachableDefaultLeader(t *testing.T) {
 func TestTheConnectionToTheDefaultPrimaryIsReused(t *testing.T) {
 	h := newAdmissionHarness(t, false)
 	var stale atomic.Bool
-	stub := &defaultLeaderStub{answer: func() (*multipoolerservicepb.GetServingStateResponse, error) {
+	stub := &defaultLeaderStub{answer: func() (*multipoolerservicepb.GetRoutingStateResponse, error) {
 		if stale.CompareAndSwap(true, false) {
 			return nil, status.Error(codes.FailedPrecondition, "not the default primary")
 		}
-		return &multipoolerservicepb.GetServingStateResponse{Tablegroups: []*multipoolerservicepb.TablegroupServingState{{Tablegroup: "default"}}}, nil
+		return &multipoolerservicepb.GetRoutingStateResponse{Fences: []*multipoolerservicepb.AdmissionFence{{Scope: &multipoolerservicepb.AdmissionScope{Tablegroup: "default"}}}}, nil
 	}}
 	pointAtDefaultLeader(t, h, stub)
 
 	for range 3 {
-		_, err := h.pm.readTablegroupServing(t.Context())
+		_, err := h.pm.readOwnFence(t.Context())
 		require.NoError(t, err)
 	}
 	require.EqualValues(t, 1, stub.accepted.Load(), "one connection for every read")
 
 	stale.Store(true)
-	_, err := h.pm.readTablegroupServing(t.Context())
+	_, err := h.pm.readOwnFence(t.Context())
 	require.NoError(t, err, "the stale answer was retried once on a fresh connection")
 	require.EqualValues(t, 2, stub.accepted.Load())
 }
@@ -252,9 +261,9 @@ func TestAPoolerOpensOnlyOnATablegroupBoundToItsOwnConnection(t *testing.T) {
 			return &multipoolerservicepb.GetTablegroupBindingResponse{BackingConnection: connection}, nil
 		}
 	}
-	unfenced := func() (*multipoolerservicepb.GetServingStateResponse, error) {
-		return &multipoolerservicepb.GetServingStateResponse{Tablegroups: []*multipoolerservicepb.TablegroupServingState{
-			{Tablegroup: "migrateTG", State: stateUnfenced},
+	unfenced := func() (*multipoolerservicepb.GetRoutingStateResponse, error) {
+		return &multipoolerservicepb.GetRoutingStateResponse{Fences: []*multipoolerservicepb.AdmissionFence{
+			{Scope: &multipoolerservicepb.AdmissionScope{Tablegroup: "migrateTG"}, State: stateUnfenced},
 		}}, nil
 	}
 	for name, tc := range map[string]struct {
@@ -305,7 +314,7 @@ func TestAPoolerOpensOnlyOnATablegroupBoundToItsOwnConnection(t *testing.T) {
 // even when the default primary is failing.
 func TestAReplicaWithNoStoreDoesNotAskTheDefaultPrimary(t *testing.T) {
 	h := newAdmissionHarness(t, false)
-	stub := &defaultLeaderStub{answer: func() (*multipoolerservicepb.GetServingStateResponse, error) {
+	stub := &defaultLeaderStub{answer: func() (*multipoolerservicepb.GetRoutingStateResponse, error) {
 		return nil, status.Error(codes.Unavailable, "the default primary is failing over")
 	}}
 	pointAtDefaultLeader(t, h, stub)

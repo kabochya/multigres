@@ -35,8 +35,8 @@ import (
 // which rejects with a bufferable error.
 
 // PendingAppTableGroup is the tablegroup application SQL is planned against
-// before the first successful read of the routing pointer. Requests for it fail
-// closed with a bufferable error until the pointer is known.
+// before the first successful read of the routing. Requests for it fail
+// closed with a bufferable error until the routing is known.
 const PendingAppTableGroup = "__routing_pending__"
 
 // AppRouting holds the gateway's view of one database's application tablegroup.
@@ -96,7 +96,7 @@ func (r *AppRouting) snapshot() (tablegroup string, version int64, known bool) {
 	return r.current, r.version, r.known
 }
 
-// Update records a read of the routing pointer. A version at or below the one
+// Update records a read of the routing. A version at or below the one
 // already applied is ignored, so an older read arriving late changes nothing.
 func (r *AppRouting) Update(tablegroup string, version int64) bool {
 	if tablegroup == "" {

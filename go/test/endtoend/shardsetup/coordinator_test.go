@@ -26,33 +26,70 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
+	"github.com/multigres/multigres/go/common/protometadata"
 	multipoolerservicepb "github.com/multigres/multigres/go/pb/multipoolerservice"
 )
 
-// controlClient talks to the default primary's serving-control RPCs. Its fence, unfence
-// and flip read the version they are to name from the serving state, as a migrator does,
-// and the ...At forms take it explicitly, for the scenarios about stale versions.
+// controlClient talks to the default primary's admission and routing RPCs, for one operation.
+// Its fence, unfence and switch read the version they are to name from the routing state, as a
+// migrator does, and the ...At forms take it explicitly, for the scenarios about stale versions.
 type controlClient struct {
 	multipoolerservicepb.MultipoolerServiceClient
 	conn *grpc.ClientConn
 	t    *testing.T
+	// operation is the operation every call of the client belongs to.
+	operation string
 	// drain is how long its fences wait for the members to be clean, asking CommitFence again
 	// until then; zero is 3 seconds.
 	drain time.Duration
 }
 
-func newControlClient(t *testing.T, grpcPort int) *controlClient {
+// newControlClientFor is a client of the given operation.
+func newControlClientFor(t *testing.T, grpcPort int, operation string) *controlClient {
 	t.Helper()
 	conn, err := grpc.NewClient(fmt.Sprintf("127.0.0.1:%d", grpcPort), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
-	return &controlClient{MultipoolerServiceClient: multipoolerservicepb.NewMultipoolerServiceClient(conn), conn: conn, t: t}
+	return &controlClient{MultipoolerServiceClient: multipoolerservicepb.NewMultipoolerServiceClient(conn), conn: conn, t: t, operation: operation}
 }
 
-// version is the version of a tablegroup's row.
+func scopeOf(tablegroup string) *multipoolerservicepb.AdmissionScope {
+	return &multipoolerservicepb.AdmissionScope{Tablegroup: tablegroup}
+}
+
+// fenceOf is the fence of a tablegroup in a routing state, nil when it has none.
+func fenceOf(resp *multipoolerservicepb.GetRoutingStateResponse, tg string) *multipoolerservicepb.AdmissionFence {
+	for _, f := range resp.GetFences() {
+		if f.GetScope().GetTablegroup() == tg {
+			return f
+		}
+	}
+	return nil
+}
+
+// stateOfFence is the state of a tablegroup's fence: unfenced when it has none.
+func stateOfFence(resp *multipoolerservicepb.GetRoutingStateResponse, tg string) multipoolerservicepb.AdmissionState {
+	if f := fenceOf(resp, tg); f != nil {
+		return f.GetState()
+	}
+	return admUnfenced
+}
+
+// effectiveTablegroup is where the traffic goes: the home tablegroup, or the destination of the
+// rule that applies to it.
+func effectiveTablegroup(resp *multipoolerservicepb.GetRoutingStateResponse) string {
+	for _, r := range resp.GetRules() {
+		if r.GetRule().GetFromTablegroup() == resp.GetHomeTablegroup() {
+			return r.GetRule().GetToTablegroup()
+		}
+	}
+	return resp.GetHomeTablegroup()
+}
+
+// version is the version of a tablegroup's fence: zero when it has none.
 func (c *controlClient) version(ctx context.Context, tg string) int64 {
 	c.t.Helper()
-	return c.state(ctx, tg).Tablegroups[0].Version
+	return fenceOf(c.state(ctx), tg).GetVersion()
 }
 
 // fence fences a tablegroup at the version it reads now.
@@ -61,7 +98,7 @@ func (c *controlClient) fence(ctx context.Context, tg string) (*multipoolerservi
 	return c.fenceWithin(ctx, tg, 40*time.Second)
 }
 
-// fenceWithin is fence with a deadline for the whole of it. The start names the version of the row
+// fenceWithin is fence with a deadline for the whole of it. The start names the version of the fence
 // as it was read, whatever its state: a fence that was left is started again, and one that is
 // complete succeeds.
 func (c *controlClient) fenceWithin(ctx context.Context, tg string, timeout time.Duration) (*multipoolerservicepb.CommitFenceResponse, error) {
@@ -83,13 +120,13 @@ func (c *controlClient) fenceWithDrain(ctx context.Context, tg string, version i
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	started, err := c.StartFence(ctx, &multipoolerservicepb.StartFenceRequest{Database: "postgres", Tablegroup: tg, ExpectedVersion: version})
+	started, err := c.StartFence(ctx, &multipoolerservicepb.StartFenceRequest{Database: "postgres", OperationId: c.operation, Scope: scopeOf(tg), ExpectedVersion: version})
 	if err != nil {
 		return nil, err
 	}
 	deadline := time.Now().Add(wait)
 	for {
-		resp, err := c.CommitFence(ctx, &multipoolerservicepb.CommitFenceRequest{Database: "postgres", Tablegroup: tg, Version: started.State.Version})
+		resp, err := c.CommitFence(ctx, &multipoolerservicepb.CommitFenceRequest{Database: "postgres", OperationId: c.operation, Scope: scopeOf(tg), Version: started.Fence.Version})
 		if err == nil || status.Code(err) != codes.Aborted || time.Now().After(deadline) {
 			return resp, err
 		}
@@ -124,51 +161,84 @@ func memberResults(t *testing.T, err error) map[string]*multipoolerservicepb.Mem
 }
 
 // unfenceAt unfences a tablegroup at the version the caller names.
-func (c *controlClient) unfenceAt(ctx context.Context, tg string, version int64) (*multipoolerservicepb.UnfenceTablegroupResponse, error) {
-	return c.UnfenceTablegroup(ctx, &multipoolerservicepb.UnfenceTablegroupRequest{Database: "postgres", Tablegroup: tg, ExpectedVersion: version})
+func (c *controlClient) unfenceAt(ctx context.Context, tg string, version int64) (*multipoolerservicepb.UnfenceScopeResponse, error) {
+	return c.UnfenceScope(ctx, &multipoolerservicepb.UnfenceScopeRequest{Database: "postgres", OperationId: c.operation, Scope: scopeOf(tg), ExpectedVersion: version})
 }
 
-// flip moves the routing pointer at the routing version it reads now.
-func (c *controlClient) flip(ctx context.Context, from, to string) (*multipoolerservicepb.FlipRoutingResponse, error) {
+// switchRouting moves the traffic of from to to at the routing version it reads now.
+func (c *controlClient) switchRouting(ctx context.Context, from, to string) (*multipoolerservicepb.SwitchRoutingResponse, error) {
 	c.t.Helper()
-	return c.flipAt(ctx, from, to, c.state(ctx).RoutingVersion)
+	return c.switchRoutingAt(ctx, from, to, c.state(ctx).RoutingVersion)
 }
 
-// flipAt moves the routing pointer at the routing version the caller names.
-func (c *controlClient) flipAt(ctx context.Context, from, to string, version int64) (*multipoolerservicepb.FlipRoutingResponse, error) {
-	return c.FlipRouting(ctx, &multipoolerservicepb.FlipRoutingRequest{
-		Database: "postgres", FromTablegroup: from, ToTablegroup: to, ExpectedRoutingVersion: version,
+// switchRoutingAt moves the traffic at the routing version the caller names.
+func (c *controlClient) switchRoutingAt(ctx context.Context, from, to string, version int64) (*multipoolerservicepb.SwitchRoutingResponse, error) {
+	return c.SwitchRouting(ctx, &multipoolerservicepb.SwitchRoutingRequest{
+		Database: "postgres", OperationId: c.operation, ExpectedRoutingVersion: version,
+		Rule: &multipoolerservicepb.RoutingRule{FromTablegroup: from, ToTablegroup: to, ToShard: "0-inf"},
 	})
 }
 
-// state reads the serving state and fails the test when it cannot; it must be called from the
-// test's own goroutine.
-func (c *controlClient) state(ctx context.Context, tgs ...string) *multipoolerservicepb.GetServingStateResponse {
+// revertRouting puts the traffic back on the home tablegroup at the routing version it reads now.
+func (c *controlClient) revertRouting(ctx context.Context) (*multipoolerservicepb.RevertRoutingResponse, error) {
 	c.t.Helper()
-	resp, err := c.GetServingState(ctx, &multipoolerservicepb.GetServingStateRequest{Database: "postgres", Tablegroups: tgs})
-	require.NoError(c.t, err, "reading the serving state")
+	return c.RevertRouting(ctx, &multipoolerservicepb.RevertRoutingRequest{Database: "postgres", OperationId: c.operation, ExpectedRoutingVersion: c.state(ctx).RoutingVersion})
+}
+
+// cleanup deletes the operation's fences.
+func (c *controlClient) cleanup(ctx context.Context) (*multipoolerservicepb.CleanupOperationResponse, error) {
+	return c.CleanupOperation(ctx, &multipoolerservicepb.CleanupOperationRequest{Database: "postgres", OperationId: c.operation})
+}
+
+// fenceRow is the fence of a tablegroup; a tablegroup with no fence is unfenced at version zero.
+func (c *controlClient) fenceRow(ctx context.Context, tg string) *multipoolerservicepb.AdmissionFence {
+	c.t.Helper()
+	return fenceOrUnfenced(c.state(ctx), tg)
+}
+
+// fenceOrUnfenced is the fence of a tablegroup in a routing state; a tablegroup with no fence is
+// unfenced at version zero.
+func fenceOrUnfenced(resp *multipoolerservicepb.GetRoutingStateResponse, tg string) *multipoolerservicepb.AdmissionFence {
+	if f := fenceOf(resp, tg); f != nil {
+		return f
+	}
+	return &multipoolerservicepb.AdmissionFence{Scope: scopeOf(tg), State: admUnfenced}
+}
+
+// state reads the routing state and fails the test when it cannot; it must be called from the
+// test's own goroutine.
+func (c *controlClient) state(ctx context.Context) *multipoolerservicepb.GetRoutingStateResponse {
+	c.t.Helper()
+	resp, err := c.GetRoutingState(ctx, &multipoolerservicepb.GetRoutingStateRequest{Database: "postgres"})
+	require.NoError(c.t, err, "reading the routing state")
 	return resp
 }
 
 // tryState is state that reports a failure instead of failing the test, for polling
 // across a failover.
-func (c *controlClient) tryState(ctx context.Context, tgs ...string) (*multipoolerservicepb.GetServingStateResponse, error) {
-	return c.GetServingState(ctx, &multipoolerservicepb.GetServingStateRequest{Database: "postgres", Tablegroups: tgs})
+func (c *controlClient) tryState(ctx context.Context) (*multipoolerservicepb.GetRoutingStateResponse, error) {
+	return c.GetRoutingState(ctx, &multipoolerservicepb.GetRoutingStateRequest{Database: "postgres"})
 }
 
-// seedRouting sets the routing pointer, as the prototype's setup does.
-func seedRouting(t *testing.T, s *ShardSetup, appTablegroup string) {
+// seedHome sets the home tablegroup, which receives the traffic when no rule applies, as the
+// prototype's setup does, and creates the metadata tables for it.
+func seedHome(t *testing.T, s *ShardSetup, home string) {
 	t.Helper()
 	ctx := t.Context()
 	conn := s.ConnectPrimaryAdmin(t)
-	_, err := conn.Exec(ctx, `INSERT INTO multigres.proto_routing (database, app_tablegroup, version) VALUES ($1, $2, 1)
-ON CONFLICT (database) DO UPDATE SET app_tablegroup = EXCLUDED.app_tablegroup, version = 1`, s.Database, appTablegroup)
+	require.NoError(t, protometadata.EnsureRoutingSchema(ctx, func(ctx context.Context, sql string) error {
+		_, err := conn.Exec(ctx, sql)
+		return err
+	}))
+	tag, err := conn.Exec(ctx, `UPDATE multigres.catalog_state
+SET home_tablegroup = (SELECT oid FROM multigres.tablegroup WHERE name = $1), routing_version = 0`, home)
 	require.NoError(t, err)
+	require.EqualValues(t, 1, tag.RowsAffected(), "the catalog state of the database, with %q in the catalog", home)
 }
 
 // startControlledDefaultCohort starts the default cohort with application admission
 // control, as the destination of a migration: its poolers start closed and open once
-// the default tablegroup's admission row, seeded here as UNFENCED, says so.
+// they read that the default tablegroup has no fence.
 func startControlledDefaultCohort(t *testing.T, opts ...SetupOption) *ShardSetup {
 	t.Helper()
 	acquireFixtureSlot(t)
@@ -179,17 +249,17 @@ func startControlledDefaultCohort(t *testing.T, opts ...SetupOption) *ShardSetup
 	}, opts...)
 	def, cleanup := NewIsolated(t, all...)
 	t.Cleanup(cleanup)
-	// No row for the default tablegroup is written: none reads as unfenced.
+	// No fence for the default tablegroup is written: none reads as unfenced.
 	requireAdmits(t, def.GetPrimary(t).Multipooler.GrpcPort, "the default cohort must admit with no admission state written")
 	return def
 }
 
 // scenarioCoordinatorCallsAreSafeToRepeat: a migrator that does not know whether a call took
 // effect, because its deadline passed or the reply was lost, repeats it and ends in the state
-// it would have ended in. Fence and unfence recognize the row their own success leaves; a
-// delayed retry of a fence that was undone is still rejected; a flip that already committed,
-// asked again, succeeds and writes nothing, and a flip from a state that is no longer current
-// is refused.
+// it would have ended in. Fence and unfence recognize the fence their own success leaves; a
+// delayed retry of a fence that was undone is still rejected; a switch that already committed,
+// asked again, succeeds and writes nothing, and a switch from a state that is no longer current
+// is refused; so are a revert and a fold.
 func scenarioCoordinatorCallsAreSafeToRepeat(t *testing.T, f *migrationFixture) {
 	ctx := t.Context()
 	ctl := f.control()
@@ -201,16 +271,16 @@ func scenarioCoordinatorCallsAreSafeToRepeat(t *testing.T, f *migrationFixture) 
 	for i := range 2 {
 		again, err := ctl.fenceAt(ctx, "migrateTG", v, 30*time.Second)
 		require.NoError(t, err, "repeat %d", i)
-		require.Equal(t, first.State.Version, again.State.Version)
+		require.Equal(t, first.Fence.Version, again.Fence.Version)
 		require.Empty(t, again.Members, "a fence that is complete is answered without asking the members")
 	}
 	require.EqualValues(t, v+1, ctl.version(ctx, "migrateTG"), "nothing was written by the repeats")
 
 	// Unfence, then the same unfence again, twice.
-	_, err = ctl.unfenceAt(ctx, "migrateTG", first.State.Version)
+	_, err = ctl.unfenceAt(ctx, "migrateTG", first.Fence.Version)
 	require.NoError(t, err)
 	for i := range 2 {
-		_, err := ctl.unfenceAt(ctx, "migrateTG", first.State.Version)
+		_, err := ctl.unfenceAt(ctx, "migrateTG", first.Fence.Version)
 		require.NoError(t, err, "repeat %d", i)
 	}
 	require.EqualValues(t, v+2, ctl.version(ctx, "migrateTG"))
@@ -219,28 +289,36 @@ func scenarioCoordinatorCallsAreSafeToRepeat(t *testing.T, f *migrationFixture) 
 	// The delayed retry of the first fence cannot fence again now that it was undone.
 	_, err = ctl.fenceAt(ctx, "migrateTG", v, 30*time.Second)
 	require.Equal(t, codes.FailedPrecondition, status.Code(err), "%v", err)
-	require.Equal(t, admUnfenced, ctl.state(ctx, "migrateTG").Tablegroups[0].State)
+	require.Equal(t, admUnfenced, stateOfFence(ctl.state(ctx), "migrateTG"))
+	require.NotNil(t, fenceOf(ctl.state(ctx), "migrateTG"), "an unfence leaves the fence, UNFENCED")
 
-	// A flip that committed, asked again, succeeds and writes nothing.
+	// A switch that committed, asked again, succeeds and writes nothing.
 	_, err = ctl.fence(ctx, "migrateTG")
 	require.NoError(t, err)
 	_, err = ctl.fence(ctx, "default")
 	require.NoError(t, err)
 	routingVersion := ctl.state(ctx).RoutingVersion
-	moved, err := ctl.flipAt(ctx, "migrateTG", "default", routingVersion)
+	moved, err := ctl.switchRoutingAt(ctx, "migrateTG", "default", routingVersion)
 	require.NoError(t, err)
-	require.Equal(t, "default", moved.AppTablegroup)
+	require.Equal(t, "default", moved.EffectiveTablegroup)
 	for i := range 2 {
-		again, err := ctl.flipAt(ctx, "migrateTG", "default", routingVersion)
+		again, err := ctl.switchRoutingAt(ctx, "migrateTG", "default", routingVersion)
 		require.NoError(t, err, "repeat %d", i)
 		require.Equal(t, moved.RoutingVersion, again.RoutingVersion)
 	}
 	require.Equal(t, moved.RoutingVersion, ctl.state(ctx).RoutingVersion, "nothing was written by the repeats")
 
-	// A flip that names a version the routing held before the move, and no longer holds, is
-	// refused: the move back is not the move that was asked for.
-	_, err = ctl.flipAt(ctx, "default", "migrateTG", routingVersion)
+	// A switch that names a version the routing held before the move, and no longer holds, is
+	// refused: another switch is not the move that was asked for.
+	_, err = ctl.switchRoutingAt(ctx, "default", "migrateTG", routingVersion)
 	require.Equal(t, codes.FailedPrecondition, status.Code(err), "%v", err)
-	// What is left (traffic on the default tablegroup, both sides fenced) is what the next
-	// reset undoes.
+
+	// A revert and a fold that committed, asked again, succeed and write nothing.
+	reverted, err := ctl.RevertRouting(ctx, &multipoolerservicepb.RevertRoutingRequest{Database: "postgres", OperationId: ctl.operation, ExpectedRoutingVersion: moved.RoutingVersion})
+	require.NoError(t, err)
+	again, err := ctl.RevertRouting(ctx, &multipoolerservicepb.RevertRoutingRequest{Database: "postgres", OperationId: ctl.operation, ExpectedRoutingVersion: moved.RoutingVersion})
+	require.NoError(t, err, "a retry of the revert that committed")
+	require.Equal(t, reverted.RoutingVersion, again.RoutingVersion)
+	require.Equal(t, "migrateTG", effectiveTablegroup(ctl.state(ctx)))
+	// What is left (both sides fenced, no rule) is what the next reset undoes.
 }

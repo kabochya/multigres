@@ -51,11 +51,14 @@ const (
 	MultipoolerService_NotificationStream_FullMethodName        = "/multipoolerservice.MultipoolerService/NotificationStream"
 	MultipoolerService_GetBackingConnection_FullMethodName      = "/multipoolerservice.MultipoolerService/GetBackingConnection"
 	MultipoolerService_GetTablegroupBinding_FullMethodName      = "/multipoolerservice.MultipoolerService/GetTablegroupBinding"
-	MultipoolerService_GetServingState_FullMethodName           = "/multipoolerservice.MultipoolerService/GetServingState"
+	MultipoolerService_GetRoutingState_FullMethodName           = "/multipoolerservice.MultipoolerService/GetRoutingState"
 	MultipoolerService_StartFence_FullMethodName                = "/multipoolerservice.MultipoolerService/StartFence"
 	MultipoolerService_CommitFence_FullMethodName               = "/multipoolerservice.MultipoolerService/CommitFence"
-	MultipoolerService_UnfenceTablegroup_FullMethodName         = "/multipoolerservice.MultipoolerService/UnfenceTablegroup"
-	MultipoolerService_FlipRouting_FullMethodName               = "/multipoolerservice.MultipoolerService/FlipRouting"
+	MultipoolerService_UnfenceScope_FullMethodName              = "/multipoolerservice.MultipoolerService/UnfenceScope"
+	MultipoolerService_SwitchRouting_FullMethodName             = "/multipoolerservice.MultipoolerService/SwitchRouting"
+	MultipoolerService_RevertRouting_FullMethodName             = "/multipoolerservice.MultipoolerService/RevertRouting"
+	MultipoolerService_FoldRouting_FullMethodName               = "/multipoolerservice.MultipoolerService/FoldRouting"
+	MultipoolerService_CleanupOperation_FullMethodName          = "/multipoolerservice.MultipoolerService/CleanupOperation"
 	MultipoolerService_RefreshAdmission_FullMethodName          = "/multipoolerservice.MultipoolerService/RefreshAdmission"
 )
 
@@ -146,58 +149,62 @@ type MultipoolerServiceClient interface {
 	// itself is read with GetBackingConnection. A tablegroup that does not exist is
 	// NOT_FOUND.
 	GetTablegroupBinding(ctx context.Context, in *GetTablegroupBindingRequest, opts ...grpc.CallOption) (*GetTablegroupBindingResponse, error)
-	// GetServingState returns the authoritative routing and admission metadata.
-	// Use it to decide which version to pass, and to reconcile an interrupted
-	// operation, including after the migration controller itself changes leader.
-	// A tablegroup with no row is UNFENCED at version zero. The state tells an
-	// incomplete fence (FENCING) from a completed one (FENCED).
-	GetServingState(ctx context.Context, in *GetServingStateRequest, opts ...grpc.CallOption) (*GetServingStateResponse, error)
-	// StartFence begins a fence of one tablegroup: it writes FENCING and tells every member, in
-	// every cell, to close its gate, and returns at once. It waits for nothing. Each member
-	// closes, and answers in the same call what it holds (see FenceBusy): clean, busy (with what
-	// holds it) or unreachable (with the error). Whether anything is held, and what to do about
-	// it, is the controller's; CommitFence is the call that completes the fence.
+	// GetRoutingState returns the authoritative routing and admission metadata, read in one
+	// snapshot: the home tablegroup, the routing rules, the admission fences, and the
+	// routing_version they are at. Use it to decide which versions to pass, and to reconcile
+	// an interrupted operation, including after the migration controller itself changes
+	// leader. A scope with no fence is unfenced. When since_version is the current
+	// routing_version the response has not_modified set and omits the home and the rules;
+	// the fences are always returned, because they change without a change of the
+	// routing_version.
+	GetRoutingState(ctx context.Context, in *GetRoutingStateRequest, opts ...grpc.CallOption) (*GetRoutingStateResponse, error)
+	// StartFence begins a fence of one scope for an operation: it writes FENCING and tells
+	// every member, in every cell, to close its gate, and returns at once. It waits for
+	// nothing. Each member closes, and answers in the same call what it holds (see FenceBusy):
+	// clean, busy (with what holds it) or unreachable (with the error). Whether anything is
+	// held, and what to do about it, is the controller's; CommitFence is the call that
+	// completes the fence.
 	//
-	// The version names a fence attempt. expected_version is the version of the row the caller
-	// read (the one GetServingState or an earlier response returned, which the caller passes back
-	// as it got it). If the tablegroup is UNFENCED at that version this begins a new attempt: the
-	// coordinator writes FENCING at the next version and asks the members. If it is FENCING at the
-	// version, or at the version after, this is a repeat of the attempt, whose reply may have been
-	// lost: nothing is written and the members are asked again, which closes any that missed it.
-	// If it is FENCED at the version, or the one after, the attempt is complete and the call
-	// succeeds without asking anyone. Any other state is rejected with FAILED_PRECONDITION; a
-	// fence the controller undid is UNFENCED at a later version, so a delayed repeat of it fails.
-	// The response returns the row, FENCING (or FENCED) and its version, which is what the
-	// controller passes to CommitFence and to unfence. If every member answered the call
-	// succeeds, whatever each holds; if one did not answer it fails with ABORTED, the row stays
-	// FENCING, the per-member results are the StartFenceResponse in the error's details, and the
-	// controller calls it again.
+	// The version names a fence attempt. expected_version is the version the caller read (the
+	// one GetRoutingState or an earlier response returned, which the caller passes back as it
+	// got it; zero for a scope with no fence). If the scope is unfenced at that version (no
+	// fence, or UNFENCED) this begins a new attempt: the coordinator writes FENCING at the next
+	// version, taking the scope over if another operation left it UNFENCED, and asks the
+	// members. If it is FENCING for this operation at the version, or at the version after, this
+	// is a repeat of the attempt, whose reply may have been lost: nothing is written and the
+	// members are asked again, which closes any that missed it. If it is FENCED for this
+	// operation at the version, or the one after, the attempt is complete and the call succeeds
+	// without asking anyone. Any other state is rejected with FAILED_PRECONDITION, including a
+	// scope that is FENCING or FENCED for another operation. The response returns the fence,
+	// FENCING (or FENCED) and its version, which is what the controller passes to CommitFence
+	// and to unfence. If every member answered the call succeeds, whatever each holds; if one
+	// did not answer it fails with ABORTED, the fence stays FENCING, the per-member results are
+	// the StartFenceResponse in the error's details, and the controller calls it again.
 	//
 	// A tablegroup whose durability policy, or the control home's, needs fewer than two nodes
 	// is refused with FAILED_PRECONDITION before anything is written, and so is one with more
 	// than one unmanaged pooler. A pooler that is not the default primary answers UNAVAILABLE.
 	StartFence(ctx context.Context, in *StartFenceRequest, opts ...grpc.CallOption) (*StartFenceResponse, error)
-	// CommitFence completes the current fence attempt of a tablegroup, when nothing is left. It
+	// CommitFence completes the current fence attempt of a scope, when nothing is left. It
 	// asks every member of the tablegroup, from a fresh listing of its poolers, to apply the
-	// row and say what it holds, which closes a member that is not closed yet and waits for
+	// fence and say what it holds, which closes a member that is not closed yet and waits for
 	// nothing. If every member says it holds nothing (its gate is closed, no application
 	// request is running and no application reservation is held), it writes FENCED at the same
-	// version, the version does not change, and returns the row. A fenced tablegroup is one
-	// in which nothing is running and, the gates being closed, nothing can start.
+	// version, the version does not change, and returns the fence. A fenced scope is one in
+	// which nothing is running and, the gates being closed, nothing can start.
 	//
-	// Otherwise it writes nothing and fails with ABORTED, the row staying FENCING, and the
+	// Otherwise it writes nothing and fails with ABORTED, the fence staying FENCING, and the
 	// per-member results are the CommitFenceResponse in the error's details: a member is busy
 	// (a request is running or an application reservation is held, with what holds it: see
 	// FenceBusy) or unreachable (with the error). Every member is asked even when one fails.
 	// There is no way to skip or exclude a member: a pooler is left out only by being gone from
 	// topology, and one that does not answer fails the call, as does one that joined, which is
-	// asked like the rest. A commit that runs while another commit of the same fence completes it
-	// may answer ABORTED (a member that already sees FENCED refuses the second one); asked again it
-	// succeeds, since the row is FENCED at the version. CommitFence is idempotent: if the row is
-	// FENCED at the version the
+	// asked like the rest. A commit that runs while another commit of the same fence completes
+	// it may answer ABORTED; asked again it succeeds, since the fence is FENCED at the version.
+	// CommitFence is idempotent: if the fence is FENCED for the operation at the version the
 	// call succeeds, asking nobody, and any other state or version is rejected with
-	// FAILED_PRECONDITION. The version is the one the row had when the attempt began, as the
-	// start or GetServingState returned it, and the commit does not change it.
+	// FAILED_PRECONDITION. The version is the one the fence had when the attempt began, as the
+	// start returned it, and the commit does not change it.
 	//
 	// Waiting is the controller's. It calls CommitFence again, as often and for as long as its
 	// policy says, and decides what to do about what it finds. Busy reports facts. Ordinary
@@ -220,26 +227,56 @@ type MultipoolerServiceClient interface {
 	// The fence returns no WAL position. After it succeeds nothing more is written through the
 	// fenced poolers, and the controller reads the position it needs from the source itself.
 	CommitFence(ctx context.Context, in *CommitFenceRequest, opts ...grpc.CallOption) (*CommitFenceResponse, error)
-	// UnfenceTablegroup sets the row back to UNFENCED and asks the members to reopen
-	// on a best-effort basis, reporting the ones it could not reach: there is no
-	// acknowledgement barrier, since a pooler opens once it reads UNFENCED. The
-	// controller repeats the call with the same version until none is unreached; that
-	// is safe, because a repeat is a success that writes nothing.
+	// UnfenceScope writes UNFENCED, at the next version, over the fence of a scope and asks the
+	// members to reopen on a best-effort basis, reporting the ones it could not reach: there is
+	// no acknowledgement barrier, since a pooler opens once it reads UNFENCED. The fence stays,
+	// UNFENCED, until CleanupOperation deletes it. The controller repeats the call with the same
+	// version until none is unreached; that is safe, because a repeat is a success that writes
+	// nothing.
 	//
-	// expected_version is the version v of the fence being undone. If the tablegroup
-	// is FENCING or FENCED at v the coordinator writes UNFENCED at v+1. If it is
-	// already UNFENCED at v+1 the unfence was done: the call succeeds, writes nothing,
+	// expected_version is the version v of the fence being undone. If the fence is FENCING or
+	// FENCED for the operation at v the coordinator writes UNFENCED at v+1. If it is already
+	// UNFENCED for the operation at v+1 the unfence was done: the call succeeds, writes nothing,
 	// and asks the members again. Any other state is rejected.
-	UnfenceTablegroup(ctx context.Context, in *UnfenceTablegroupRequest, opts ...grpc.CallOption) (*UnfenceTablegroupResponse, error)
-	// FlipRouting moves the database's application traffic from one tablegroup to
-	// another, in one transaction that also checks that both are FENCED, a completed
-	// fence: a tablegroup that is FENCING is refused with FAILED_PRECONDITION. Success
-	// means the routing metadata committed; it does not unfence anything. A retry
-	// after the move, which finds the traffic already on to_tablegroup at the version
-	// after expected_routing_version, succeeds and writes nothing.
-	FlipRouting(ctx context.Context, in *FlipRoutingRequest, opts ...grpc.CallOption) (*FlipRoutingResponse, error)
+	UnfenceScope(ctx context.Context, in *UnfenceScopeRequest, opts ...grpc.CallOption) (*UnfenceScopeResponse, error)
+	// SwitchRouting adds the routing rule of an operation, so that the traffic of the rule's
+	// from_tablegroup goes to its to_tablegroup, in one transaction that also checks the
+	// preconditions: the routing is at expected_routing_version; from_tablegroup is the home
+	// tablegroup and is not the default tablegroup; no other rule exists; and the fences of
+	// from_tablegroup and to_tablegroup are both FENCED for this operation (a completed fence:
+	// FENCING is refused with FAILED_PRECONDITION), read with a row lock so that neither can
+	// change under the write. It bumps routing_version. Success means the routing metadata
+	// committed; it does not unfence anything. A retry after the switch, which finds the rule
+	// of this operation at the version after expected_routing_version, succeeds and writes
+	// nothing. That the operation exists as a whole, and that the rules cover the keyspace
+	// exactly, are not checked yet.
+	SwitchRouting(ctx context.Context, in *SwitchRoutingRequest, opts ...grpc.CallOption) (*SwitchRoutingResponse, error)
+	// RevertRouting deletes the routing rule of an operation, so that the traffic goes back to
+	// the home tablegroup, under the same preconditions as SwitchRouting: the routing is at
+	// expected_routing_version, and the fences of the rule's two tablegroups are FENCED for this
+	// operation. It bumps routing_version. A retry after the revert, which finds no rule of the
+	// operation at the version after expected_routing_version, succeeds and writes nothing.
+	RevertRouting(ctx context.Context, in *RevertRoutingRequest, opts ...grpc.CallOption) (*RevertRoutingResponse, error)
+	// FoldRouting completes a switched operation: in one transaction it makes the rule's
+	// to_tablegroup the home tablegroup, deletes the rule and bumps routing_version, so that the
+	// routing is empty again. It needs no fence, because the effective tablegroup is the same
+	// before and after, and it refuses to run if it would not be: the call resolves the traffic
+	// before and after and fails with FAILED_PRECONDITION if they differ. A retry after the fold,
+	// which finds no rule of the operation at the version after expected_routing_version,
+	// succeeds and writes nothing.
+	//
+	// PROTOTYPE STUB: this moves a home pointer. The routing-rule implementation that replaces
+	// it moves the catalog membership of the tablegroup instead.
+	FoldRouting(ctx context.Context, in *FoldRoutingRequest, opts ...grpc.CallOption) (*FoldRoutingResponse, error)
+	// CleanupOperation deletes the fences of an operation. It is refused with
+	// FAILED_PRECONDITION while the operation has a routing rule, or has a fence that is
+	// FENCING. A fence that is FENCED is deleted too, and its scope serves application work
+	// again as soon as its poolers read that there is none: the controller keeps the source
+	// fenced after the fold until its unmanaged poolers are decommissioned, and cleans up
+	// after. Cleaning up an operation that has nothing left succeeds.
+	CleanupOperation(ctx context.Context, in *CleanupOperationRequest, opts ...grpc.CallOption) (*CleanupOperationResponse, error)
 	// RefreshAdmission is called by the coordinator on each member of a tablegroup, for a
-	// start and for a commit alike. The pooler re-reads its tablegroup's row from the control
+	// start and for a commit alike. The pooler re-reads its tablegroup's fence from the control
 	// home, applies it (closes its gate, or opens it) and reports what it holds, without
 	// waiting for anything. Migration controllers do not call this.
 	RefreshAdmission(ctx context.Context, in *RefreshAdmissionRequest, opts ...grpc.CallOption) (*RefreshAdmissionResponse, error)
@@ -442,10 +479,10 @@ func (c *multipoolerServiceClient) GetTablegroupBinding(ctx context.Context, in 
 	return out, nil
 }
 
-func (c *multipoolerServiceClient) GetServingState(ctx context.Context, in *GetServingStateRequest, opts ...grpc.CallOption) (*GetServingStateResponse, error) {
+func (c *multipoolerServiceClient) GetRoutingState(ctx context.Context, in *GetRoutingStateRequest, opts ...grpc.CallOption) (*GetRoutingStateResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(GetServingStateResponse)
-	err := c.cc.Invoke(ctx, MultipoolerService_GetServingState_FullMethodName, in, out, cOpts...)
+	out := new(GetRoutingStateResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_GetRoutingState_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -472,20 +509,50 @@ func (c *multipoolerServiceClient) CommitFence(ctx context.Context, in *CommitFe
 	return out, nil
 }
 
-func (c *multipoolerServiceClient) UnfenceTablegroup(ctx context.Context, in *UnfenceTablegroupRequest, opts ...grpc.CallOption) (*UnfenceTablegroupResponse, error) {
+func (c *multipoolerServiceClient) UnfenceScope(ctx context.Context, in *UnfenceScopeRequest, opts ...grpc.CallOption) (*UnfenceScopeResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(UnfenceTablegroupResponse)
-	err := c.cc.Invoke(ctx, MultipoolerService_UnfenceTablegroup_FullMethodName, in, out, cOpts...)
+	out := new(UnfenceScopeResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_UnfenceScope_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *multipoolerServiceClient) FlipRouting(ctx context.Context, in *FlipRoutingRequest, opts ...grpc.CallOption) (*FlipRoutingResponse, error) {
+func (c *multipoolerServiceClient) SwitchRouting(ctx context.Context, in *SwitchRoutingRequest, opts ...grpc.CallOption) (*SwitchRoutingResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(FlipRoutingResponse)
-	err := c.cc.Invoke(ctx, MultipoolerService_FlipRouting_FullMethodName, in, out, cOpts...)
+	out := new(SwitchRoutingResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_SwitchRouting_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *multipoolerServiceClient) RevertRouting(ctx context.Context, in *RevertRoutingRequest, opts ...grpc.CallOption) (*RevertRoutingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RevertRoutingResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_RevertRouting_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *multipoolerServiceClient) FoldRouting(ctx context.Context, in *FoldRoutingRequest, opts ...grpc.CallOption) (*FoldRoutingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FoldRoutingResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_FoldRouting_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *multipoolerServiceClient) CleanupOperation(ctx context.Context, in *CleanupOperationRequest, opts ...grpc.CallOption) (*CleanupOperationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CleanupOperationResponse)
+	err := c.cc.Invoke(ctx, MultipoolerService_CleanupOperation_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -589,58 +656,62 @@ type MultipoolerServiceServer interface {
 	// itself is read with GetBackingConnection. A tablegroup that does not exist is
 	// NOT_FOUND.
 	GetTablegroupBinding(context.Context, *GetTablegroupBindingRequest) (*GetTablegroupBindingResponse, error)
-	// GetServingState returns the authoritative routing and admission metadata.
-	// Use it to decide which version to pass, and to reconcile an interrupted
-	// operation, including after the migration controller itself changes leader.
-	// A tablegroup with no row is UNFENCED at version zero. The state tells an
-	// incomplete fence (FENCING) from a completed one (FENCED).
-	GetServingState(context.Context, *GetServingStateRequest) (*GetServingStateResponse, error)
-	// StartFence begins a fence of one tablegroup: it writes FENCING and tells every member, in
-	// every cell, to close its gate, and returns at once. It waits for nothing. Each member
-	// closes, and answers in the same call what it holds (see FenceBusy): clean, busy (with what
-	// holds it) or unreachable (with the error). Whether anything is held, and what to do about
-	// it, is the controller's; CommitFence is the call that completes the fence.
+	// GetRoutingState returns the authoritative routing and admission metadata, read in one
+	// snapshot: the home tablegroup, the routing rules, the admission fences, and the
+	// routing_version they are at. Use it to decide which versions to pass, and to reconcile
+	// an interrupted operation, including after the migration controller itself changes
+	// leader. A scope with no fence is unfenced. When since_version is the current
+	// routing_version the response has not_modified set and omits the home and the rules;
+	// the fences are always returned, because they change without a change of the
+	// routing_version.
+	GetRoutingState(context.Context, *GetRoutingStateRequest) (*GetRoutingStateResponse, error)
+	// StartFence begins a fence of one scope for an operation: it writes FENCING and tells
+	// every member, in every cell, to close its gate, and returns at once. It waits for
+	// nothing. Each member closes, and answers in the same call what it holds (see FenceBusy):
+	// clean, busy (with what holds it) or unreachable (with the error). Whether anything is
+	// held, and what to do about it, is the controller's; CommitFence is the call that
+	// completes the fence.
 	//
-	// The version names a fence attempt. expected_version is the version of the row the caller
-	// read (the one GetServingState or an earlier response returned, which the caller passes back
-	// as it got it). If the tablegroup is UNFENCED at that version this begins a new attempt: the
-	// coordinator writes FENCING at the next version and asks the members. If it is FENCING at the
-	// version, or at the version after, this is a repeat of the attempt, whose reply may have been
-	// lost: nothing is written and the members are asked again, which closes any that missed it.
-	// If it is FENCED at the version, or the one after, the attempt is complete and the call
-	// succeeds without asking anyone. Any other state is rejected with FAILED_PRECONDITION; a
-	// fence the controller undid is UNFENCED at a later version, so a delayed repeat of it fails.
-	// The response returns the row, FENCING (or FENCED) and its version, which is what the
-	// controller passes to CommitFence and to unfence. If every member answered the call
-	// succeeds, whatever each holds; if one did not answer it fails with ABORTED, the row stays
-	// FENCING, the per-member results are the StartFenceResponse in the error's details, and the
-	// controller calls it again.
+	// The version names a fence attempt. expected_version is the version the caller read (the
+	// one GetRoutingState or an earlier response returned, which the caller passes back as it
+	// got it; zero for a scope with no fence). If the scope is unfenced at that version (no
+	// fence, or UNFENCED) this begins a new attempt: the coordinator writes FENCING at the next
+	// version, taking the scope over if another operation left it UNFENCED, and asks the
+	// members. If it is FENCING for this operation at the version, or at the version after, this
+	// is a repeat of the attempt, whose reply may have been lost: nothing is written and the
+	// members are asked again, which closes any that missed it. If it is FENCED for this
+	// operation at the version, or the one after, the attempt is complete and the call succeeds
+	// without asking anyone. Any other state is rejected with FAILED_PRECONDITION, including a
+	// scope that is FENCING or FENCED for another operation. The response returns the fence,
+	// FENCING (or FENCED) and its version, which is what the controller passes to CommitFence
+	// and to unfence. If every member answered the call succeeds, whatever each holds; if one
+	// did not answer it fails with ABORTED, the fence stays FENCING, the per-member results are
+	// the StartFenceResponse in the error's details, and the controller calls it again.
 	//
 	// A tablegroup whose durability policy, or the control home's, needs fewer than two nodes
 	// is refused with FAILED_PRECONDITION before anything is written, and so is one with more
 	// than one unmanaged pooler. A pooler that is not the default primary answers UNAVAILABLE.
 	StartFence(context.Context, *StartFenceRequest) (*StartFenceResponse, error)
-	// CommitFence completes the current fence attempt of a tablegroup, when nothing is left. It
+	// CommitFence completes the current fence attempt of a scope, when nothing is left. It
 	// asks every member of the tablegroup, from a fresh listing of its poolers, to apply the
-	// row and say what it holds, which closes a member that is not closed yet and waits for
+	// fence and say what it holds, which closes a member that is not closed yet and waits for
 	// nothing. If every member says it holds nothing (its gate is closed, no application
 	// request is running and no application reservation is held), it writes FENCED at the same
-	// version, the version does not change, and returns the row. A fenced tablegroup is one
-	// in which nothing is running and, the gates being closed, nothing can start.
+	// version, the version does not change, and returns the fence. A fenced scope is one in
+	// which nothing is running and, the gates being closed, nothing can start.
 	//
-	// Otherwise it writes nothing and fails with ABORTED, the row staying FENCING, and the
+	// Otherwise it writes nothing and fails with ABORTED, the fence staying FENCING, and the
 	// per-member results are the CommitFenceResponse in the error's details: a member is busy
 	// (a request is running or an application reservation is held, with what holds it: see
 	// FenceBusy) or unreachable (with the error). Every member is asked even when one fails.
 	// There is no way to skip or exclude a member: a pooler is left out only by being gone from
 	// topology, and one that does not answer fails the call, as does one that joined, which is
-	// asked like the rest. A commit that runs while another commit of the same fence completes it
-	// may answer ABORTED (a member that already sees FENCED refuses the second one); asked again it
-	// succeeds, since the row is FENCED at the version. CommitFence is idempotent: if the row is
-	// FENCED at the version the
+	// asked like the rest. A commit that runs while another commit of the same fence completes
+	// it may answer ABORTED; asked again it succeeds, since the fence is FENCED at the version.
+	// CommitFence is idempotent: if the fence is FENCED for the operation at the version the
 	// call succeeds, asking nobody, and any other state or version is rejected with
-	// FAILED_PRECONDITION. The version is the one the row had when the attempt began, as the
-	// start or GetServingState returned it, and the commit does not change it.
+	// FAILED_PRECONDITION. The version is the one the fence had when the attempt began, as the
+	// start returned it, and the commit does not change it.
 	//
 	// Waiting is the controller's. It calls CommitFence again, as often and for as long as its
 	// policy says, and decides what to do about what it finds. Busy reports facts. Ordinary
@@ -663,26 +734,56 @@ type MultipoolerServiceServer interface {
 	// The fence returns no WAL position. After it succeeds nothing more is written through the
 	// fenced poolers, and the controller reads the position it needs from the source itself.
 	CommitFence(context.Context, *CommitFenceRequest) (*CommitFenceResponse, error)
-	// UnfenceTablegroup sets the row back to UNFENCED and asks the members to reopen
-	// on a best-effort basis, reporting the ones it could not reach: there is no
-	// acknowledgement barrier, since a pooler opens once it reads UNFENCED. The
-	// controller repeats the call with the same version until none is unreached; that
-	// is safe, because a repeat is a success that writes nothing.
+	// UnfenceScope writes UNFENCED, at the next version, over the fence of a scope and asks the
+	// members to reopen on a best-effort basis, reporting the ones it could not reach: there is
+	// no acknowledgement barrier, since a pooler opens once it reads UNFENCED. The fence stays,
+	// UNFENCED, until CleanupOperation deletes it. The controller repeats the call with the same
+	// version until none is unreached; that is safe, because a repeat is a success that writes
+	// nothing.
 	//
-	// expected_version is the version v of the fence being undone. If the tablegroup
-	// is FENCING or FENCED at v the coordinator writes UNFENCED at v+1. If it is
-	// already UNFENCED at v+1 the unfence was done: the call succeeds, writes nothing,
+	// expected_version is the version v of the fence being undone. If the fence is FENCING or
+	// FENCED for the operation at v the coordinator writes UNFENCED at v+1. If it is already
+	// UNFENCED for the operation at v+1 the unfence was done: the call succeeds, writes nothing,
 	// and asks the members again. Any other state is rejected.
-	UnfenceTablegroup(context.Context, *UnfenceTablegroupRequest) (*UnfenceTablegroupResponse, error)
-	// FlipRouting moves the database's application traffic from one tablegroup to
-	// another, in one transaction that also checks that both are FENCED, a completed
-	// fence: a tablegroup that is FENCING is refused with FAILED_PRECONDITION. Success
-	// means the routing metadata committed; it does not unfence anything. A retry
-	// after the move, which finds the traffic already on to_tablegroup at the version
-	// after expected_routing_version, succeeds and writes nothing.
-	FlipRouting(context.Context, *FlipRoutingRequest) (*FlipRoutingResponse, error)
+	UnfenceScope(context.Context, *UnfenceScopeRequest) (*UnfenceScopeResponse, error)
+	// SwitchRouting adds the routing rule of an operation, so that the traffic of the rule's
+	// from_tablegroup goes to its to_tablegroup, in one transaction that also checks the
+	// preconditions: the routing is at expected_routing_version; from_tablegroup is the home
+	// tablegroup and is not the default tablegroup; no other rule exists; and the fences of
+	// from_tablegroup and to_tablegroup are both FENCED for this operation (a completed fence:
+	// FENCING is refused with FAILED_PRECONDITION), read with a row lock so that neither can
+	// change under the write. It bumps routing_version. Success means the routing metadata
+	// committed; it does not unfence anything. A retry after the switch, which finds the rule
+	// of this operation at the version after expected_routing_version, succeeds and writes
+	// nothing. That the operation exists as a whole, and that the rules cover the keyspace
+	// exactly, are not checked yet.
+	SwitchRouting(context.Context, *SwitchRoutingRequest) (*SwitchRoutingResponse, error)
+	// RevertRouting deletes the routing rule of an operation, so that the traffic goes back to
+	// the home tablegroup, under the same preconditions as SwitchRouting: the routing is at
+	// expected_routing_version, and the fences of the rule's two tablegroups are FENCED for this
+	// operation. It bumps routing_version. A retry after the revert, which finds no rule of the
+	// operation at the version after expected_routing_version, succeeds and writes nothing.
+	RevertRouting(context.Context, *RevertRoutingRequest) (*RevertRoutingResponse, error)
+	// FoldRouting completes a switched operation: in one transaction it makes the rule's
+	// to_tablegroup the home tablegroup, deletes the rule and bumps routing_version, so that the
+	// routing is empty again. It needs no fence, because the effective tablegroup is the same
+	// before and after, and it refuses to run if it would not be: the call resolves the traffic
+	// before and after and fails with FAILED_PRECONDITION if they differ. A retry after the fold,
+	// which finds no rule of the operation at the version after expected_routing_version,
+	// succeeds and writes nothing.
+	//
+	// PROTOTYPE STUB: this moves a home pointer. The routing-rule implementation that replaces
+	// it moves the catalog membership of the tablegroup instead.
+	FoldRouting(context.Context, *FoldRoutingRequest) (*FoldRoutingResponse, error)
+	// CleanupOperation deletes the fences of an operation. It is refused with
+	// FAILED_PRECONDITION while the operation has a routing rule, or has a fence that is
+	// FENCING. A fence that is FENCED is deleted too, and its scope serves application work
+	// again as soon as its poolers read that there is none: the controller keeps the source
+	// fenced after the fold until its unmanaged poolers are decommissioned, and cleans up
+	// after. Cleaning up an operation that has nothing left succeeds.
+	CleanupOperation(context.Context, *CleanupOperationRequest) (*CleanupOperationResponse, error)
 	// RefreshAdmission is called by the coordinator on each member of a tablegroup, for a
-	// start and for a commit alike. The pooler re-reads its tablegroup's row from the control
+	// start and for a commit alike. The pooler re-reads its tablegroup's fence from the control
 	// home, applies it (closes its gate, or opens it) and reports what it holds, without
 	// waiting for anything. Migration controllers do not call this.
 	RefreshAdmission(context.Context, *RefreshAdmissionRequest) (*RefreshAdmissionResponse, error)
@@ -741,8 +842,8 @@ func (UnimplementedMultipoolerServiceServer) GetBackingConnection(context.Contex
 func (UnimplementedMultipoolerServiceServer) GetTablegroupBinding(context.Context, *GetTablegroupBindingRequest) (*GetTablegroupBindingResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetTablegroupBinding not implemented")
 }
-func (UnimplementedMultipoolerServiceServer) GetServingState(context.Context, *GetServingStateRequest) (*GetServingStateResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method GetServingState not implemented")
+func (UnimplementedMultipoolerServiceServer) GetRoutingState(context.Context, *GetRoutingStateRequest) (*GetRoutingStateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetRoutingState not implemented")
 }
 func (UnimplementedMultipoolerServiceServer) StartFence(context.Context, *StartFenceRequest) (*StartFenceResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method StartFence not implemented")
@@ -750,11 +851,20 @@ func (UnimplementedMultipoolerServiceServer) StartFence(context.Context, *StartF
 func (UnimplementedMultipoolerServiceServer) CommitFence(context.Context, *CommitFenceRequest) (*CommitFenceResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CommitFence not implemented")
 }
-func (UnimplementedMultipoolerServiceServer) UnfenceTablegroup(context.Context, *UnfenceTablegroupRequest) (*UnfenceTablegroupResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method UnfenceTablegroup not implemented")
+func (UnimplementedMultipoolerServiceServer) UnfenceScope(context.Context, *UnfenceScopeRequest) (*UnfenceScopeResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UnfenceScope not implemented")
 }
-func (UnimplementedMultipoolerServiceServer) FlipRouting(context.Context, *FlipRoutingRequest) (*FlipRoutingResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method FlipRouting not implemented")
+func (UnimplementedMultipoolerServiceServer) SwitchRouting(context.Context, *SwitchRoutingRequest) (*SwitchRoutingResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SwitchRouting not implemented")
+}
+func (UnimplementedMultipoolerServiceServer) RevertRouting(context.Context, *RevertRoutingRequest) (*RevertRoutingResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RevertRouting not implemented")
+}
+func (UnimplementedMultipoolerServiceServer) FoldRouting(context.Context, *FoldRoutingRequest) (*FoldRoutingResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method FoldRouting not implemented")
+}
+func (UnimplementedMultipoolerServiceServer) CleanupOperation(context.Context, *CleanupOperationRequest) (*CleanupOperationResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CleanupOperation not implemented")
 }
 func (UnimplementedMultipoolerServiceServer) RefreshAdmission(context.Context, *RefreshAdmissionRequest) (*RefreshAdmissionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RefreshAdmission not implemented")
@@ -985,20 +1095,20 @@ func _MultipoolerService_GetTablegroupBinding_Handler(srv interface{}, ctx conte
 	return interceptor(ctx, in, info, handler)
 }
 
-func _MultipoolerService_GetServingState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(GetServingStateRequest)
+func _MultipoolerService_GetRoutingState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRoutingStateRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(MultipoolerServiceServer).GetServingState(ctx, in)
+		return srv.(MultipoolerServiceServer).GetRoutingState(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: MultipoolerService_GetServingState_FullMethodName,
+		FullMethod: MultipoolerService_GetRoutingState_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MultipoolerServiceServer).GetServingState(ctx, req.(*GetServingStateRequest))
+		return srv.(MultipoolerServiceServer).GetRoutingState(ctx, req.(*GetRoutingStateRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1039,38 +1149,92 @@ func _MultipoolerService_CommitFence_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
-func _MultipoolerService_UnfenceTablegroup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(UnfenceTablegroupRequest)
+func _MultipoolerService_UnfenceScope_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UnfenceScopeRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(MultipoolerServiceServer).UnfenceTablegroup(ctx, in)
+		return srv.(MultipoolerServiceServer).UnfenceScope(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: MultipoolerService_UnfenceTablegroup_FullMethodName,
+		FullMethod: MultipoolerService_UnfenceScope_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MultipoolerServiceServer).UnfenceTablegroup(ctx, req.(*UnfenceTablegroupRequest))
+		return srv.(MultipoolerServiceServer).UnfenceScope(ctx, req.(*UnfenceScopeRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _MultipoolerService_FlipRouting_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(FlipRoutingRequest)
+func _MultipoolerService_SwitchRouting_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SwitchRoutingRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(MultipoolerServiceServer).FlipRouting(ctx, in)
+		return srv.(MultipoolerServiceServer).SwitchRouting(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: MultipoolerService_FlipRouting_FullMethodName,
+		FullMethod: MultipoolerService_SwitchRouting_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(MultipoolerServiceServer).FlipRouting(ctx, req.(*FlipRoutingRequest))
+		return srv.(MultipoolerServiceServer).SwitchRouting(ctx, req.(*SwitchRoutingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MultipoolerService_RevertRouting_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevertRoutingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MultipoolerServiceServer).RevertRouting(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MultipoolerService_RevertRouting_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MultipoolerServiceServer).RevertRouting(ctx, req.(*RevertRoutingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MultipoolerService_FoldRouting_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FoldRoutingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MultipoolerServiceServer).FoldRouting(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MultipoolerService_FoldRouting_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MultipoolerServiceServer).FoldRouting(ctx, req.(*FoldRoutingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MultipoolerService_CleanupOperation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CleanupOperationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MultipoolerServiceServer).CleanupOperation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MultipoolerService_CleanupOperation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MultipoolerServiceServer).CleanupOperation(ctx, req.(*CleanupOperationRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1133,8 +1297,8 @@ var MultipoolerService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _MultipoolerService_GetTablegroupBinding_Handler,
 		},
 		{
-			MethodName: "GetServingState",
-			Handler:    _MultipoolerService_GetServingState_Handler,
+			MethodName: "GetRoutingState",
+			Handler:    _MultipoolerService_GetRoutingState_Handler,
 		},
 		{
 			MethodName: "StartFence",
@@ -1145,12 +1309,24 @@ var MultipoolerService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _MultipoolerService_CommitFence_Handler,
 		},
 		{
-			MethodName: "UnfenceTablegroup",
-			Handler:    _MultipoolerService_UnfenceTablegroup_Handler,
+			MethodName: "UnfenceScope",
+			Handler:    _MultipoolerService_UnfenceScope_Handler,
 		},
 		{
-			MethodName: "FlipRouting",
-			Handler:    _MultipoolerService_FlipRouting_Handler,
+			MethodName: "SwitchRouting",
+			Handler:    _MultipoolerService_SwitchRouting_Handler,
+		},
+		{
+			MethodName: "RevertRouting",
+			Handler:    _MultipoolerService_RevertRouting_Handler,
+		},
+		{
+			MethodName: "FoldRouting",
+			Handler:    _MultipoolerService_FoldRouting_Handler,
+		},
+		{
+			MethodName: "CleanupOperation",
+			Handler:    _MultipoolerService_CleanupOperation_Handler,
 		},
 		{
 			MethodName: "RefreshAdmission",

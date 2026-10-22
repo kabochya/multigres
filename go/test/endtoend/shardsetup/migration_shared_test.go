@@ -24,11 +24,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 
 	"github.com/multigres/multigres/go/common/metadataclient"
-	multipoolerservicepb "github.com/multigres/multigres/go/pb/multipoolerservice"
+	mig "github.com/multigres/multigres/go/test/migrator"
 )
 
 // Running the migration scenarios quickly.
@@ -117,6 +118,7 @@ var sharedScenarios = []sharedScenario{
 	{name: "CoordinatorCallsAreSafeToRepeat", run: scenarioCoordinatorCallsAreSafeToRepeat},
 	{name: "FenceIsNotCleanWhenAMemberDoesNotKnowTheProtocol", run: scenarioFenceIsNotCleanWhenAMemberDoesNotKnowTheProtocol},
 	{name: "MigrationCutoverAndRollbackUnderLoad", run: scenarioCutoverAndRollbackUnderLoad},
+	{name: "CutoverCompleteAndCleanup", run: scenarioCutoverCompleteAndCleanup},
 }
 
 // TestMigrationScenariosOnASharedCluster runs the scenarios that do not break their
@@ -160,6 +162,7 @@ func (f *migrationFixture) forScenario(t *testing.T, after string) *migrationFix
 	t.Helper()
 	v := *f
 	v.t = t
+	v.operation = uuid.NewString() // each scenario is a migration of its own
 	require.NoError(t, v.reset(), "resetting the shared cluster before this scenario; the scenario before it was %q", after)
 	v.gatewayPort = startRoutedGateway(t, v.def)
 	ctx := t.Context()
@@ -211,15 +214,19 @@ func (f *migrationFixture) tryReset(t *testing.T) error {
 // does not come back clean. A scenario's clients are gone by now (the scenario's
 // cleanups closed them); what they left behind is what is checked.
 //
-//  1. If routing moved, fence both tablegroups (each at the version it reads), flip back
-//     to migrateTG, and unfence both. Otherwise unfence whatever is fenced.
-//  2. Wait for the application backends of the source and of the default cohort to settle,
+//  1. If a rule routes the traffic, fence both tablegroups for the operation that holds
+//     the rule (each at the version it reads) and revert it. If the migration was folded
+//     the catalog says the default tablegroup is the home, and no RPC undoes that: the
+//     reset puts the home back in the catalog.
+//  2. Unfence whatever is fenced, each fence for the operation that holds it, and clean the
+//     operations up, which deletes their fences.
+//  3. Wait for the application backends of the source and of the default cohort to settle,
 //     and require that none holds anything: no open transaction, no session lock, no
 //     running statement; and require that topology has no pooler but the cluster's own.
-//  3. Empty the ledger on both sides and require that no table of the application is
+//  4. Empty the ledger on both sides and require that no table of the application is
 //     left but the ledger.
-//  4. Require every pooler to admit, the routing to name migrateTG, and both
-//     tablegroups to be unfenced.
+//  5. Require every pooler to admit, the traffic to go to migrateTG, and no fence or rule
+//     to be left.
 func (f *migrationFixture) reset() error {
 	t := f.t
 	ctx := t.Context()
@@ -227,43 +234,54 @@ func (f *migrationFixture) reset() error {
 		return fmt.Errorf("reset: "+format, args...)
 	}
 	ctl := f.control()
-	st, err := ctl.tryState(ctx, "migrateTG", "default")
+	st, err := ctl.tryState(ctx)
 	if err != nil {
-		return fail("reading the serving state: %w", err)
+		return fail("reading the routing state: %w", err)
 	}
-	rowOf := func(resp *multipoolerservicepb.GetServingStateResponse, tg string) *multipoolerservicepb.TablegroupServingState {
-		for _, row := range resp.Tablegroups {
-			if row.Tablegroup == tg {
-				return row
-			}
-		}
-		return nil
+	// A client of the operation that holds a rule or a fence, which is the only one that may
+	// change it.
+	as := func(operation string) *controlClient {
+		c := newControlClientFor(t, f.def.GetPrimary(t).Multipooler.GrpcPort, operation)
+		c.drain = f.drain
+		return c
 	}
-	for _, tg := range []string{"migrateTG", "default"} {
-		if rowOf(st, tg) == nil {
-			return fail("no row for %s", tg)
-		}
-	}
-	if st.AppTablegroup != "migrateTG" {
-		for _, tg := range []string{"default", "migrateTG"} {
-			if !closedRow(rowOf(st, tg)) {
-				if _, err := ctl.fence(ctx, tg); err != nil {
-					return fail("fencing %s to flip back: %w", tg, err)
+	for _, rule := range st.Rules {
+		holder := as(rule.OperationId)
+		for _, tg := range []string{rule.Rule.FromTablegroup, rule.Rule.ToTablegroup} {
+			if stateOfFence(st, tg) != admFenced || fenceOf(st, tg).OperationId != rule.OperationId {
+				if _, err := holder.fence(ctx, tg); err != nil {
+					return fail("fencing %s to revert the routing: %w", tg, err)
 				}
 			}
 		}
-		if _, err := ctl.flip(ctx, st.AppTablegroup, "migrateTG"); err != nil {
-			return fail("flipping back to migrateTG: %w", err)
-		}
-		if st, err = ctl.tryState(ctx, "migrateTG", "default"); err != nil {
-			return fail("reading the serving state: %w", err)
+		if _, err := holder.revertRouting(ctx); err != nil {
+			return fail("reverting the routing: %w", err)
 		}
 	}
-	for _, tg := range []string{"migrateTG", "default"} {
-		if row := rowOf(st, tg); closedRow(row) {
-			if err := f.lib().UnfenceUntilReached(ctx, tg, row.Version); err != nil {
-				return fail("unfencing %s: %w", tg, err)
+	if st, err = ctl.tryState(ctx); err != nil {
+		return fail("reading the routing state: %w", err)
+	}
+	if st.HomeTablegroup != "migrateTG" {
+		// A folded migration: the catalog is where it is undone.
+		tag, err := f.adminConn(f.def).Exec(ctx, `UPDATE multigres.catalog_state
+SET home_tablegroup = (SELECT oid FROM multigres.tablegroup WHERE name = 'migrateTG'), routing_version = routing_version + 1`)
+		if err != nil || tag.RowsAffected() != 1 {
+			return fail("putting the home tablegroup back in the catalog: %v", err)
+		}
+	}
+	operations := map[string]bool{}
+	for _, fence := range st.Fences {
+		operations[fence.OperationId] = true
+		if fence.State != admUnfenced {
+			lib := f.lib(func(c *mig.Config) { c.OperationID = fence.OperationId })
+			if err := lib.UnfenceUntilReached(ctx, fence.Scope.Tablegroup, fence.Version); err != nil {
+				return fail("unfencing %s: %w", fence.Scope.Tablegroup, err)
 			}
+		}
+	}
+	for operation := range operations {
+		if _, err := as(operation).cleanup(ctx); err != nil {
+			return fail("cleaning up operation %s: %w", operation, err)
 		}
 	}
 
@@ -310,16 +328,14 @@ func (f *migrationFixture) reset() error {
 	}
 
 	// The state is as built.
-	if st, err = ctl.tryState(ctx, "migrateTG", "default"); err != nil {
-		return fail("reading the serving state: %w", err)
+	if st, err = ctl.tryState(ctx); err != nil {
+		return fail("reading the routing state: %w", err)
 	}
-	if st.AppTablegroup != "migrateTG" {
-		return fail("routing names %s, not migrateTG", st.AppTablegroup)
+	if got := effectiveTablegroup(st); got != "migrateTG" {
+		return fail("the traffic goes to %s, not migrateTG", got)
 	}
-	for _, tg := range []string{"migrateTG", "default"} {
-		if row := rowOf(st, tg); closedRow(row) {
-			return fail("%s is fenced after the reset", tg)
-		}
+	if len(st.Rules) != 0 || len(st.Fences) != 0 {
+		return fail("rules %v and fences %v are left after the reset", st.Rules, st.Fences)
 	}
 	ports := map[string]int{"source pooler": f.src.grpcPort}
 	for name, inst := range f.def.Multipoolers {

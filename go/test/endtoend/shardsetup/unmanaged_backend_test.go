@@ -222,7 +222,7 @@ func TestUnmanagedPoolerServesExternalPostgres(t *testing.T) {
 	s := getSharedSetup(t)
 	extPort := startExternalPostgres(t)
 	seedBackingConnection(t, s, "serves-queries", externalDSN(extPort), externalSystemIdentifier(t, extPort))
-	setServingRow(t, s, "migrateTG", "serves-queries", false, 0)
+	bindTablegroup(t, s, "migrateTG", "serves-queries")
 
 	const name = "unmanaged-serves"
 	p := startUnmanagedPooler(t, s, name, "postgres", "serves-queries")

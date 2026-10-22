@@ -116,3 +116,10 @@ func TestParseBackingDSNRequiresASingleServer(t *testing.T) {
 		require.Error(t, err, bad)
 	}
 }
+
+// TestTheConnectionDirectoryIsRegistered: the directory of backing connections is what the
+// prototype registers; without it (a build that drops connection_store.go) it stays nil and the
+// calls answer UNIMPLEMENTED.
+func TestTheConnectionDirectoryIsRegistered(t *testing.T) {
+	require.NotNil(t, newConnectionDirectory)
+}

@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
@@ -44,7 +45,10 @@ import (
 type migrationFixture struct {
 	t *testing.T
 	// drain is the drain timeout every fence of the fixture asks of its members.
-	drain       time.Duration
+	drain time.Duration
+	// operation is the operation of the migration the fixture runs: every call of its control
+	// client and its reference migrator belongs to it.
+	operation   string
 	def         *ShardSetup
 	srcPort     int
 	src         *unmanagedPooler
@@ -97,7 +101,7 @@ func newMigrationFixtureWith(t *testing.T, opts migrationOptions) *migrationFixt
 	// until its row says UNFENCED (seeded by the helper).
 	def := startControlledDefaultCohort(t, WithMultipoolerCount(poolers))
 
-	f := &migrationFixture{t: t, def: def, drain: drain}
+	f := &migrationFixture{t: t, def: def, drain: drain, operation: uuid.NewString()}
 	f.srcPort = startExternalPostgres(t)
 	f.srcPortText = strconv.Itoa(f.srcPort)
 	var err error
@@ -116,8 +120,8 @@ func newMigrationFixtureWith(t *testing.T, opts migrationOptions) *migrationFixt
 
 	backingDSN := externalDSN(f.srcPort)
 	seedBackingConnection(t, def, "mig-src", backingDSN, externalSystemIdentifier(t, f.srcPort))
-	setServingRow(t, def, "migrateTG", "mig-src", false, 0)
-	seedRouting(t, def, "migrateTG")
+	bindTablegroup(t, def, "migrateTG", "mig-src")
+	seedHome(t, def, "migrateTG")
 	f.src = startUnmanagedPooler(t, def, "mig-src-1", "postgres", "mig-src", opts.srcPoolerArgs...)
 	waitBackendReady(t, f.src)
 	requireAdmits(t, f.src.grpcPort, "the source must admit while UNFENCED")
@@ -150,7 +154,7 @@ func (f *migrationFixture) adminConn(s *ShardSetup) *pgx.Conn {
 // recorded the new primary in def.PrimaryName.
 func (f *migrationFixture) control() *controlClient {
 	f.t.Helper()
-	c := newControlClient(f.t, f.def.GetPrimary(f.t).Multipooler.GrpcPort)
+	c := newControlClientFor(f.t, f.def.GetPrimary(f.t).Multipooler.GrpcPort, f.operation)
 	c.drain = f.drain
 	return c
 }
@@ -161,7 +165,8 @@ func (f *migrationFixture) control() *controlClient {
 func (f *migrationFixture) lib(tune ...func(*mig.Config)) *mig.Migrator {
 	f.t.Helper()
 	cfg := mig.Config{
-		Database: "postgres", Source: "migrateTG", Destination: "default",
+		Database: "postgres", Source: "migrateTG", Destination: "default", DestinationShard: "0-inf",
+		OperationID:   f.operation,
 		Control:       func() mig.Control { return f.control() },
 		GiveUpAfter:   time.Minute,
 		RetryInterval: 500 * time.Millisecond,
@@ -509,7 +514,7 @@ func (m *migrator) copyLedger(ctx context.Context, from, to *pgx.Conn) {
 
 // Cutover moves application traffic from the source to the destination through the
 // reference migrator: preflight, fence the source, fence the destination, catch up while
-// both are fenced, flip, unfence the destination.
+// both are fenced, switch the routing, unfence the destination.
 func (m *migrator) Cutover(ctx context.Context) {
 	f, t := m.f, m.f.t
 	t.Helper()
@@ -517,7 +522,7 @@ func (m *migrator) Cutover(ctx context.Context) {
 		Resume: m.resume,
 		CatchUp: func(ctx context.Context) error {
 			// Both sides are fenced and acknowledged: nothing may write to the source from
-			// here on. Catch up, then flip.
+			// here on. Catch up, then switch the routing.
 			time.Sleep(m.catchUpDelay)
 			srcBefore := countLedger(t, f.srcAdmin)
 			m.srcFrozen = m.snapshot(ctx, f.srcAdmin)
@@ -526,7 +531,7 @@ func (m *migrator) Cutover(ctx context.Context) {
 			require.Equal(t, srcBefore, countLedger(t, destAdmin), "catch-up must copy every row")
 			return nil
 		},
-		BetweenFlipAndUnfence: func(ctx context.Context) error {
+		BetweenSwitchAndUnfence: func(ctx context.Context) error {
 			m.requireSourceFrozen(ctx, "after routing moved")
 			if m.betweenRouteAndUnfence != nil {
 				m.betweenRouteAndUnfence()
@@ -543,13 +548,13 @@ func (m *migrator) Cutover(ctx context.Context) {
 }
 
 // Rollback moves application traffic back to the source: fence the destination, catch up
-// in reverse, flip back, unfence the source, which is still fenced from the cutover.
+// in reverse, revert the routing, unfence the source, which is still fenced from the cutover.
 func (m *migrator) Rollback(ctx context.Context) {
 	f, t := m.f, m.f.t
 	t.Helper()
-	state := f.control().state(ctx, "migrateTG", "default")
-	require.Equal(t, "default", state.AppTablegroup, "the destination must own the traffic")
-	require.Equal(t, admFenced, state.Tablegroups[0].State, "the source is still fenced from the cutover")
+	state := f.control().state(ctx)
+	require.Equal(t, "default", effectiveTablegroup(state), "the destination must own the traffic")
+	require.Equal(t, admFenced, stateOfFence(state, "migrateTG"), "the source is still fenced from the cutover")
 
 	// Whatever reached the fenced source while the destination served would be
 	// erased by the catch-up below, so look before it runs.
@@ -575,4 +580,30 @@ func (m *migrator) Rollback(ctx context.Context) {
 	m.destFenceVersion = res.FromFenceVersion
 	m.srcFenceVersion = res.ToFenceVersion
 	m.requireDestFrozen(ctx, "after the rollback moved traffic back")
+}
+
+// Complete folds the migration: the destination becomes the home tablegroup and the routing is
+// empty again. The traffic does not move.
+func (m *migrator) Complete(ctx context.Context) {
+	f, t := m.f, m.f.t
+	t.Helper()
+	_, err := f.lib().Complete(ctx)
+	require.NoError(t, err)
+	state := f.control().state(ctx)
+	require.Empty(t, state.Rules, "a folded migration leaves no routing rule")
+	require.Equal(t, "default", state.HomeTablegroup)
+	require.Equal(t, "default", effectiveTablegroup(state), "the traffic is where it was")
+}
+
+// Cleanup deletes the operation's fences. The source's poolers are still running and it is still
+// fenced, so this reopens it: call it only where that is what the scenario means, and after the
+// source's poolers are decommissioned in a real migration.
+func (m *migrator) Cleanup(ctx context.Context) {
+	f, t := m.f, m.f.t
+	t.Helper()
+	_, err := f.lib().Cleanup(ctx)
+	require.NoError(t, err)
+	state := f.control().state(ctx)
+	require.Empty(t, state.Fences, "cleanup deleted the operation's fences")
+	require.Empty(t, state.Rules)
 }

@@ -49,7 +49,7 @@ func BenchmarkStartRequest(b *testing.B) {
 
 func BenchmarkBeginRequest(b *testing.B) {
 	s, target := benchServer()
-	s.EnableAdmissionControl(false)
+	s.EnableAdmissionControl(true)
 	if !s.OpenApplication(s.AdmissionGeneration()) {
 		b.Fatal("could not open the gate")
 	}

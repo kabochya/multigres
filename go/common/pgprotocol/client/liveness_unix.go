@@ -42,8 +42,8 @@ func peerClosed(nc net.Conn) bool {
 		rerr error
 	)
 	if err := raw.Read(func(fd uintptr) bool {
-		n, _, rerr = syscall.Recvfrom(int(fd), buf[:], syscall.MSG_PEEK|syscall.MSG_DONTWAIT) //nolint:gosec // a file descriptor fits in an int
-		return true                                                                           // never wait for the socket to become readable
+		n, _, rerr = syscall.Recvfrom(int(fd), buf[:], syscall.MSG_PEEK|syscall.MSG_DONTWAIT)
+		return true // never wait for the socket to become readable
 	}); err != nil {
 		return false
 	}

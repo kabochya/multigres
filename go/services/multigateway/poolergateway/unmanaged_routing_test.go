@@ -529,7 +529,7 @@ func TestRollbackRightAfterACutoverStillHoldsRequests(t *testing.T) {
 		}
 	}
 
-	// The cutover: a request waits on the fenced source and is released by the flip.
+	// The cutover: a request waits on the fenced source and is released by the switch.
 	selected, done := run(writableTarget("migrateTG"))
 	require.Eventually(t, bufferedOn("migrateTG"), 5*time.Second, time.Millisecond)
 	require.True(t, routing.Update("destTG", 2))

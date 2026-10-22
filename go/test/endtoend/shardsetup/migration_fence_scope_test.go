@@ -68,8 +68,8 @@ func scenarioDirectConnectionsToTheSourceAreNotFenced(t *testing.T, f *migration
 	// The fence is not held back by it, and leaves it running.
 	resp, err := f.control().fenceWithin(ctx, "migrateTG", 60*time.Second)
 	require.NoError(t, err, "a direct connection that is running a statement does not hold the fence back")
-	require.Equal(t, admFenced, resp.State.State)
-	require.NoError(t, f.lib().UnfenceUntilReached(ctx, "migrateTG", resp.State.Version))
+	require.Equal(t, admFenced, resp.Fence.State)
+	require.NoError(t, f.lib().UnfenceUntilReached(ctx, "migrateTG", resp.Fence.Version))
 	require.Equal(t, 1, activeBackends(t, f.srcAdmin, "direct-marker"), "the fence does not end a client it does not serve")
 
 	// The whole cutover completes with it still running.
@@ -137,7 +137,7 @@ func TestAnIdleReservationRefusesOneFenceAndARetryAfterTheInactivityTimeoutSucce
 	// transaction and the fence converges, at the same version.
 	_, err = f.lib(func(c *mig.Config) { c.GiveUpAfter = 30 * time.Second }).FenceOrGiveUp(ctx, "migrateTG")
 	require.NoError(t, err)
-	st := f.control().state(ctx, "migrateTG").Tablegroups[0]
+	st := f.control().fenceRow(ctx, "migrateTG")
 	require.Equal(t, admFenced, st.State)
 	require.EqualValues(t, before+1, st.Version, "the retries wrote nothing more")
 
@@ -182,7 +182,7 @@ func TestTheMigratorCanEndAnIdleReservationByItsPid(t *testing.T) {
 		}
 	}).FenceOrGiveUp(ctx, "migrateTG")
 	require.NoError(t, err, "the fence completes once the idle reservation is ended")
-	require.Equal(t, admFenced, resp.State.State)
+	require.Equal(t, admFenced, resp.Fence.State)
 	require.Less(t, time.Since(started), 25*time.Second, "well before the pooler's inactivity timeout of 30s would have reaped it")
 	var ended bool
 	for _, line := range logged {
@@ -203,7 +203,7 @@ func TestTheMigratorCanEndAnIdleReservationByItsPid(t *testing.T) {
 	require.Contains(t, []string{"57P01", "40001"}, pgErr.Code, "the session was terminated: %v", pgErr)
 	t.Logf("the client's next statement fails with %s: %s", pgErr.Code, pgErr.Message)
 
-	require.NoError(t, f.lib().UnfenceUntilReached(ctx, "migrateTG", resp.State.Version))
+	require.NoError(t, f.lib().UnfenceUntilReached(ctx, "migrateTG", resp.Fence.Version))
 }
 
 // TestASessionWhoseReservationWasReapedGets40001AfterACutoverAndGoesOn: a session holds a temporary

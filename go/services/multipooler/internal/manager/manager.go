@@ -122,6 +122,9 @@ type MultipoolerManager struct {
 
 	// admission is the local application admission state; see admission.go.
 	admission admissionRuntime
+	// admissionBackend is what admission needs to know about the backend of this pooler; it is
+	// chosen once, from the management mode, which is immutable.
+	admissionBackend admissionBackend
 	// defaultPrimary is the cached connection to the default primary, for admission reads.
 	defaultPrimary     *defaultPrimaryClient
 	defaultPrimaryOnce sync.Once
@@ -412,6 +415,7 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 		ctx:    ctx,
 		cancel: cancel,
 	}
+	pm.admissionBackend = newAdmissionBackend(pm, unmanaged)
 
 	// Apply the configured health-stream staleness override (zero is ignored,
 	// keeping the built-in default). Set before serving so the very first
@@ -468,7 +472,7 @@ func newMultipoolerManager(logger *slog.Logger, multipooler *clustermetadatapb.M
 	// A pooler opens only after it has read its admission state, so its application
 	// gate is closed from the moment the query server exists.
 	if gate, ok := pm.qsc.(poolerserver.ApplicationGate); ok {
-		gate.EnableAdmissionControl(unmanaged)
+		gate.EnableAdmissionControl(pm.admissionBackend.ClosesOnRoleChange())
 		pm.healthStreamer.admissionControlled = true
 		pm.healthStreamer.admissionClosed = true
 	}

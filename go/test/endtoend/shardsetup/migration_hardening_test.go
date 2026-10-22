@@ -78,7 +78,7 @@ func scenarioFenceIsNotCleanWhenAMemberDoesNotKnowTheProtocol(t *testing.T, f *m
 	require.NoError(t, f.def.TopoServer.UnregisterMultipooler(ctx, old.Id))
 	resp, err := f.control().fenceWithin(ctx, "migrateTG", 60*time.Second)
 	require.NoError(t, err, "without the old pooler the same fence goes through")
-	require.Equal(t, admFenced, resp.State.State)
-	require.EqualValues(t, before+1, resp.State.Version, "and wrote nothing")
+	require.Equal(t, admFenced, resp.Fence.State)
+	require.EqualValues(t, before+1, resp.Fence.Version, "and wrote nothing")
 	giveUp(t, f, "migrateTG", before, f.src.grpcPort)
 }

@@ -22,7 +22,7 @@ import "net"
 // when the connection is not TCP (a Unix socket has no port, and the server shows -1).
 func (c *Conn) LocalPort() int32 {
 	if addr, ok := c.conn.LocalAddr().(*net.TCPAddr); ok {
-		return int32(addr.Port) //nolint:gosec // a port fits in an int32
+		return int32(addr.Port)
 	}
 	return 0
 }
