@@ -66,8 +66,27 @@ BEGIN
   CREATE UNIQUE INDEX IF NOT EXISTS admission_fence_scope
     ON multigres.admission_fence (tablegroup, COALESCE(shard_id, 0), COALESCE(table_id, 0));
 
+  -- The operations, one row per migration, the RFC's operation table without its foreign keys.
+  -- state is where the operation is: PREPARE from its first fence, SWITCHED when its rule is added,
+  -- REVERTED or FOLDED when the rule is deleted, and CLEANED once its fences are deleted, for
+  -- good: a call that names a cleaned operation is refused, so a delayed one cannot fence a scope
+  -- again after the cleanup (a scope with no fence starts again at version zero). version is the
+  -- routing_version the last switch, revert or fold produced, which is what recognizes the retry
+  -- of that very call and no other.
+  CREATE TABLE IF NOT EXISTS multigres.operation (
+    operation_id UUID PRIMARY KEY,
+    state TEXT NOT NULL CHECK (state IN ('PREPARE', 'SWITCHED', 'REVERTED', 'FOLDED', 'CLEANED')),
+    version BIGINT NOT NULL DEFAULT 0,
+    -- the tablegroup that receives the traffic after that last change (the destination of a switch
+    -- and of a fold, the home tablegroup after a revert), so that a retry answers what the first
+    -- call did.
+    effective TEXT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+
   -- The routing rules. Only the tablegroup scope exists: the rule covers the whole keyspace of
-  -- from_tablegroup, so the range is NULL to NULL.
+  -- from_tablegroup, so the range is NULL to NULL. At most one rule applies at a time: the
+  -- constant-key unique index below holds the table to one row.
   CREATE TABLE IF NOT EXISTS multigres.routing_rule (
     rule_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     operation_id UUID NOT NULL UNIQUE,
@@ -81,10 +100,17 @@ BEGIN
     CONSTRAINT routing_rule_full_range CHECK (range_start IS NULL AND range_end IS NULL),
     CONSTRAINT routing_rule_distinct CHECK (from_tablegroup <> to_tablegroup)
   );
+  CREATE UNIQUE INDEX IF NOT EXISTS routing_rule_single ON multigres.routing_rule ((true));
 END
 $$`
 
-// EnsureRoutingSchema creates the catalog state, the admission fences and the routing rules if
+// Known limits of the prototype: a database whose fences predate the operation table has no row for
+// their operations, and a switch of such an operation is refused as if the state changed
+// concurrently; and the routing_rule_single index cannot be created in a database whose old
+// prototype tables hold more than one rule, which fails the whole schema statement. Neither is
+// migrated: the tables are throwaway.
+
+// EnsureRoutingSchema creates the catalog state, the admission fences, the operations and the routing rules if
 // they do not exist. exec runs one statement with administrative privileges on the default
 // primary.
 func EnsureRoutingSchema(ctx context.Context, exec func(ctx context.Context, sql string) error) error {

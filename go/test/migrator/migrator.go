@@ -910,15 +910,18 @@ func (m *Migrator) Complete(ctx context.Context) (*multipoolerservicepb.FoldRout
 	return resp, nil
 }
 
-// Cleanup deletes the operation's fences with CleanupOperation, FENCED ones included, and reports
-// how many. The coordinator refuses while the operation has a routing rule or a fence that is
-// FENCING; cleaning up an operation that has nothing left succeeds.
+// Cleanup deletes the operation's fences with CleanupOperation, FENCED ones included, reports how
+// many, and ends the operation for good: later calls of this operation (a new Cutover, a replayed
+// fence) are refused with FAILED_PRECONDITION, so a new migration needs a new OperationID. The
+// coordinator refuses while the operation has a routing rule or a fence that is FENCING; cleaning up
+// an operation that has nothing left succeeds, and repeating it deletes nothing.
 //
-// ORDERING RULE: call it only after the source's unmanaged poolers are decommissioned (and after
-// Complete). Deleting a FENCED row reopens that scope as soon as its poolers read that there is no
-// fence, so a source whose poolers are still running would serve application work again, to any
-// gateway that still has stale routing. After a Rollback, Cleanup deletes the destination's FENCED
-// row too, and so reopens the destination; do that only when its poolers should serve again.
+// ORDERING RULE: call it only after Complete, and after the source's unmanaged poolers are
+// decommissioned. Deleting a fence tells no pooler anything, but it removes the record that says why
+// a fenced pooler refuses application work: a source pooler that is still running keeps refusing
+// until it restarts, and then it opens, to any gateway that still has stale routing. After a
+// Rollback, Cleanup deletes the destination's FENCED row too, and so reopens the destination for
+// any pooler that restarts; do that only when its poolers should serve again.
 func (m *Migrator) Cleanup(ctx context.Context) (*multipoolerservicepb.CleanupOperationResponse, error) {
 	var resp *multipoolerservicepb.CleanupOperationResponse
 	err := m.routingCall(ctx, "cleanup", func() error {

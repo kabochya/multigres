@@ -55,6 +55,7 @@ type memStore struct {
 	tablegroups map[string]bool
 	home        string
 	version     int64
+	operations  map[string]*operationRow
 	rules       []ruleRow
 	// uncertainNext makes the next WriteFence apply and then report an error, like a
 	// commit whose acknowledgment was lost.
@@ -69,7 +70,7 @@ type memStore struct {
 }
 
 func newMemStore() *memStore {
-	return &memStore{fences: map[string]*fenceRow{}, tablegroups: map[string]bool{}}
+	return &memStore{fences: map[string]*fenceRow{}, tablegroups: map[string]bool{}, operations: map[string]*operationRow{}}
 }
 
 // add sets the fence of a tablegroup, held by operation A; fenced stands for a completed fence,
@@ -87,8 +88,16 @@ func (s *memStore) addHeld(op, tg string, state multipoolerservicepb.AdmissionSt
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.tablegroups[tg] = true
+	s.record(op)
 	s.nextID++
 	s.fences[tg] = &fenceRow{id: s.nextID, operationID: op, tablegroup: tg, state: state, version: version, updatedAt: time.Now()}
+}
+
+// record notes an operation, as the first fence of an operation does; the lock is held.
+func (s *memStore) record(op string) {
+	if s.operations[op] == nil {
+		s.operations[op] = &operationRow{operationID: op, state: operationPrepare}
+	}
 }
 
 // addTablegroup puts a tablegroup in the catalog, with no fence.
@@ -108,8 +117,20 @@ func (s *memStore) Snapshot(context.Context) (*routingSnapshot, error) {
 	for _, f := range s.fences {
 		snap.fences = append(snap.fences, *f)
 	}
+	for _, o := range s.operations {
+		if o.state != operationCleaned { // the snapshot lists the operations that are not cleaned up
+			snap.operations = append(snap.operations, *o)
+		}
+	}
 	sort.Slice(snap.fences, func(i, j int) bool { return snap.fences[i].id < snap.fences[j].id })
 	return snap, nil
+}
+
+func (s *memStore) OperationCleaned(_ context.Context, op string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o := s.operations[op]
+	return o != nil && o.state == operationCleaned, nil
 }
 
 func (s *memStore) TablegroupExists(_ context.Context, tg string) (bool, error) {
@@ -130,6 +151,10 @@ func (s *memStore) WriteFence(_ context.Context, w fenceWrite) (bool, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if o := s.operations[w.operationID]; o != nil && o.state == operationCleaned {
+		return false, nil
+	}
+	s.record(w.operationID)
 	cur := s.fences[w.tablegroup]
 	switch {
 	case w.prev == nil:
@@ -175,11 +200,14 @@ func (s *memStore) ruleIndex(op string) int {
 func (s *memStore) SwitchRouting(_ context.Context, op string, rule ruleRow, expected int64) (int64, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	o := s.operations[op]
 	if s.version != expected || s.home != rule.from || rule.from == "default" || len(s.rules) > 0 ||
-		!s.fencedFor(op, rule.from) || !s.fencedFor(op, rule.to) {
+		!s.fencedFor(op, rule.from) || !s.fencedFor(op, rule.to) ||
+		o == nil || (o.state != operationPrepare && o.state != operationReverted) {
 		return 0, false, nil
 	}
 	s.version++
+	o.state, o.version, o.effective = operationSwitched, s.version, rule.to
 	rule.operationID, rule.createdVersion = op, s.version
 	s.rules = append(s.rules, rule)
 	return s.version, true, nil
@@ -189,10 +217,11 @@ func (s *memStore) RevertRouting(_ context.Context, op string, expected int64) (
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	i := s.ruleIndex(op)
-	if i < 0 || s.version != expected || !s.fencedFor(op, s.rules[i].from) || !s.fencedFor(op, s.rules[i].to) {
+	if i < 0 || s.version != expected || !s.fencedFor(op, s.rules[i].from) || !s.fencedFor(op, s.rules[i].to) || s.operations[op].state != operationSwitched {
 		return 0, false, nil
 	}
 	s.version++
+	s.operations[op].state, s.operations[op].version, s.operations[op].effective = operationReverted, s.version, s.rules[i].from
 	s.rules = append(s.rules[:i], s.rules[i+1:]...)
 	return s.version, true, nil
 }
@@ -201,25 +230,29 @@ func (s *memStore) FoldRouting(_ context.Context, op string, expected int64) (in
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	i := s.ruleIndex(op)
-	if i < 0 || s.version != expected || s.home != s.rules[i].from {
+	if i < 0 || s.version != expected || s.home != s.rules[i].from || s.operations[op].state != operationSwitched {
 		return 0, false, nil
 	}
 	s.version++
+	s.operations[op].state, s.operations[op].version, s.operations[op].effective = operationFolded, s.version, s.rules[i].to
 	s.home = s.rules[i].to
 	s.rules = append(s.rules[:i], s.rules[i+1:]...)
 	return s.version, true, nil
 }
 
-func (s *memStore) CleanupOperation(_ context.Context, op string) (int64, bool, error) {
+func (s *memStore) CleanupOperation(_ context.Context, op string, routingVersion int64) (int64, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	blocked := s.ruleIndex(op) >= 0
-	for _, f := range s.fences {
-		blocked = blocked || (f.operationID == op && f.state == stateFencing)
+	if o := s.operations[op]; o == nil || o.state != operationCleaned {
+		blocked := s.ruleIndex(op) >= 0 || s.version != routingVersion
+		for _, f := range s.fences {
+			blocked = blocked || (f.operationID == op && f.state == stateFencing)
+		}
+		if blocked {
+			return 0, true, nil
+		}
 	}
-	if blocked {
-		return 0, true, nil
-	}
+	s.operations[op] = &operationRow{operationID: op, state: operationCleaned, version: s.version}
 	var deleted int64
 	for tg, f := range s.fences {
 		if f.operationID == op {
@@ -2006,4 +2039,201 @@ func TestCoordinatorBusyMemberResultSaysWhatHoldsIt(t *testing.T) {
 	require.EqualValues(t, 51234, got.GetClientPort(), "the port that names the connection reaches the controller as it is")
 	require.Equal(t, "1 requests in flight, 1 reservations held", a.Detail)
 	require.Nil(t, results["w"].Busy)
+}
+
+// cutover runs a cutover of operation A from alpha to beta as far as the switch, leaving the source
+// FENCED and the destination unfenced, and returns the routing version it produced.
+func (h *coordHarness) cutover(t *testing.T) int64 {
+	t.Helper()
+	_, err := h.fenceTG("alpha", 0)
+	require.NoError(t, err)
+	dst, err := h.fenceTG("beta", 0)
+	require.NoError(t, err)
+	moved, err := h.switchRouting("alpha", "beta", 0)
+	require.NoError(t, err)
+	_, err = h.unfenceTG("beta", dst.Fence.Version)
+	require.NoError(t, err)
+	return moved.RoutingVersion
+}
+
+// TestCoordinatorRevertAndFoldRetriesAreRecognizedByTheOperationAndNothingElse: a retry is a
+// success only when the operation is in the state its own call left, at the version that call
+// produced. A fold that committed and whose reply was lost is not a revert that can be retried,
+// whatever the version says, and a revert or a fold of an operation that never switched is not
+// recognized because something else bumped the version.
+func TestCoordinatorRevertAndFoldRetriesAreRecognizedByTheOperationAndNothingElse(t *testing.T) {
+	t.Run("a revert retried after a fold", func(t *testing.T) {
+		h := newCoordHarness(t)
+		version := h.cutover(t)
+		folded, err := h.foldRouting(version)
+		require.NoError(t, err)
+
+		again, err := h.foldRouting(version)
+		require.NoError(t, err, "the fold, retried, is its own success")
+		require.Equal(t, folded.RoutingVersion, again.RoutingVersion)
+
+		_, err = h.revertRouting(version)
+		requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+		require.ErrorContains(t, err, "FOLDED", "the operation says what it is")
+		require.Equal(t, "beta", h.store.home, "nothing was undone")
+		require.EqualValues(t, version+1, h.store.version, "and nothing was written")
+	})
+	t.Run("a fold retried after a revert", func(t *testing.T) {
+		h := newCoordHarness(t)
+		version := h.cutover(t)
+		_, err := h.fenceTG("beta", h.row(t, "beta").version)
+		require.NoError(t, err)
+		reverted, err := h.revertRouting(version)
+		require.NoError(t, err)
+
+		again, err := h.revertRouting(version)
+		require.NoError(t, err, "the revert, retried, is its own success")
+		require.Equal(t, reverted.RoutingVersion, again.RoutingVersion)
+
+		_, err = h.foldRouting(version)
+		requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+		require.ErrorContains(t, err, "REVERTED")
+		require.Equal(t, "alpha", h.store.home)
+	})
+	t.Run("an operation that never switched", func(t *testing.T) {
+		h := newCoordHarness(t)
+		// Something else moved the routing version, as another operation's switch does.
+		h.store.version = 4
+		_, err := h.fenceTG("alpha", 0)
+		require.NoError(t, err)
+		for name, call := range map[string]func() error{
+			"revert": func() error { _, err := h.revertRouting(3); return err },
+			"fold":   func() error { _, err := h.foldRouting(3); return err },
+		} {
+			requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, call())
+			t.Log(name, "refused")
+		}
+		require.EqualValues(t, 4, h.store.version)
+	})
+	t.Run("another operation's revert", func(t *testing.T) {
+		h := newCoordHarness(t)
+		version := h.cutover(t)
+		_, err := h.fenceTG("beta", h.row(t, "beta").version)
+		require.NoError(t, err)
+		_, err = h.revertRouting(version)
+		require.NoError(t, err)
+		// Operation B, which did nothing, asks for the revert that produced this version.
+		_, err = h.c.RevertRouting(context.Background(), &multipoolerservicepb.RevertRoutingRequest{Database: "db", OperationId: opB, ExpectedRoutingVersion: version})
+		requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	})
+}
+
+// TestCoordinatorACleanedOperationIsRefusedEverywhere: cleanup ends an operation for good. A scope
+// with no fence starts again at version zero, so a delayed call replayed after the cleanup would
+// fence it again; every fence and routing call of the operation is refused, and a cleanup repeated
+// succeeds.
+func TestCoordinatorACleanedOperationIsRefusedEverywhere(t *testing.T) {
+	h := newCoordHarness(t)
+	_, err := h.fenceTG("alpha", 0)
+	require.NoError(t, err)
+	_, err = h.unfenceTG("alpha", 1)
+	require.NoError(t, err)
+	deleted, err := h.cleanup(opA)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, deleted.FencesDeleted)
+	require.Equal(t, stateUnfenced, h.row(t, "alpha").state)
+	writes := h.store.writes
+
+	// The StartFence of the first fence, delayed and replayed.
+	_, err = h.startAs(opA, "alpha", 0)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	require.ErrorContains(t, err, "cleaned up")
+	_, err = h.commitAs(opA, "alpha", 1)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	_, err = h.unfenceAs(opA, "alpha", 1)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	_, err = h.switchRouting("alpha", "beta", 0)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	_, err = h.revertRouting(0)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	_, err = h.foldRouting(0)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	require.Equal(t, writes, h.store.writes, "nothing was written")
+	require.Equal(t, 1, h.refresh.fencesTo("w"), "no member was asked after the first start")
+	require.Equal(t, stateUnfenced, h.row(t, "alpha").state, "the scope is not fenced again")
+
+	again, err := h.cleanup(opA)
+	require.NoError(t, err, "a cleanup that is repeated succeeds")
+	require.Zero(t, again.FencesDeleted)
+
+	// The store refuses it too, whatever the coordinator read: the operation is checked where the
+	// fence is written.
+	ok, err := h.store.WriteFence(context.Background(), fenceWrite{tablegroup: "alpha", operationID: opA, state: stateFencing, version: 1})
+	require.NoError(t, err)
+	require.False(t, ok)
+
+	// Another operation is not affected.
+	_, err = h.startAs(opB, "alpha", 0)
+	require.NoError(t, err)
+}
+
+// TestCoordinatorCleanupDoesNotDeleteUnderASwitchThatCommittedMeanwhile: the cleanup reads that the
+// operation has no rule, and a switch of the same operation commits before it deletes. The delete
+// is conditional on the routing version it read, which the switch bumped, so it deletes nothing
+// and says the state changed; the fences stay under the rule, which a revert can still undo.
+func TestCoordinatorCleanupDoesNotDeleteUnderASwitchThatCommittedMeanwhile(t *testing.T) {
+	h := newCoordHarness(t)
+	_, err := h.fenceTG("alpha", 0)
+	require.NoError(t, err)
+	_, err = h.fenceTG("beta", 0)
+	require.NoError(t, err)
+	h.c.store = &cleanupRacingStore{memStore: h.store, beforeCleanup: func() {
+		_, _, err := h.store.SwitchRouting(context.Background(), opA, ruleRow{from: "alpha", to: "beta", toShard: "0-inf"}, 0)
+		require.NoError(t, err)
+	}}
+
+	_, err = h.cleanup(opA)
+	requireCode(t, mtrpcpb.Code_ABORTED, err)
+	require.Equal(t, stateFenced, h.row(t, "alpha").state, "the fences are still there")
+	require.Equal(t, stateFenced, h.row(t, "beta").state)
+	require.Len(t, h.store.rules, 1)
+	require.Equal(t, operationSwitched, h.store.operations[opA].state, "and the operation is not cleaned up")
+
+	h.c.store = h.store
+	_, err = h.revertRouting(1)
+	require.NoError(t, err, "the revert still works")
+}
+
+// cleanupRacingStore changes the world just before the cleanup commits.
+type cleanupRacingStore struct {
+	*memStore
+	beforeCleanup func()
+}
+
+func (s *cleanupRacingStore) CleanupOperation(ctx context.Context, op string, routingVersion int64) (int64, bool, error) {
+	s.beforeCleanup()
+	return s.memStore.CleanupOperation(ctx, op, routingVersion)
+}
+
+// TestCoordinatorRetryAnswersWhatTheFirstCallAnswered: the version and the tablegroup of a retry's reply
+// are the ones its call produced, recorded with the operation, whatever the routing did since.
+func TestCoordinatorRetryAnswersWhatTheFirstCallAnswered(t *testing.T) {
+	h := newCoordHarness(t)
+	h.store.addTablegroup("gamma")
+	version := h.cutover(t)
+	_, err := h.fenceTG("beta", h.row(t, "beta").version)
+	require.NoError(t, err)
+	first, err := h.revertRouting(version)
+	require.NoError(t, err)
+	require.Equal(t, "alpha", first.EffectiveTablegroup)
+
+	// Another operation moves the routing on: its switch bumps the version and the traffic goes to gamma.
+	h.store.addHeld(opB, "alpha", stateFenced, 1)
+	h.store.addHeld(opB, "gamma", stateFenced, 1)
+	moved, err := h.c.SwitchRouting(context.Background(), &multipoolerservicepb.SwitchRoutingRequest{
+		Database: "db", OperationId: opB, ExpectedRoutingVersion: first.RoutingVersion,
+		Rule: &multipoolerservicepb.RoutingRule{FromTablegroup: "alpha", ToTablegroup: "gamma", ToShard: "0-inf"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "gamma", moved.EffectiveTablegroup)
+
+	again, err := h.revertRouting(version)
+	require.NoError(t, err, "the retry of the revert that committed")
+	require.Equal(t, first.RoutingVersion, again.RoutingVersion, "the version the revert produced, not the current one")
+	require.Equal(t, "alpha", again.EffectiveTablegroup, "and the tablegroup it produced, not where the traffic goes now")
 }

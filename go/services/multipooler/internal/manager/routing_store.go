@@ -90,13 +90,43 @@ func (r ruleRow) proto() *multipoolerservicepb.RoutingRuleState {
 	}
 }
 
+// The states of an operation, as they are persisted.
+const (
+	operationPrepare  = "PREPARE"
+	operationSwitched = "SWITCHED"
+	operationReverted = "REVERTED"
+	operationFolded   = "FOLDED"
+	operationCleaned  = "CLEANED"
+)
+
+// operationRow is a persisted operation: where it is, and the routing_version its last switch,
+// revert or fold produced.
+type operationRow struct {
+	operationID string
+	state       string
+	version     int64
+	// effective is the tablegroup that received the traffic after the last change.
+	effective string
+}
+
 // routingSnapshot is the persisted routing and admission state, read in one statement.
 type routingSnapshot struct {
 	routingVersion int64
 	// home is empty when the database has no catalog state.
-	home   string
-	rules  []ruleRow
-	fences []fenceRow
+	home       string
+	rules      []ruleRow
+	fences     []fenceRow
+	operations []operationRow
+}
+
+// operationOf returns the operation, nil when nothing has been recorded of it.
+func (s *routingSnapshot) operationOf(operationID string) *operationRow {
+	for i := range s.operations {
+		if s.operations[i].operationID == operationID {
+			return &s.operations[i]
+		}
+	}
+	return nil
 }
 
 // effective resolves where the traffic goes: the home tablegroup, or, when a rule applies to
@@ -160,6 +190,9 @@ type routingStore interface {
 	// has the shard of the tablegroup.
 	TablegroupExists(ctx context.Context, tablegroup string) (bool, error)
 	ShardExists(ctx context.Context, tablegroup, shard string) (bool, error)
+	// OperationCleaned reports whether the operation was cleaned up, which the snapshot does not say:
+	// it lists the operations that are not.
+	OperationCleaned(ctx context.Context, operationID string) (bool, error)
 	// WriteFence writes a fence and reports whether it did: false when the fence is no longer the
 	// one the write names, or another operation created one first.
 	WriteFence(ctx context.Context, w fenceWrite) (bool, error)
@@ -176,9 +209,11 @@ type routingStore interface {
 	// routing_version, only if the routing is at expectedVersion and the rule applies to the home
 	// tablegroup.
 	FoldRouting(ctx context.Context, operationID string, expectedVersion int64) (int64, bool, error)
-	// CleanupOperation deletes the fences of the operation, unless it has a rule or a fence that is
-	// FENCING; blocked says it did not for that reason.
-	CleanupOperation(ctx context.Context, operationID string) (deleted int64, blocked bool, err error)
+	// CleanupOperation deletes the fences of the operation and marks it cleaned up, for good, unless
+	// the routing is no longer at routingVersion (the version the caller read, when the operation
+	// had no rule), or the operation has a rule or a fence that is FENCING; blocked says it did not
+	// for that reason.
+	CleanupOperation(ctx context.Context, operationID string, routingVersion int64) (deleted int64, blocked bool, err error)
 }
 
 // newRoutingStore builds the store of admission fences and routing rules of this pooler, which
@@ -249,25 +284,6 @@ func (s *prototypeRoutingStore) ensureSchema(ctx context.Context) error {
 	return nil
 }
 
-// snapshotSQL reads everything in one statement, so that what it returns is one snapshot.
-const snapshotSQL = `SELECT json_build_object(
-  'routing_version', (SELECT routing_version FROM multigres.catalog_state),
-  'home', (SELECT tg.name FROM multigres.catalog_state cs JOIN multigres.tablegroup tg ON tg.oid = cs.home_tablegroup),
-  'rules', COALESCE((SELECT json_agg(json_build_object(
-      'operation_id', rr.operation_id, 'from', f.name, 'to', t.name, 'to_shard', s.shard_name,
-      'created_version', rr.created_version) ORDER BY rr.rule_id)
-    FROM multigres.routing_rule rr
-    JOIN multigres.tablegroup f ON f.oid = rr.from_tablegroup
-    JOIN multigres.tablegroup t ON t.oid = rr.to_tablegroup
-    JOIN multigres.shard s ON s.oid = rr.to_shard), '[]'::json),
-  'fences', COALESCE((SELECT json_agg(json_build_object(
-      'id', af.fence_id, 'operation_id', af.operation_id, 'tablegroup', tg.name, 'state', af.state,
-      'version', af.version, 'updated_at', extract(epoch FROM af.updated_at)) ORDER BY af.fence_id)
-    FROM multigres.admission_fence af
-    JOIN multigres.tablegroup tg ON tg.oid = af.tablegroup
-    WHERE af.shard_id IS NULL AND af.table_id IS NULL), '[]'::json)
-)::text`
-
 type snapshotJSON struct {
 	RoutingVersion *int64 `json:"routing_version"`
 	Home           string `json:"home"`
@@ -278,6 +294,12 @@ type snapshotJSON struct {
 		ToShard        string `json:"to_shard"`
 		CreatedVersion int64  `json:"created_version"`
 	} `json:"rules"`
+	Operations []struct {
+		OperationID string `json:"operation_id"`
+		State       string `json:"state"`
+		Version     int64  `json:"version"`
+		Effective   string `json:"effective"`
+	} `json:"operations"`
 	Fences []struct {
 		ID          int64   `json:"id"`
 		OperationID string  `json:"operation_id"`
@@ -289,7 +311,7 @@ type snapshotJSON struct {
 }
 
 func (s *prototypeRoutingStore) Snapshot(ctx context.Context) (*routingSnapshot, error) {
-	result, err := s.query(ctx, snapshotSQL)
+	result, err := s.query(ctx, protometadata.SnapshotSQL)
 	if isUndefinedTable(err) {
 		return &routingSnapshot{}, nil
 	}
@@ -311,6 +333,9 @@ func (s *prototypeRoutingStore) Snapshot(ctx context.Context) (*routingSnapshot,
 	for _, r := range raw.Rules {
 		snap.rules = append(snap.rules, ruleRow{operationID: r.OperationID, from: r.From, to: r.To, toShard: r.ToShard, createdVersion: r.CreatedVersion})
 	}
+	for _, o := range raw.Operations {
+		snap.operations = append(snap.operations, operationRow{operationID: o.OperationID, state: o.State, version: o.Version, effective: o.Effective})
+	}
 	for _, f := range raw.Fences {
 		row := fenceRow{id: f.ID, operationID: f.OperationID, tablegroup: f.Tablegroup, state: parseAdmissionState(f.State), version: f.Version}
 		row.updatedAt = time.Unix(0, int64(f.UpdatedAt*float64(time.Second)))
@@ -331,6 +356,17 @@ func parseAdmissionState(text string) multipoolerservicepb.AdmissionState {
 	return multipoolerservicepb.AdmissionState(multipoolerservicepb.AdmissionState_value["ADMISSION_STATE_"+text])
 }
 
+func (s *prototypeRoutingStore) OperationCleaned(ctx context.Context, operationID string) (bool, error) {
+	result, err := s.query(ctx, protometadata.OperationCleanedSQL, operationID)
+	if isUndefinedTable(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, mterrors.Wrap(err, "look up the operation")
+	}
+	return len(result.Rows) > 0, nil
+}
+
 func (s *prototypeRoutingStore) TablegroupExists(ctx context.Context, tablegroup string) (bool, error) {
 	result, err := s.query(ctx, "SELECT 1 FROM multigres.tablegroup WHERE name = $1", tablegroup)
 	if err != nil {
@@ -349,7 +385,8 @@ WHERE tg.name = $1 AND s.shard_name = $2`, tablegroup, shard)
 }
 
 // WriteFence is one statement. A scope that has no fence is unfenced at version zero, and a fence
-// from there inserts one; the unique index on the scope makes a concurrent insert lose.
+// from there inserts one; the unique index on the scope makes a concurrent insert lose. Neither
+// writes for an operation that was cleaned up.
 func (s *prototypeRoutingStore) WriteFence(ctx context.Context, w fenceWrite) (bool, error) {
 	if err := s.ensureSchema(ctx); err != nil {
 		return false, err
@@ -359,15 +396,9 @@ func (s *prototypeRoutingStore) WriteFence(ctx context.Context, w fenceWrite) (b
 		err    error
 	)
 	if w.prev == nil {
-		result, err = s.query(ctx, `INSERT INTO multigres.admission_fence (operation_id, tablegroup, state, version)
-SELECT $1::uuid, tg.oid, $3, $4::bigint FROM multigres.tablegroup tg WHERE tg.name = $2
-ON CONFLICT DO NOTHING
-RETURNING 1`, w.operationID, w.tablegroup, admissionStateText(w.state), w.version)
+		result, err = s.query(ctx, protometadata.InsertFenceSQL, w.operationID, w.tablegroup, admissionStateText(w.state), w.version)
 	} else {
-		result, err = s.query(ctx, `UPDATE multigres.admission_fence
-SET operation_id = $1::uuid, state = $2, version = $3::bigint, updated_at = now()
-WHERE fence_id = $4::bigint AND operation_id = $5::uuid AND state = $6 AND version = $7::bigint
-RETURNING 1`, w.operationID, admissionStateText(w.state), w.version,
+		result, err = s.query(ctx, protometadata.UpdateFenceSQL, w.operationID, admissionStateText(w.state), w.version,
 			w.prev.id, w.prev.operationID, admissionStateText(w.prev.state), w.prev.version)
 	}
 	if err != nil {
@@ -376,89 +407,25 @@ RETURNING 1`, w.operationID, admissionStateText(w.state), w.version,
 	return len(result.Rows) == 1, nil
 }
 
-// switchRoutingSQL is the whole of a switch. The catalog state is locked first, so that two
-// changes of the routing run one after the other, and the fences are locked FOR SHARE, so that
-// neither can be unfenced between the check and the write.
-const switchRoutingSQL = `WITH cs AS (
-  SELECT routing_version, home_tablegroup FROM multigres.catalog_state FOR UPDATE
-), tgs AS (
-  SELECT f.oid AS from_oid, t.oid AS to_oid, s.oid AS shard_oid
-  FROM multigres.tablegroup f, multigres.tablegroup t, multigres.shard s
-  WHERE f.name = $2 AND t.name = $3 AND s.tablegroup_oid = t.oid AND s.shard_name = $4
-), fences AS (
-  SELECT af.fence_id FROM multigres.admission_fence af, tgs
-  WHERE af.operation_id = $1::uuid AND af.state = 'FENCED' AND af.tablegroup IN (tgs.from_oid, tgs.to_oid)
-    AND af.shard_id IS NULL AND af.table_id IS NULL
-  FOR SHARE OF af
-), ok AS (
-  SELECT true AS ok FROM cs, tgs
-  WHERE cs.routing_version = $5::bigint AND cs.home_tablegroup = tgs.from_oid
-    AND tgs.from_oid <> (SELECT oid FROM multigres.tablegroup WHERE name = $6)
-    AND NOT EXISTS (SELECT 1 FROM multigres.routing_rule)
-    AND (SELECT count(*) FROM fences) = 2
-), bumped AS (
-  UPDATE multigres.catalog_state SET routing_version = routing_version + 1
-  WHERE EXISTS (SELECT 1 FROM ok) RETURNING routing_version
-), ins AS (
-  INSERT INTO multigres.routing_rule (operation_id, from_tablegroup, to_tablegroup, to_shard, created_version)
-  SELECT $1::uuid, from_oid, to_oid, shard_oid, (SELECT routing_version FROM bumped) FROM tgs
-  WHERE EXISTS (SELECT 1 FROM ok) RETURNING 1
-)
-SELECT routing_version::text FROM bumped`
-
 func (s *prototypeRoutingStore) SwitchRouting(ctx context.Context, operationID string, rule ruleRow, expectedVersion int64) (int64, bool, error) {
 	if err := s.ensureSchema(ctx); err != nil {
 		return 0, false, err
 	}
-	return s.routingWrite(ctx, switchRoutingSQL, operationID, rule.from, rule.to, rule.toShard, expectedVersion, constants.DefaultTableGroup)
+	return s.routingWrite(ctx, protometadata.SwitchRoutingSQL, operationID, rule.from, rule.to, rule.toShard, expectedVersion, constants.DefaultTableGroup)
 }
-
-const revertRoutingSQL = `WITH cs AS (
-  SELECT routing_version FROM multigres.catalog_state FOR UPDATE
-), rule AS (
-  SELECT from_tablegroup, to_tablegroup FROM multigres.routing_rule WHERE operation_id = $1::uuid FOR UPDATE
-), fences AS (
-  SELECT af.fence_id FROM multigres.admission_fence af, rule
-  WHERE af.operation_id = $1::uuid AND af.state = 'FENCED' AND af.tablegroup IN (rule.from_tablegroup, rule.to_tablegroup)
-    AND af.shard_id IS NULL AND af.table_id IS NULL
-  FOR SHARE OF af
-), ok AS (
-  SELECT true AS ok FROM cs, rule WHERE cs.routing_version = $2::bigint AND (SELECT count(*) FROM fences) = 2
-), bumped AS (
-  UPDATE multigres.catalog_state SET routing_version = routing_version + 1
-  WHERE EXISTS (SELECT 1 FROM ok) RETURNING routing_version
-), del AS (
-  DELETE FROM multigres.routing_rule WHERE operation_id = $1::uuid AND EXISTS (SELECT 1 FROM ok) RETURNING 1
-)
-SELECT routing_version::text FROM bumped`
 
 func (s *prototypeRoutingStore) RevertRouting(ctx context.Context, operationID string, expectedVersion int64) (int64, bool, error) {
 	if err := s.ensureSchema(ctx); err != nil {
 		return 0, false, err
 	}
-	return s.routingWrite(ctx, revertRoutingSQL, operationID, expectedVersion)
+	return s.routingWrite(ctx, protometadata.RevertRoutingSQL, operationID, expectedVersion)
 }
-
-const foldRoutingSQL = `WITH cs AS (
-  SELECT routing_version, home_tablegroup FROM multigres.catalog_state FOR UPDATE
-), rule AS (
-  SELECT from_tablegroup, to_tablegroup FROM multigres.routing_rule WHERE operation_id = $1::uuid FOR UPDATE
-), ok AS (
-  SELECT true AS ok FROM cs, rule WHERE cs.routing_version = $2::bigint AND cs.home_tablegroup = rule.from_tablegroup
-), bumped AS (
-  UPDATE multigres.catalog_state
-  SET routing_version = routing_version + 1, home_tablegroup = (SELECT to_tablegroup FROM rule)
-  WHERE EXISTS (SELECT 1 FROM ok) RETURNING routing_version
-), del AS (
-  DELETE FROM multigres.routing_rule WHERE operation_id = $1::uuid AND EXISTS (SELECT 1 FROM ok) RETURNING 1
-)
-SELECT routing_version::text FROM bumped`
 
 func (s *prototypeRoutingStore) FoldRouting(ctx context.Context, operationID string, expectedVersion int64) (int64, bool, error) {
 	if err := s.ensureSchema(ctx); err != nil {
 		return 0, false, err
 	}
-	return s.routingWrite(ctx, foldRoutingSQL, operationID, expectedVersion)
+	return s.routingWrite(ctx, protometadata.FoldRoutingSQL, operationID, expectedVersion)
 }
 
 // routingWrite runs a statement that returns the new routing_version when it wrote and no row
@@ -478,32 +445,28 @@ func (s *prototypeRoutingStore) routingWrite(ctx context.Context, sql string, ar
 	return version, true, nil
 }
 
-// cleanupOperationSQL deletes the fences of an operation, and says how many it deleted and
-// whether something blocks it. A fence that is FENCING is never deleted, even if it turned FENCING
-// after the statement began.
-const cleanupOperationSQL = `WITH blocked AS (
-  SELECT 1 FROM multigres.routing_rule WHERE operation_id = $1::uuid
-  UNION ALL
-  SELECT 1 FROM multigres.admission_fence WHERE operation_id = $1::uuid AND state = 'FENCING'
-), del AS (
-  DELETE FROM multigres.admission_fence
-  WHERE operation_id = $1::uuid AND state <> 'FENCING' AND NOT EXISTS (SELECT 1 FROM blocked)
-  RETURNING 1
-)
-SELECT (SELECT count(*) FROM del)::text, EXISTS (SELECT 1 FROM blocked)::text`
-
-func (s *prototypeRoutingStore) CleanupOperation(ctx context.Context, operationID string) (int64, bool, error) {
+// CleanupOperation is two statements. The first marks the operation CLEANED, in the same statement
+// that checks that nothing blocks it, and once it has committed no fence of the operation can be
+// written; the second, with a snapshot of its own, deletes the fences there are. A cleanup that
+// stops between them is finished by calling it again.
+func (s *prototypeRoutingStore) CleanupOperation(ctx context.Context, operationID string, routingVersion int64) (int64, bool, error) {
 	if err := s.ensureSchema(ctx); err != nil {
 		return 0, false, err
 	}
-	result, err := s.query(ctx, cleanupOperationSQL, operationID)
+	result, err := s.query(ctx, protometadata.CleanupMarkSQL, operationID, routingVersion)
 	if err != nil {
 		return 0, false, err
 	}
-	var deleted int64
 	var blocked string
-	if err := executor.ScanSingleRow(result, &deleted, &blocked); err != nil {
+	if err := executor.ScanSingleRow(result, &blocked); err != nil {
 		return 0, false, errors.Join(errors.New("decode the cleanup"), err)
 	}
-	return deleted, blocked == "true", nil
+	if blocked == "true" {
+		return 0, true, nil
+	}
+	result, err = s.query(ctx, protometadata.CleanupDeleteSQL, operationID)
+	if err != nil {
+		return 0, false, mterrors.Wrap(err, "the operation is marked cleaned up, and its fences are not deleted yet")
+	}
+	return int64(len(result.Rows)), false, nil
 }

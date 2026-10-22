@@ -244,6 +244,9 @@ func (c *admissionCoordinator) StartFence(ctx context.Context, req *multipoolers
 	if err != nil {
 		return nil, err
 	}
+	if err := c.requireLive(ctx, op); err != nil {
+		return nil, err
+	}
 	cur := snap.fenceOf(tg)
 	if cur == nil {
 		if err := c.unknownTablegroup(ctx, tg); err != nil {
@@ -333,6 +336,9 @@ func (c *admissionCoordinator) CommitFence(ctx context.Context, req *multipooler
 	db, version := req.GetDatabase(), req.GetVersion()
 	snap, err := c.store.Snapshot(ctx)
 	if err != nil {
+		return nil, err
+	}
+	if err := c.requireLive(ctx, op); err != nil {
 		return nil, err
 	}
 	cur := snap.fenceOf(tg)
@@ -484,6 +490,9 @@ func (c *admissionCoordinator) UnfenceScope(ctx context.Context, req *multipoole
 	db, expected := req.GetDatabase(), req.GetExpectedVersion()
 	snap, err := c.store.Snapshot(ctx)
 	if err != nil {
+		return nil, err
+	}
+	if err := c.requireLive(ctx, op); err != nil {
 		return nil, err
 	}
 	cur := snap.fenceOf(tg)
@@ -693,7 +702,7 @@ func (c *admissionCoordinator) snapshotMembers(ctx context.Context, db, tg strin
 	}
 	var unmanaged []string
 	for _, p := range snapshot {
-		if p.record.GetManagementMode() == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED {
+		if p.unmanaged() {
 			unmanaged = append(unmanaged, p.name())
 		}
 	}

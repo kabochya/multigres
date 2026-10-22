@@ -68,6 +68,13 @@ func (r *prototypeRouting) Start(ctx context.Context, sink RoutingSink, control 
 
 // routingPoller reads the routing state from the default primary and pushes the tablegroup it
 // resolves to the sink.
+//
+// The gateway's routing is monotonic on purpose: the sink ignores a version at or below the one it
+// holds, because the catalog publishes only what is durable, so that the version of a new catalog
+// leader is never lower than the old one's, and a read from a default primary that has been deposed
+// cannot roll the gateway back. The price is a known limit: a catalog whose catalog_state is seeded
+// again starts its routing_version over, below what the gateways hold, and they keep the routing
+// they have; recovering from it means restarting the gateways.
 type routingPoller struct {
 	sink     RoutingSink
 	control  ControlPlane

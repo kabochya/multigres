@@ -220,16 +220,19 @@ func (pm *MultipoolerManager) runAdmission(ctx context.Context) {
 // or held.
 func (pm *MultipoolerManager) RefreshAdmission(ctx context.Context, req *multipoolerservicepb.RefreshAdmissionRequest) (*multipoolerservicepb.RefreshAdmissionResponse, error) {
 	key := pm.record.ShardKey()
-	if req.GetDatabase() != key.GetDatabase() || req.GetScope().GetTablegroup() != key.GetTableGroup() ||
-		req.GetScope().GetShard() != "" || req.GetScope().GetTable() != "" {
-		return nil, mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "database or scope does not match this pooler")
+	if req.GetDatabase() != key.GetDatabase() {
+		return nil, mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "database does not match this pooler")
+	}
+	// A shard or a table is not a scope yet, whichever pooler is asked.
+	operationID, tablegroup, err := requestScope(req.GetOperationId(), req.GetScope())
+	if err != nil {
+		return nil, err
+	}
+	if tablegroup != key.GetTableGroup() {
+		return nil, mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "tablegroup does not match this pooler")
 	}
 	if req.GetExpectedVersion() < 0 {
 		return nil, mterrors.New(mtrpcpb.Code_INVALID_ARGUMENT, "expected_version must not be negative")
-	}
-	operationID, err := canonicalOperationID(req.GetOperationId())
-	if err != nil {
-		return nil, err
 	}
 	applied, err := pm.enforceAdmission(ctx, &admissionExpectation{operationID: operationID, state: req.GetExpectedState(), version: req.GetExpectedVersion()})
 	if err != nil {
@@ -496,7 +499,7 @@ func (pm *MultipoolerManager) requiredNodes(ctx context.Context, members members
 	}
 	managed := false
 	for _, p := range list {
-		if p.record.GetManagementMode() != clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED {
+		if !p.unmanaged() {
 			managed = true
 		}
 	}

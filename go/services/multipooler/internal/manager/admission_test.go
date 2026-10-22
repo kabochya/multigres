@@ -293,7 +293,9 @@ func TestRefreshValidatesRequest(t *testing.T) {
 	own := &multipoolerservicepb.AdmissionScope{Tablegroup: h.tg}
 	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, call("other", own, testOperation, 1))
 	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, call("db", &multipoolerservicepb.AdmissionScope{Tablegroup: "otherTG"}, testOperation, 1))
-	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, call("db", &multipoolerservicepb.AdmissionScope{Tablegroup: h.tg, Shard: "0-inf"}, testOperation, 1))
+	requireCode(t, mtrpcpb.Code_UNIMPLEMENTED, call("db", &multipoolerservicepb.AdmissionScope{Tablegroup: h.tg, Shard: "0-inf"}, testOperation, 1))
+	requireCode(t, mtrpcpb.Code_UNIMPLEMENTED, call("db", &multipoolerservicepb.AdmissionScope{Tablegroup: h.tg, Table: "t"}, testOperation, 1))
+	requireCode(t, mtrpcpb.Code_UNIMPLEMENTED, call("db", &multipoolerservicepb.AdmissionScope{Tablegroup: "otherTG", Shard: "0-inf"}, testOperation, 1))
 	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, call("db", own, testOperation, -1))
 	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, call("db", own, "not-a-uuid", 1))
 	requireCode(t, mtrpcpb.Code_INVALID_ARGUMENT, call("db", own, "", 1))

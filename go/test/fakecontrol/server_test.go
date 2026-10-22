@@ -494,6 +494,10 @@ func TestSwitchRules(t *testing.T) {
 	_, err = s.SwitchRouting(ctx, switchReq(opB, "migrateTG", "destTG", 1))
 	require.Equal(t, codes.FailedPrecondition, code(err), "at most one rule applies at a time")
 
+	other := switchReq(opA, "migrateTG", "destTG", 0)
+	other.Rule.ToShard = "other-shard"
+	_, err = s.SwitchRouting(ctx, other)
+	require.Equal(t, codes.FailedPrecondition, code(err), "a retry asks for the rule that was switched")
 	_, err = s.SwitchRouting(ctx, switchReq(opA, "migrateTG", "migrateTG", 1))
 	require.Equal(t, codes.InvalidArgument, code(err))
 	bad := switchReq(opA, "migrateTG", "destTG", 1)
@@ -699,6 +703,99 @@ func TestGetRoutingState(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, got.NotModified)
 	require.Equal(t, stateUnfenced, got.Fences[0].State, "a fence change is visible with no change of the routing version")
+}
+
+// TestARetryIsRecognizedByTheOperationsStateNotByTheVersion: a fold that is retried succeeds, and a
+// revert that names the same version is refused, though the routing version is the one after.
+func TestARetryIsRecognizedByTheOperationsStateNotByTheVersion(t *testing.T) {
+	ctx := t.Context()
+	s := newFake()
+	fenceBoth(t, s, opA)
+	_, err := s.SwitchRouting(ctx, switchReq(opA, "migrateTG", "destTG", 0))
+	require.NoError(t, err)
+	_, err = s.FoldRouting(ctx, foldReq(opA, 1))
+	require.NoError(t, err)
+	_, err = s.FoldRouting(ctx, foldReq(opA, 1))
+	require.NoError(t, err, "the fold, retried")
+
+	_, err = s.RevertRouting(ctx, revertReq(opA, 1))
+	require.Equal(t, codes.FailedPrecondition, code(err), "a revert is not the retry of a fold")
+	require.ErrorContains(t, err, "it is FOLDED at routing version 2")
+	_, err = s.SwitchRouting(ctx, switchReq(opA, "migrateTG", "destTG", 2))
+	require.Equal(t, codes.FailedPrecondition, code(err), "a folded operation cannot switch again")
+	require.ErrorContains(t, err, "folded")
+
+	// And a revert, retried, is not taken for a fold.
+	r := newFake()
+	fenceBoth(t, r, opA)
+	_, err = r.SwitchRouting(ctx, switchReq(opA, "migrateTG", "destTG", 0))
+	require.NoError(t, err)
+	_, err = r.RevertRouting(ctx, revertReq(opA, 1))
+	require.NoError(t, err)
+	_, err = r.FoldRouting(ctx, foldReq(opA, 1))
+	require.Equal(t, codes.FailedPrecondition, code(err), "a fold is not the retry of a revert")
+	require.ErrorContains(t, err, "it is REVERTED at routing version 2")
+}
+
+// TestRevertAndFoldOfAnOperationThatNeverSwitchedAreRefused: another operation's change bumped the
+// routing version to the one after the expected, which is not a trace of this operation's.
+func TestRevertAndFoldOfAnOperationThatNeverSwitchedAreRefused(t *testing.T) {
+	ctx := t.Context()
+	s := newFake()
+	s.AddTablegroup("db", "thirdTG", "third-1")
+	_, err := fence(ctx, s, opB, "thirdTG", 0) // B is recorded, as PREPARE
+	require.NoError(t, err)
+	fenceBoth(t, s, opA)
+	_, err = s.SwitchRouting(ctx, switchReq(opA, "migrateTG", "destTG", 0))
+	require.NoError(t, err)
+
+	const opC = "0c0c0c0c-1d1d-4e4e-8f8f-a0a0b1b1c2c2" // nothing is recorded of it
+	for op, trace := range map[string]string{opB: "it is PREPARE at routing version 0", opC: "nothing is recorded of it"} {
+		_, err = s.RevertRouting(ctx, revertReq(op, 0))
+		require.Equal(t, codes.FailedPrecondition, code(err), "revert by %s", op)
+		require.ErrorContains(t, err, trace)
+		_, err = s.FoldRouting(ctx, foldReq(op, 0))
+		require.Equal(t, codes.FailedPrecondition, code(err), "fold by %s", op)
+		require.ErrorContains(t, err, trace)
+	}
+	require.Len(t, routing(t, s).Rules, 1, "A's rule is untouched")
+	require.EqualValues(t, 1, routing(t, s).RoutingVersion)
+}
+
+// TestAReplayAfterCleanupIsRefused: a cleaned-up operation is finished for good. A scope with no fence
+// is at version zero, so a delayed start of the operation would otherwise fence it again.
+func TestAReplayAfterCleanupIsRefused(t *testing.T) {
+	ctx := t.Context()
+	s := newFake()
+	_, err := fence(ctx, s, opA, "migrateTG", 0)
+	require.NoError(t, err)
+	cleaned, err := s.CleanupOperation(ctx, cleanupReq(opA))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, cleaned.FencesDeleted)
+
+	calls := map[string]error{}
+	_, calls["start"] = s.StartFence(ctx, startReq(opA, "migrateTG", 0))
+	_, calls["commit"] = s.CommitFence(ctx, commitReq(opA, "migrateTG", 1))
+	_, calls["unfence"] = s.UnfenceScope(ctx, unfenceReq(opA, "migrateTG", 1))
+	_, calls["switch"] = s.SwitchRouting(ctx, switchReq(opA, "migrateTG", "destTG", 0))
+	_, calls["revert"] = s.RevertRouting(ctx, revertReq(opA, 0))
+	_, calls["fold"] = s.FoldRouting(ctx, foldReq(opA, 0))
+	for name, err := range calls {
+		require.Equal(t, codes.FailedPrecondition, code(err), name)
+		require.ErrorContains(t, err, "cleaned up", name)
+	}
+	require.Empty(t, routing(t, s).Fences, "the replay fenced nothing")
+
+	again, err := s.CleanupOperation(ctx, cleanupReq(opA))
+	require.NoError(t, err, "the cleanup itself is repeated")
+	require.Zero(t, again.FencesDeleted)
+
+	// An operation that was never recorded is cleaned up too, and ends.
+	fresh, err := s.CleanupOperation(ctx, cleanupReq(opB))
+	require.NoError(t, err)
+	require.Zero(t, fresh.FencesDeleted)
+	_, err = s.StartFence(ctx, startReq(opB, "migrateTG", 0))
+	require.ErrorContains(t, err, "cleaned up")
 }
 
 func TestRequestsAreValidated(t *testing.T) {

@@ -655,6 +655,27 @@ func TestCleanupDeletesTheOperationsFences(t *testing.T) {
 	require.Zero(t, again.FencesDeleted)
 }
 
+// TestACleanedUpOperationIsFinished: the cleanup ends the operation, so the same Migrator cannot
+// fence again (a replay would fence a scope that is at version zero), and a new migration needs a
+// new operation id.
+func TestACleanedUpOperationIsFinished(t *testing.T) {
+	ctx := t.Context()
+	m, _ := fixture(t, nil)
+	_, err := m.Cutover(ctx, Steps{})
+	require.NoError(t, err)
+	_, err = m.Complete(ctx)
+	require.NoError(t, err)
+	_, err = m.Cleanup(ctx)
+	require.NoError(t, err)
+
+	_, err = m.FenceOrGiveUp(ctx, "dst")
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+	require.ErrorContains(t, err, "cleaned up")
+	st, err := m.Read(ctx)
+	require.NoError(t, err)
+	require.Empty(t, st.Fences, "nothing was fenced")
+}
+
 // TestCleanupAfterARollbackReopensTheDestination: the rollback leaves the destination FENCED, and
 // the cleanup deletes that row too.
 func TestCleanupAfterARollbackReopensTheDestination(t *testing.T) {

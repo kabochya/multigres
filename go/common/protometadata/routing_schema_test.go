@@ -38,7 +38,7 @@ func TestEnsureRoutingSchemaIsOneIdempotentStatementUnderAnAdvisoryLock(t *testi
 	sql := statements[0]
 	require.Less(t, strings.Index(sql, "pg_advisory_xact_lock"), strings.Index(sql, "CREATE TABLE"), "the lock comes before any table")
 	require.Equal(t, strings.Count(sql, "CREATE TABLE"), strings.Count(sql, "CREATE TABLE IF NOT EXISTS"), "every table is created only if missing")
-	for _, table := range []string{"catalog_state", "admission_fence", "routing_rule"} {
+	for _, table := range []string{"catalog_state", "admission_fence", "operation", "routing_rule"} {
 		require.Contains(t, sql, "multigres."+table)
 	}
 	require.Contains(t, sql, "'UNFENCED', 'FENCING', 'FENCED'", "the state column admits the three admission states")
@@ -57,4 +57,63 @@ func TestAdmissionFenceKeepsOneHolderPerScopeAndOnlyTablegroupScopes(t *testing.
 func TestEnsureRoutingSchemaReportsAFailure(t *testing.T) {
 	err := EnsureRoutingSchema(t.Context(), func(context.Context, string) error { return errors.New("permission denied") })
 	require.ErrorContains(t, err, "permission denied")
+}
+
+// TestRoutingRuleTableHoldsOneRowAndOperationsHaveALifecycle: at most one rule applies, so the table
+// is held to one row by a constant-key unique index and not only by the switch that checks it, and
+// an operation is in one of the states of its lifecycle.
+func TestRoutingRuleTableHoldsOneRowAndOperationsHaveALifecycle(t *testing.T) {
+	require.Contains(t, ensureRoutingSchemaSQL, "CREATE UNIQUE INDEX IF NOT EXISTS routing_rule_single ON multigres.routing_rule ((true))")
+	require.Contains(t, ensureRoutingSchemaSQL, "'PREPARE', 'SWITCHED', 'REVERTED', 'FOLDED', 'CLEANED'")
+	require.NotContains(t, ensureRoutingSchemaSQL, "REFERENCES multigres.operation", "no foreign key to the operation")
+}
+
+// TestEveryStatementThatChangesTheRoutingLocksTheCatalogStateFirst: the catalog_state row is the lock
+// they share, taken before any other so that they run one after the other and cannot deadlock.
+func TestEveryStatementThatChangesTheRoutingLocksTheCatalogStateFirst(t *testing.T) {
+	for name, sql := range map[string]string{
+		"switch": SwitchRoutingSQL, "revert": RevertRoutingSQL, "fold": FoldRoutingSQL, "cleanup": CleanupMarkSQL,
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.Regexp(t, `^WITH cs AS MATERIALIZED \(\s+SELECT [a-z_, ]+ FROM multigres\.catalog_state FOR UPDATE`, sql)
+			// Every other lock names the first one in a condition, so it is taken first.
+			for _, lock := range []string{"FOR UPDATE", "FOR SHARE OF af"} {
+				for _, at := range indexes(sql, lock)[min(1, len(indexes(sql, lock))):] {
+					if lock == "FOR UPDATE" && at == strings.Index(sql, "FOR UPDATE") {
+						continue
+					}
+					require.Contains(t, sql[max(0, at-160):at], csLocked, "%s at %d: %s", lock, at, sql[max(0, at-160):at])
+					if lock == "FOR SHARE OF af" {
+						// The fences are locked after the operation's row, the order the writers of a fence use.
+						require.Contains(t, sql[max(0, at-160):at], opLocked)
+					}
+				}
+			}
+		})
+	}
+}
+
+func indexes(s, sub string) []int {
+	var out []int
+	for from := 0; ; {
+		i := strings.Index(s[from:], sub)
+		if i < 0 {
+			return out
+		}
+		out = append(out, from+i)
+		from += i + len(sub)
+	}
+}
+
+// TestFenceWritersLockTheOperationBeforeTheFence: the statements that write a fence take the
+// operation's row first (they update it, or insert it), and refuse an operation that is CLEANED
+// from the row they locked, not from a snapshot.
+func TestFenceWritersLockTheOperationBeforeTheFence(t *testing.T) {
+	for name, sql := range map[string]string{"insert": InsertFenceSQL, "update": UpdateFenceSQL} {
+		t.Run(name, func(t *testing.T) {
+			require.Contains(t, sql, "DO UPDATE SET updated_at = now() WHERE multigres.operation.state <> 'CLEANED'")
+			require.Contains(t, sql, "EXISTS (SELECT 1 FROM op)", "the write is gated on the row the statement locked")
+			require.NotContains(t, sql, "state = 'CLEANED')", "and not on a read of the snapshot")
+		})
+	}
 }

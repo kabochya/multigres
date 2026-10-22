@@ -16,6 +16,7 @@ package manager
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/multigres/multigres/go/common/constants"
 	"github.com/multigres/multigres/go/common/mterrors"
@@ -27,6 +28,29 @@ import (
 // routing rule of an operation, and that delete its fences. Each decides on one snapshot, with
 // messages that say what the state is, and the write re-checks the same conditions in the
 // transaction that makes it, so that a change in between is ABORTED, never a wrong write.
+
+// requireLive refuses a call that names an operation that was cleaned up. A cleaned operation is
+// finished for good: a scope with no fence starts again at version zero, so a delayed call of the
+// operation, replayed after the cleanup, would otherwise fence it again. The statements that write
+// refuse it too, where it cannot be raced; this is for the message.
+func (c *admissionCoordinator) requireLive(ctx context.Context, op string) error {
+	cleaned, err := c.store.OperationCleaned(ctx, op)
+	if err != nil {
+		return err
+	}
+	if cleaned {
+		return mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION, "operation %s was cleaned up; a new operation needs a new operation_id", op)
+	}
+	return nil
+}
+
+// describeOperation says where an operation is, for a message.
+func describeOperation(o *operationRow) string {
+	if o == nil {
+		return "nothing is recorded of it"
+	}
+	return fmt.Sprintf("it is %s at routing version %d", o.state, o.version)
+}
 
 // requireFenced checks that the fence of the tablegroup is FENCED for the operation, a completed
 // fence.
@@ -69,14 +93,22 @@ func (c *admissionCoordinator) SwitchRouting(ctx context.Context, req *multipool
 	if err != nil {
 		return nil, err
 	}
+	if err := c.requireLive(ctx, op); err != nil {
+		return nil, err
+	}
+	o := snap.operationOf(op)
 	if cur := snap.ruleOf(op); cur != nil {
-		if cur.from == rule.from && cur.to == rule.to && cur.toShard == rule.toShard && cur.createdVersion == expected+1 && snap.routingVersion == expected+1 {
-			// A retry of a switch that committed: the rule is there at the version this switch
-			// produced. Nothing to write.
-			return &multipoolerservicepb.SwitchRoutingResponse{RoutingVersion: snap.routingVersion, EffectiveTablegroup: snap.effective()}, nil
+		if o != nil && o.state == operationSwitched && o.version == expected+1 &&
+			cur.from == rule.from && cur.to == rule.to && cur.toShard == rule.toShard && cur.createdVersion == expected+1 {
+			// A retry of a switch that committed: the operation was switched at the version this
+			// switch produced, and the rule is the one it asked for. Nothing to write.
+			return &multipoolerservicepb.SwitchRoutingResponse{RoutingVersion: o.version, EffectiveTablegroup: o.effective}, nil
 		}
 		return nil, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
 			"operation %s already has the rule %q to %q, switched at routing version %d; read GetRoutingState and decide", op, cur.from, cur.to, cur.createdVersion)
+	}
+	if o != nil && o.state == operationFolded {
+		return nil, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION, "operation %s was folded: its rule is gone for good", op)
 	}
 	for _, name := range []string{rule.from, rule.to} {
 		if err := c.unknownTablegroup(ctx, name); err != nil {
@@ -138,15 +170,19 @@ func (c *admissionCoordinator) RevertRouting(ctx context.Context, req *multipool
 	if err != nil {
 		return nil, err
 	}
+	if err := c.requireLive(ctx, op); err != nil {
+		return nil, err
+	}
 	rule := snap.ruleOf(op)
 	if rule == nil {
-		if snap.routingVersion == expected+1 {
-			// A retry of a revert that committed: the operation has no rule, at the version this
-			// revert produced. (A fold of the same operation leaves the same trace, which an
-			// operation that reverts does not go on to do.)
-			return &multipoolerservicepb.RevertRoutingResponse{RoutingVersion: snap.routingVersion, EffectiveTablegroup: snap.effective()}, nil
+		if o := snap.operationOf(op); o != nil && o.state == operationReverted && o.version == expected+1 {
+			// A retry of a revert that committed: the operation was reverted at the version this
+			// revert produced, and by nothing else (a fold leaves it FOLDED, and a version that
+			// something else bumped is another one).
+			return &multipoolerservicepb.RevertRoutingResponse{RoutingVersion: o.version, EffectiveTablegroup: o.effective}, nil
 		}
-		return nil, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION, "operation %s has no routing rule to revert; read GetRoutingState and decide", op)
+		return nil, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
+			"operation %s has no routing rule to revert (%s); read GetRoutingState and decide", op, describeOperation(snap.operationOf(op)))
 	}
 	if snap.routingVersion != expected {
 		return nil, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
@@ -190,14 +226,18 @@ func (c *admissionCoordinator) FoldRouting(ctx context.Context, req *multipooler
 	if err != nil {
 		return nil, err
 	}
+	if err := c.requireLive(ctx, op); err != nil {
+		return nil, err
+	}
 	rule := snap.ruleOf(op)
 	if rule == nil {
-		if snap.routingVersion == expected+1 {
-			// A retry of a fold that committed: the operation has no rule, at the version this
-			// fold produced.
-			return &multipoolerservicepb.FoldRoutingResponse{RoutingVersion: snap.routingVersion, HomeTablegroup: snap.home}, nil
+		if o := snap.operationOf(op); o != nil && o.state == operationFolded && o.version == expected+1 {
+			// A retry of a fold that committed: the operation was folded at the version this fold
+			// produced, and by nothing else.
+			return &multipoolerservicepb.FoldRoutingResponse{RoutingVersion: o.version, HomeTablegroup: o.effective}, nil
 		}
-		return nil, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION, "operation %s has no routing rule to fold; read GetRoutingState and decide", op)
+		return nil, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
+			"operation %s has no routing rule to fold (%s); read GetRoutingState and decide", op, describeOperation(snap.operationOf(op)))
 	}
 	if snap.routingVersion != expected {
 		return nil, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
@@ -230,9 +270,17 @@ func (c *admissionCoordinator) FoldRouting(ctx context.Context, req *multipooler
 	return &multipoolerservicepb.FoldRoutingResponse{RoutingVersion: version, HomeTablegroup: rule.to}, nil
 }
 
-// CleanupOperation deletes the fences of an operation. It is refused while the operation has a
-// routing rule, or a fence that is FENCING. A fence that is FENCED is deleted, and the scope it
-// guarded serves application work again once its poolers read that there is none.
+// CleanupOperation deletes the fences of an operation and ends it for good: later calls that name
+// it are refused. It is refused while the operation has a routing rule, or a fence that is
+// FENCING, and it deletes nothing if a switch committed since the state was read.
+//
+// Deleting a fence does not tell a pooler anything: a pooler that decided to refuse application
+// work keeps that decision until its gate generation changes (a restart, a change of role or of
+// serving status) or a refresh names a fence, and nothing refreshes it here. So cleaning up an
+// UNFENCED fence changes nothing for serving, and cleaning up a FENCED one is safe only once the
+// poolers of its scope are gone: they would otherwise stay closed with no fence to say why, and a
+// pooler that restarts would open. After a fold the source stays fenced until it is
+// decommissioned, and is cleaned up after.
 func (c *admissionCoordinator) CleanupOperation(ctx context.Context, req *multipoolerservicepb.CleanupOperationRequest) (*multipoolerservicepb.CleanupOperationResponse, error) {
 	op, err := canonicalOperationID(req.GetOperationId())
 	if err != nil {
@@ -242,12 +290,18 @@ func (c *admissionCoordinator) CleanupOperation(ctx context.Context, req *multip
 	if err != nil {
 		return nil, err
 	}
-	if rule := snap.ruleOf(op); rule != nil {
+	// An operation that was cleaned up has nothing to wait for: what is left of it is deleted, which
+	// finishes a cleanup that stopped half way.
+	cleaned, err := c.store.OperationCleaned(ctx, op)
+	if err != nil {
+		return nil, err
+	}
+	if rule := snap.ruleOf(op); rule != nil && !cleaned {
 		return nil, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
 			"operation %s still has the routing rule %q to %q: revert or fold it first", op, rule.from, rule.to)
 	}
 	for _, f := range snap.fences {
-		if f.operationID == op && f.state == stateFencing {
+		if f.operationID == op && f.state == stateFencing && !cleaned {
 			return nil, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
 				"operation %s has scope %q FENCING at version %d: complete or unfence it first", op, f.tablegroup, f.version)
 		}
@@ -255,7 +309,7 @@ func (c *admissionCoordinator) CleanupOperation(ctx context.Context, req *multip
 	if err := c.isLeader(); err != nil {
 		return nil, err
 	}
-	deleted, blocked, err := c.store.CleanupOperation(ctx, op)
+	deleted, blocked, err := c.store.CleanupOperation(ctx, op, snap.routingVersion)
 	if err != nil {
 		return nil, mterrors.Wrap(err, "clean up the operation; outcome uncertain, call it again")
 	}

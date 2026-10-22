@@ -51,6 +51,13 @@ func (m topologyMembership) Snapshot(ctx context.Context, database, tablegroup s
 	return refs, nil
 }
 
+// unmanaged reports whether the pooler fronts an external endpoint, from its topology record. It is
+// what the membership says of a member: the coordinator and the durability check count members by
+// it, and nothing in them asks whether this pooler is unmanaged itself.
+func (p poolerRef) unmanaged() bool {
+	return p.record.GetManagementMode() == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
+}
+
 // grpcRefresher calls RefreshAdmission on a pooler over gRPC.
 type grpcRefresher struct{ transport grpc.DialOption }
 

@@ -303,34 +303,41 @@ type MultipoolerServiceClient interface {
 	// from_tablegroup and to_tablegroup are both FENCED for this operation (a completed fence:
 	// FENCING is refused with FAILED_PRECONDITION), read with a row lock so that neither can
 	// change under the write. It bumps routing_version. Success means the routing metadata
-	// committed; it does not unfence anything. A retry after the switch, which finds the rule
-	// of this operation at the version after expected_routing_version, succeeds and writes
-	// nothing. That the operation exists as a whole, and that the rules cover the keyspace
+	// committed; it does not unfence anything. A retry after the switch, which finds the
+	// operation SWITCHED at the version after expected_routing_version, with the rule it asked
+	// for, succeeds and writes nothing. An operation that was cleaned up, or folded, is refused. That the operation exists as a whole, and that the rules cover the keyspace
 	// exactly, are not checked yet.
 	SwitchRouting(context.Context, *connect.Request[multipoolerservice.SwitchRoutingRequest]) (*connect.Response[multipoolerservice.SwitchRoutingResponse], error)
 	// RevertRouting deletes the routing rule of an operation, so that the traffic goes back to
 	// the home tablegroup, under the same preconditions as SwitchRouting: the routing is at
 	// expected_routing_version, and the fences of the rule's two tablegroups are FENCED for this
-	// operation. It bumps routing_version. A retry after the revert, which finds no rule of the
-	// operation at the version after expected_routing_version, succeeds and writes nothing.
+	// operation. It bumps routing_version. A retry after the revert, which finds the
+	// operation REVERTED at the version after expected_routing_version, succeeds and writes
+	// nothing; an operation in any other state, whatever the version, is refused.
 	RevertRouting(context.Context, *connect.Request[multipoolerservice.RevertRoutingRequest]) (*connect.Response[multipoolerservice.RevertRoutingResponse], error)
 	// FoldRouting completes a switched operation: in one transaction it makes the rule's
 	// to_tablegroup the home tablegroup, deletes the rule and bumps routing_version, so that the
 	// routing is empty again. It needs no fence, because the effective tablegroup is the same
 	// before and after, and it refuses to run if it would not be: the call resolves the traffic
-	// before and after and fails with FAILED_PRECONDITION if they differ. A retry after the fold,
-	// which finds no rule of the operation at the version after expected_routing_version,
-	// succeeds and writes nothing.
+	// before and after and fails with FAILED_PRECONDITION if they differ. A retry after the
+	// fold, which finds the operation FOLDED at the version after expected_routing_version,
+	// succeeds and writes nothing; an operation in any other state, whatever the version, is
+	// refused.
 	//
 	// PROTOTYPE STUB: this moves a home pointer. The routing-rule implementation that replaces
 	// it moves the catalog membership of the tablegroup instead.
 	FoldRouting(context.Context, *connect.Request[multipoolerservice.FoldRoutingRequest]) (*connect.Response[multipoolerservice.FoldRoutingResponse], error)
-	// CleanupOperation deletes the fences of an operation. It is refused with
-	// FAILED_PRECONDITION while the operation has a routing rule, or has a fence that is
-	// FENCING. A fence that is FENCED is deleted too, and its scope serves application work
-	// again as soon as its poolers read that there is none: the controller keeps the source
-	// fenced after the fold until its unmanaged poolers are decommissioned, and cleans up
-	// after. Cleaning up an operation that has nothing left succeeds.
+	// CleanupOperation deletes the fences of an operation and ends the operation for good: a later
+	// call that names it, a StartFence replayed after the cleanup for one, is refused with
+	// FAILED_PRECONDITION. It is refused with FAILED_PRECONDITION while the operation has a
+	// routing rule, or has a fence that is FENCING, and it is ABORTED, deleting nothing, if a
+	// routing change committed since the state was read. A fence that is FENCED is deleted too, but
+	// deleting a fence tells no pooler anything: a pooler that decided to refuse application work
+	// keeps that decision until it restarts or its role changes, and nothing refreshes it. So
+	// cleaning up UNFENCED fences changes nothing for serving, and cleaning up a FENCED one requires
+	// that the poolers of its scope are gone: the controller keeps the source fenced after the fold
+	// until its unmanaged poolers are decommissioned, and cleans up after. Cleaning up an operation
+	// that has nothing left succeeds.
 	CleanupOperation(context.Context, *connect.Request[multipoolerservice.CleanupOperationRequest]) (*connect.Response[multipoolerservice.CleanupOperationResponse], error)
 	// RefreshAdmission is called by the coordinator on each member of a tablegroup, for a
 	// start and for a commit alike. The pooler re-reads its tablegroup's fence from the control
@@ -826,34 +833,41 @@ type MultipoolerServiceHandler interface {
 	// from_tablegroup and to_tablegroup are both FENCED for this operation (a completed fence:
 	// FENCING is refused with FAILED_PRECONDITION), read with a row lock so that neither can
 	// change under the write. It bumps routing_version. Success means the routing metadata
-	// committed; it does not unfence anything. A retry after the switch, which finds the rule
-	// of this operation at the version after expected_routing_version, succeeds and writes
-	// nothing. That the operation exists as a whole, and that the rules cover the keyspace
+	// committed; it does not unfence anything. A retry after the switch, which finds the
+	// operation SWITCHED at the version after expected_routing_version, with the rule it asked
+	// for, succeeds and writes nothing. An operation that was cleaned up, or folded, is refused. That the operation exists as a whole, and that the rules cover the keyspace
 	// exactly, are not checked yet.
 	SwitchRouting(context.Context, *connect.Request[multipoolerservice.SwitchRoutingRequest]) (*connect.Response[multipoolerservice.SwitchRoutingResponse], error)
 	// RevertRouting deletes the routing rule of an operation, so that the traffic goes back to
 	// the home tablegroup, under the same preconditions as SwitchRouting: the routing is at
 	// expected_routing_version, and the fences of the rule's two tablegroups are FENCED for this
-	// operation. It bumps routing_version. A retry after the revert, which finds no rule of the
-	// operation at the version after expected_routing_version, succeeds and writes nothing.
+	// operation. It bumps routing_version. A retry after the revert, which finds the
+	// operation REVERTED at the version after expected_routing_version, succeeds and writes
+	// nothing; an operation in any other state, whatever the version, is refused.
 	RevertRouting(context.Context, *connect.Request[multipoolerservice.RevertRoutingRequest]) (*connect.Response[multipoolerservice.RevertRoutingResponse], error)
 	// FoldRouting completes a switched operation: in one transaction it makes the rule's
 	// to_tablegroup the home tablegroup, deletes the rule and bumps routing_version, so that the
 	// routing is empty again. It needs no fence, because the effective tablegroup is the same
 	// before and after, and it refuses to run if it would not be: the call resolves the traffic
-	// before and after and fails with FAILED_PRECONDITION if they differ. A retry after the fold,
-	// which finds no rule of the operation at the version after expected_routing_version,
-	// succeeds and writes nothing.
+	// before and after and fails with FAILED_PRECONDITION if they differ. A retry after the
+	// fold, which finds the operation FOLDED at the version after expected_routing_version,
+	// succeeds and writes nothing; an operation in any other state, whatever the version, is
+	// refused.
 	//
 	// PROTOTYPE STUB: this moves a home pointer. The routing-rule implementation that replaces
 	// it moves the catalog membership of the tablegroup instead.
 	FoldRouting(context.Context, *connect.Request[multipoolerservice.FoldRoutingRequest]) (*connect.Response[multipoolerservice.FoldRoutingResponse], error)
-	// CleanupOperation deletes the fences of an operation. It is refused with
-	// FAILED_PRECONDITION while the operation has a routing rule, or has a fence that is
-	// FENCING. A fence that is FENCED is deleted too, and its scope serves application work
-	// again as soon as its poolers read that there is none: the controller keeps the source
-	// fenced after the fold until its unmanaged poolers are decommissioned, and cleans up
-	// after. Cleaning up an operation that has nothing left succeeds.
+	// CleanupOperation deletes the fences of an operation and ends the operation for good: a later
+	// call that names it, a StartFence replayed after the cleanup for one, is refused with
+	// FAILED_PRECONDITION. It is refused with FAILED_PRECONDITION while the operation has a
+	// routing rule, or has a fence that is FENCING, and it is ABORTED, deleting nothing, if a
+	// routing change committed since the state was read. A fence that is FENCED is deleted too, but
+	// deleting a fence tells no pooler anything: a pooler that decided to refuse application work
+	// keeps that decision until it restarts or its role changes, and nothing refreshes it. So
+	// cleaning up UNFENCED fences changes nothing for serving, and cleaning up a FENCED one requires
+	// that the poolers of its scope are gone: the controller keeps the source fenced after the fold
+	// until its unmanaged poolers are decommissioned, and cleans up after. Cleaning up an operation
+	// that has nothing left succeeds.
 	CleanupOperation(context.Context, *connect.Request[multipoolerservice.CleanupOperationRequest]) (*connect.Response[multipoolerservice.CleanupOperationResponse], error)
 	// RefreshAdmission is called by the coordinator on each member of a tablegroup, for a
 	// start and for a commit alike. The pooler re-reads its tablegroup's fence from the control

@@ -48,9 +48,14 @@
 //	_, _ = client.UnfenceScope(ctx, &UnfenceScopeRequest{Database: "db", OperationId: op, Scope: scope("destTG"), ExpectedVersion: dst.Fence.Version})
 //	// When the migration is complete, fold the rule into the catalog. The source stays FENCED.
 //	_, _ = client.FoldRouting(ctx, &FoldRoutingRequest{Database: "db", OperationId: op, ExpectedRoutingVersion: state.RoutingVersion + 1})
-//	// Once the source's poolers are decommissioned, delete the operation's fences. This reopens
-//	// a fenced scope whose poolers are still running.
+//	// Once the source's poolers are decommissioned, delete the operation's fences and end it:
+//	// later calls that name the operation are refused. A pooler that still runs keeps refusing
+//	// application work until it restarts, which a fence-less scope would then open.
 //	_, _ = client.CleanupOperation(ctx, &CleanupOperationRequest{Database: "db", OperationId: op})
+//
+// An operation is recorded by its first fence write, as PREPARE, and then moves through SWITCHED,
+// REVERTED or FOLDED, each at the routing version its change produced, and ends CLEANED. A retry is
+// recognized by the state its own success leaves, never by the routing version alone.
 //
 // A scope has at most one fence, held by one operation. Another operation can take a scope over
 // only when the holder's fence is UNFENCED, by starting a fence at the version it read; a scope
@@ -131,6 +136,24 @@ func (r *ruleRow) proto() *multipoolerservicepb.RoutingRuleState {
 	}
 }
 
+// operation states, as the coordinator records them. An operation is recorded by its first fence
+// write; version is the routing version its last switch, revert or fold produced.
+const (
+	opPrepare  = "PREPARE"
+	opSwitched = "SWITCHED"
+	opReverted = "REVERTED"
+	opFolded   = "FOLDED"
+	opCleaned  = "CLEANED"
+)
+
+type operationRow struct {
+	state   string
+	version int64
+	// effective is the tablegroup that received the traffic after the last change, which a retry
+	// answers.
+	effective string
+}
+
 type database struct {
 	// tablegroups are the catalog's tablegroups, with the names of their members.
 	tablegroups map[string][]string
@@ -139,6 +162,7 @@ type database struct {
 	home       string
 	routingVer int64
 	rules      []*ruleRow
+	operations map[string]*operationRow
 }
 
 // effective resolves where the traffic goes: the home tablegroup, or, when a rule applies to it,
@@ -159,6 +183,32 @@ func (d *database) ruleOf(op string) *ruleRow {
 		}
 	}
 	return nil
+}
+
+// record notes the operation, as PREPARE, when nothing is recorded of it yet, which is what a
+// fence write does.
+func (d *database) record(op string) {
+	if _, ok := d.operations[op]; !ok {
+		d.operations[op] = &operationRow{state: opPrepare}
+	}
+}
+
+// requireLive refuses a call that names an operation that was cleaned up: a scope with no fence
+// starts again at version zero, so a delayed call of the operation would otherwise fence it again.
+func (d *database) requireLive(op string) error {
+	if o := d.operations[op]; o != nil && o.state == opCleaned {
+		return status.Errorf(codes.FailedPrecondition, "operation %s was cleaned up; a new operation needs a new operation_id", op)
+	}
+	return nil
+}
+
+// describeOperation says where an operation is, for a message.
+func (d *database) describeOperation(op string) string {
+	o := d.operations[op]
+	if o == nil {
+		return "nothing is recorded of it"
+	}
+	return fmt.Sprintf("it is %s at routing version %d", o.state, o.version)
 }
 
 func (d *database) deleteRule(op string) {
@@ -239,7 +289,7 @@ func (s *Server) BusyMemberHeldBy(pooler, detail string, held *multipoolerservic
 func (s *Server) db(name string) *database {
 	d, ok := s.databases[name]
 	if !ok {
-		d = &database{tablegroups: map[string][]string{}, fences: map[string]*fenceRow{}}
+		d = &database{tablegroups: map[string][]string{}, fences: map[string]*fenceRow{}, operations: map[string]*operationRow{}}
 		s.databases[name] = d
 	}
 	return d
@@ -299,7 +349,7 @@ func (s *Server) GetRoutingState(_ context.Context, req *multipoolerservicepb.Ge
 	defer s.mu.Unlock()
 	d, ok := s.databases[req.GetDatabase()]
 	if !ok {
-		return &multipoolerservicepb.GetRoutingStateResponse{}, nil
+		d = &database{}
 	}
 	resp := &multipoolerservicepb.GetRoutingStateResponse{RoutingVersion: d.routingVer}
 	if req.GetSinceVersion() > 0 && req.GetSinceVersion() == d.routingVer {
@@ -356,6 +406,9 @@ func (s *Server) StartFence(_ context.Context, req *multipoolerservicepb.StartFe
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d := s.db(req.GetDatabase())
+	if err := d.requireLive(op); err != nil {
+		return nil, err
+	}
 	cur := d.fences[tg]
 	if cur == nil {
 		if err := d.checkKnown(tg); err != nil {
@@ -370,6 +423,7 @@ func (s *Server) StartFence(_ context.Context, req *multipoolerservicepb.StartFe
 	own := cur != nil && cur.operationID == op
 	switch {
 	case (cur == nil || cur.state == stateUnfenced) && curVersion == expected:
+		d.record(op)
 		cur = &fenceRow{operationID: op, state: stateFencing, version: expected + 1, updatedAt: time.Now()}
 		d.fences[tg] = cur
 	case own && cur.state == stateFencing && (cur.version == expected || cur.version == expected+1):
@@ -422,6 +476,9 @@ func (s *Server) CommitFence(_ context.Context, req *multipoolerservicepb.Commit
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d := s.db(req.GetDatabase())
+	if err := d.requireLive(op); err != nil {
+		return nil, err
+	}
 	cur := d.fences[tg]
 	if cur == nil {
 		if err := d.checkKnown(tg); err != nil {
@@ -467,6 +524,9 @@ func (s *Server) UnfenceScope(_ context.Context, req *multipoolerservicepb.Unfen
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d := s.db(req.GetDatabase())
+	if err := d.requireLive(op); err != nil {
+		return nil, err
+	}
 	cur := d.fences[tg]
 	if cur == nil {
 		if err := d.checkKnown(tg); err != nil {
@@ -518,8 +578,10 @@ func (d *database) checkRoutingVersion(expected int64) error {
 
 // SwitchRouting implements the RPC: the rule is added, and the routing version bumped, only when
 // the routing is at the expected version, the rule moves the home tablegroup (not the default one),
-// no rule exists and both tablegroups are FENCED for the operation. A retry that finds the
-// operation's rule at the version after the expected one succeeds and writes nothing.
+// no rule exists and both tablegroups are FENCED for the operation, and the operation is PREPARE or
+// REVERTED (a FOLDED one is refused). It records the operation as SWITCHED at the new version. A retry
+// that finds the operation SWITCHED at the version after the expected one, with the rule asked for,
+// succeeds and writes nothing.
 func (s *Server) SwitchRouting(_ context.Context, req *multipoolerservicepb.SwitchRoutingRequest) (*multipoolerservicepb.SwitchRoutingResponse, error) {
 	op, err := operation(req.GetOperationId())
 	if err != nil {
@@ -536,11 +598,19 @@ func (s *Server) SwitchRouting(_ context.Context, req *multipoolerservicepb.Swit
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d := s.db(req.GetDatabase())
+	if err := d.requireLive(op); err != nil {
+		return nil, err
+	}
+	o := d.operations[op]
 	if cur := d.ruleOf(op); cur != nil {
-		if cur.from == want.from && cur.to == want.to && cur.toShard == want.toShard && cur.createdVersion == expected+1 && d.routingVer == expected+1 {
-			return &multipoolerservicepb.SwitchRoutingResponse{RoutingVersion: d.routingVer, EffectiveTablegroup: d.effective()}, nil
+		if o != nil && o.state == opSwitched && o.version == expected+1 &&
+			cur.from == want.from && cur.to == want.to && cur.toShard == want.toShard && cur.createdVersion == expected+1 {
+			return &multipoolerservicepb.SwitchRoutingResponse{RoutingVersion: o.version, EffectiveTablegroup: o.effective}, nil
 		}
 		return nil, status.Errorf(codes.FailedPrecondition, "operation %s already has the rule %q to %q, switched at routing version %d", op, cur.from, cur.to, cur.createdVersion)
+	}
+	if o != nil && o.state == opFolded {
+		return nil, status.Errorf(codes.FailedPrecondition, "operation %s was folded: its rule is gone for good", op)
 	}
 	for _, name := range []string{want.from, want.to} {
 		if err := d.checkKnown(name); err != nil {
@@ -564,16 +634,21 @@ func (s *Server) SwitchRouting(_ context.Context, req *multipoolerservicepb.Swit
 			return nil, err
 		}
 	}
+	if o == nil || (o.state != opPrepare && o.state != opReverted) {
+		return nil, status.Error(codes.Aborted, "routing or an admission fence changed concurrently; re-read and retry")
+	}
 	d.routingVer++
 	want.createdVersion = d.routingVer
 	d.rules = append(d.rules, want)
+	o.state, o.version, o.effective = opSwitched, d.routingVer, want.to
 	return &multipoolerservicepb.SwitchRoutingResponse{RoutingVersion: d.routingVer, EffectiveTablegroup: want.to}, nil
 }
 
 // RevertRouting implements the RPC: the operation's rule is deleted, and the routing version bumped,
 // only when the routing is at the expected version and both tablegroups of the rule are FENCED for
-// the operation. A retry that finds no rule of the operation at the version after the expected one
-// succeeds and writes nothing.
+// the operation, and records it as REVERTED at the new version. A retry that finds it REVERTED at the
+// version after the expected one succeeds and writes nothing; a call without a rule in any other
+// state is refused, whatever the version.
 func (s *Server) RevertRouting(_ context.Context, req *multipoolerservicepb.RevertRoutingRequest) (*multipoolerservicepb.RevertRoutingResponse, error) {
 	op, err := operation(req.GetOperationId())
 	if err != nil {
@@ -586,12 +661,15 @@ func (s *Server) RevertRouting(_ context.Context, req *multipoolerservicepb.Reve
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d := s.db(req.GetDatabase())
+	if err := d.requireLive(op); err != nil {
+		return nil, err
+	}
 	r := d.ruleOf(op)
 	if r == nil {
-		if d.routingVer == expected+1 {
-			return &multipoolerservicepb.RevertRoutingResponse{RoutingVersion: d.routingVer, EffectiveTablegroup: d.effective()}, nil
+		if o := d.operations[op]; o != nil && o.state == opReverted && o.version == expected+1 {
+			return &multipoolerservicepb.RevertRoutingResponse{RoutingVersion: o.version, EffectiveTablegroup: o.effective}, nil
 		}
-		return nil, status.Errorf(codes.FailedPrecondition, "operation %s has no routing rule to revert", op)
+		return nil, status.Errorf(codes.FailedPrecondition, "operation %s has no routing rule to revert (%s)", op, d.describeOperation(op))
 	}
 	if err := d.checkRoutingVersion(expected); err != nil {
 		return nil, err
@@ -601,16 +679,20 @@ func (s *Server) RevertRouting(_ context.Context, req *multipoolerservicepb.Reve
 			return nil, err
 		}
 	}
+	if o := d.operations[op]; o == nil || o.state != opSwitched {
+		return nil, status.Error(codes.Aborted, "routing or an admission fence changed concurrently; re-read and retry")
+	}
 	d.deleteRule(op)
 	d.routingVer++
+	d.operations[op].state, d.operations[op].version, d.operations[op].effective = opReverted, d.routingVer, r.from
 	return &multipoolerservicepb.RevertRoutingResponse{RoutingVersion: d.routingVer, EffectiveTablegroup: d.effective()}, nil
 }
 
 // FoldRouting implements the RPC: the rule's destination becomes the home tablegroup, the rule is
 // deleted and the routing version bumped, with no fence needed, only when the routing is at the
 // expected version, the rule moves the home tablegroup, and the traffic goes where it went before.
-// A retry that finds no rule of the operation at the version after the expected one succeeds and
-// writes nothing.
+// The operation becomes FOLDED at the new version. A retry that finds it FOLDED at the version after
+// the expected one succeeds and writes nothing; a call without a rule in any other state is refused.
 func (s *Server) FoldRouting(_ context.Context, req *multipoolerservicepb.FoldRoutingRequest) (*multipoolerservicepb.FoldRoutingResponse, error) {
 	op, err := operation(req.GetOperationId())
 	if err != nil {
@@ -623,12 +705,15 @@ func (s *Server) FoldRouting(_ context.Context, req *multipoolerservicepb.FoldRo
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d := s.db(req.GetDatabase())
+	if err := d.requireLive(op); err != nil {
+		return nil, err
+	}
 	r := d.ruleOf(op)
 	if r == nil {
-		if d.routingVer == expected+1 {
-			return &multipoolerservicepb.FoldRoutingResponse{RoutingVersion: d.routingVer, HomeTablegroup: d.home}, nil
+		if o := d.operations[op]; o != nil && o.state == opFolded && o.version == expected+1 {
+			return &multipoolerservicepb.FoldRoutingResponse{RoutingVersion: o.version, HomeTablegroup: o.effective}, nil
 		}
-		return nil, status.Errorf(codes.FailedPrecondition, "operation %s has no routing rule to fold", op)
+		return nil, status.Errorf(codes.FailedPrecondition, "operation %s has no routing rule to fold (%s)", op, d.describeOperation(op))
 	}
 	if err := d.checkRoutingVersion(expected); err != nil {
 		return nil, err
@@ -645,14 +730,20 @@ func (s *Server) FoldRouting(_ context.Context, req *multipoolerservicepb.FoldRo
 	if before, after := d.effective(), folded.effective(); before != after {
 		return nil, status.Errorf(codes.FailedPrecondition, "folding the rule of operation %s would move the traffic from %q to %q", op, before, after)
 	}
+	if o := d.operations[op]; o == nil || o.state != opSwitched {
+		return nil, status.Error(codes.Aborted, "routing changed concurrently; re-read and retry")
+	}
 	d.deleteRule(op)
 	d.home = r.to
 	d.routingVer++
+	d.operations[op].state, d.operations[op].version, d.operations[op].effective = opFolded, d.routingVer, r.to
 	return &multipoolerservicepb.FoldRoutingResponse{RoutingVersion: d.routingVer, HomeTablegroup: d.home}, nil
 }
 
 // CleanupOperation implements the RPC: it deletes every fence of the operation, FENCED ones too, and
-// says how many. It is refused while the operation has a routing rule or a FENCING fence.
+// says how many, and ends the operation for good: later start, commit, unfence and routing calls that
+// name it are FAILED_PRECONDITION. It is refused while the operation has a routing rule or a FENCING
+// fence. Repeating it succeeds with nothing deleted.
 func (s *Server) CleanupOperation(_ context.Context, req *multipoolerservicepb.CleanupOperationRequest) (*multipoolerservicepb.CleanupOperationResponse, error) {
 	op, err := operation(req.GetOperationId())
 	if err != nil {
@@ -675,6 +766,13 @@ func (s *Server) CleanupOperation(_ context.Context, req *multipoolerservicepb.C
 			delete(d.fences, name)
 			deleted++
 		}
+	}
+	// The operation ends for good: later calls that name it are refused. It is recorded at the
+	// routing version if nothing was recorded of it.
+	if o := d.operations[op]; o != nil {
+		o.state = opCleaned
+	} else {
+		d.operations[op] = &operationRow{state: opCleaned, version: d.routingVer}
 	}
 	return &multipoolerservicepb.CleanupOperationResponse{FencesDeleted: deleted}, nil
 }
