@@ -221,12 +221,14 @@ func (t *TransactionPrimitive) executeCommit(
 		// Pending LISTEN/UNLISTEN buffered inside a failed transaction must be
 		// discarded — PG's implicit ROLLBACK invalidates them. A healthy COMMIT
 		// promotes them as usual.
+		result := syntheticConclusionResult(commandTag, warnNoTxn)
 		if implicitRollback {
 			state.DiscardPendingListens()
 		} else {
 			syncPendingSubscriptions(conn, state)
+			sendPendingNotifications(ctx, exec, conn, state, result)
 		}
-		return callback(ctx, syntheticConclusionResult(commandTag, warnNoTxn))
+		return callback(ctx, result)
 	}
 
 	// Capture the backend result so gateway snapshots are finalized before the
@@ -282,13 +284,14 @@ func (t *TransactionPrimitive) executeCommit(
 		conn.SetTxnStatus(protocol.TxnStatusIdle)
 	}
 
+	if commitResult == nil {
+		commitResult = &sqltypes.Result{CommandTag: commandTag}
+	}
 	if implicitRollback {
 		state.DiscardPendingListens()
 	} else {
 		syncPendingSubscriptions(conn, state)
-	}
-	if commitResult == nil {
-		commitResult = &sqltypes.Result{CommandTag: commandTag}
+		sendPendingNotifications(ctx, exec, conn, state, commitResult)
 	}
 	return callback(ctx, commitResult)
 }
@@ -507,6 +510,14 @@ func (t *TransactionPrimitive) executePrepareTransaction(
 	callback func(context.Context, *sqltypes.Result) error,
 ) error {
 	state.PendingBeginQuery = ""
+
+	// PostgreSQL refuses to prepare a transaction that ran NOTIFY, and ends it. The
+	// NOTIFYs recorded for after the commit are the same thing seen from the gateway.
+	if state.HasPendingNotifications() {
+		t.rollbackPrepareTransactionState(ctx, exec, conn, state)
+		return mterrors.NewPgError("ERROR", "0A000",
+			"cannot PREPARE a transaction that has executed LISTEN, UNLISTEN, or NOTIFY", "")
+	}
 
 	var preparedResult *sqltypes.Result
 	err := exec.StreamExecute(ctx, conn, t.TableGroup, constants.DefaultShard, t.Query, nil, state, info, false,
