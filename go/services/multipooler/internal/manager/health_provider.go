@@ -69,6 +69,11 @@ type healthStreamer struct {
 	// Zero on the primary or when not yet measured. Updated via SetReplicationLag.
 	replicationLagNs atomic.Int64
 
+	// backendReady is true while an unmanaged pooler's external backend is
+	// reachable, writable and the intended source. Always false on managed
+	// poolers.
+	backendReady bool
+
 	// metrics publishes replication lag and serving-state transitions as OTel
 	// metrics. Always non-nil after newHealthStreamer.
 	metrics *healthMetrics
@@ -183,6 +188,7 @@ func (hs *healthStreamer) SetReplicationLag(lagNs int64) {
 // buildStateLocked builds the current health state. Caller must hold hs.mu.
 func (hs *healthStreamer) buildStateLocked() *poolerserver.HealthState {
 	return &poolerserver.HealthState{
+		BackendReady:                hs.backendReady,
 		PoolerID:                    hs.poolerID,
 		ServingStatus:               hs.servingStatus,
 		RoutingState:                hs.routingState,
@@ -354,4 +360,16 @@ func (pm *MultipoolerManager) runHealthHeartbeat(ctx context.Context, interval t
 			pm.broadcastHealth()
 		}
 	}
+}
+
+// setBackendReady records the external backend's readiness and broadcasts the
+// change. It is a no-op when the value is unchanged.
+func (hs *healthStreamer) setBackendReady(ready bool) {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	if hs.backendReady == ready {
+		return
+	}
+	hs.backendReady = ready
+	hs.broadcastLocked()
 }

@@ -88,6 +88,12 @@ const (
 	// MultipoolerServiceNotificationStreamProcedure is the fully-qualified name of the
 	// MultipoolerService's NotificationStream RPC.
 	MultipoolerServiceNotificationStreamProcedure = "/multipoolerservice.MultipoolerService/NotificationStream"
+	// MultipoolerServiceGetBackingConnectionProcedure is the fully-qualified name of the
+	// MultipoolerService's GetBackingConnection RPC.
+	MultipoolerServiceGetBackingConnectionProcedure = "/multipoolerservice.MultipoolerService/GetBackingConnection"
+	// MultipoolerServiceGetTablegroupBindingProcedure is the fully-qualified name of the
+	// MultipoolerService's GetTablegroupBinding RPC.
+	MultipoolerServiceGetTablegroupBindingProcedure = "/multipoolerservice.MultipoolerService/GetTablegroupBinding"
 )
 
 // MultipoolerServiceClient is a client for the multipoolerservice.MultipoolerService service.
@@ -158,6 +164,21 @@ type MultipoolerServiceClient interface {
 	// session. Subscription updates and notification delivery share one stream so
 	// notifications across channels preserve PostgreSQL delivery order.
 	NotificationStream(context.Context) *connect.BidiStreamForClient[multipoolerservice.NotificationStreamRequest, multipoolerservice.NotificationStreamResponse]
+	// GetBackingConnection returns the named backing connection. It is served only
+	// by the default primary pooler, which owns the connection metadata; unmanaged
+	// poolers call it at bootstrap to learn the external endpoint they front. The
+	// reply carries the credential, so the call should travel over TLS; it is
+	// protected only by the transport's authentication, and there is no
+	// per-call authorization.
+	GetBackingConnection(context.Context, *connect.Request[multipoolerservice.GetBackingConnectionRequest]) (*connect.Response[multipoolerservice.GetBackingConnectionResponse], error)
+	// GetTablegroupBinding returns the name of the connection a tablegroup is bound to, or
+	// an empty name when the tablegroup is served by its managed cohort. It is served only
+	// by the default primary pooler. A pooler compares it with the connection it fronts
+	// before it reports its backend ready, and again while it is ready, so a pooler that
+	// fronts one connection never serves a tablegroup that is bound to another. It carries
+	// no credential: the connection itself is read with GetBackingConnection. A tablegroup
+	// that does not exist is NOT_FOUND.
+	GetTablegroupBinding(context.Context, *connect.Request[multipoolerservice.GetTablegroupBindingRequest]) (*connect.Response[multipoolerservice.GetTablegroupBindingResponse], error)
 }
 
 // NewMultipoolerServiceClient constructs a client for the multipoolerservice.MultipoolerService
@@ -249,6 +270,18 @@ func NewMultipoolerServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			connect.WithSchema(multipoolerServiceMethods.ByName("NotificationStream")),
 			connect.WithClientOptions(opts...),
 		),
+		getBackingConnection: connect.NewClient[multipoolerservice.GetBackingConnectionRequest, multipoolerservice.GetBackingConnectionResponse](
+			httpClient,
+			baseURL+MultipoolerServiceGetBackingConnectionProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("GetBackingConnection")),
+			connect.WithClientOptions(opts...),
+		),
+		getTablegroupBinding: connect.NewClient[multipoolerservice.GetTablegroupBindingRequest, multipoolerservice.GetTablegroupBindingResponse](
+			httpClient,
+			baseURL+MultipoolerServiceGetTablegroupBindingProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("GetTablegroupBinding")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -267,6 +300,8 @@ type multipoolerServiceClient struct {
 	releaseReservedConnection *connect.Client[multipoolerservice.ReleaseReservedConnectionRequest, multipoolerservice.ReleaseReservedConnectionResponse]
 	streamPoolerHealth        *connect.Client[multipoolerservice.StreamPoolerHealthRequest, multipoolerservice.StreamPoolerHealthResponse]
 	notificationStream        *connect.Client[multipoolerservice.NotificationStreamRequest, multipoolerservice.NotificationStreamResponse]
+	getBackingConnection      *connect.Client[multipoolerservice.GetBackingConnectionRequest, multipoolerservice.GetBackingConnectionResponse]
+	getTablegroupBinding      *connect.Client[multipoolerservice.GetTablegroupBindingRequest, multipoolerservice.GetTablegroupBindingResponse]
 }
 
 // ExecuteQuery calls multipoolerservice.MultipoolerService.ExecuteQuery.
@@ -332,6 +367,16 @@ func (c *multipoolerServiceClient) StreamPoolerHealth(ctx context.Context, req *
 // NotificationStream calls multipoolerservice.MultipoolerService.NotificationStream.
 func (c *multipoolerServiceClient) NotificationStream(ctx context.Context) *connect.BidiStreamForClient[multipoolerservice.NotificationStreamRequest, multipoolerservice.NotificationStreamResponse] {
 	return c.notificationStream.CallBidiStream(ctx)
+}
+
+// GetBackingConnection calls multipoolerservice.MultipoolerService.GetBackingConnection.
+func (c *multipoolerServiceClient) GetBackingConnection(ctx context.Context, req *connect.Request[multipoolerservice.GetBackingConnectionRequest]) (*connect.Response[multipoolerservice.GetBackingConnectionResponse], error) {
+	return c.getBackingConnection.CallUnary(ctx, req)
+}
+
+// GetTablegroupBinding calls multipoolerservice.MultipoolerService.GetTablegroupBinding.
+func (c *multipoolerServiceClient) GetTablegroupBinding(ctx context.Context, req *connect.Request[multipoolerservice.GetTablegroupBindingRequest]) (*connect.Response[multipoolerservice.GetTablegroupBindingResponse], error) {
+	return c.getTablegroupBinding.CallUnary(ctx, req)
 }
 
 // MultipoolerServiceHandler is an implementation of the multipoolerservice.MultipoolerService
@@ -403,6 +448,21 @@ type MultipoolerServiceHandler interface {
 	// session. Subscription updates and notification delivery share one stream so
 	// notifications across channels preserve PostgreSQL delivery order.
 	NotificationStream(context.Context, *connect.BidiStream[multipoolerservice.NotificationStreamRequest, multipoolerservice.NotificationStreamResponse]) error
+	// GetBackingConnection returns the named backing connection. It is served only
+	// by the default primary pooler, which owns the connection metadata; unmanaged
+	// poolers call it at bootstrap to learn the external endpoint they front. The
+	// reply carries the credential, so the call should travel over TLS; it is
+	// protected only by the transport's authentication, and there is no
+	// per-call authorization.
+	GetBackingConnection(context.Context, *connect.Request[multipoolerservice.GetBackingConnectionRequest]) (*connect.Response[multipoolerservice.GetBackingConnectionResponse], error)
+	// GetTablegroupBinding returns the name of the connection a tablegroup is bound to, or
+	// an empty name when the tablegroup is served by its managed cohort. It is served only
+	// by the default primary pooler. A pooler compares it with the connection it fronts
+	// before it reports its backend ready, and again while it is ready, so a pooler that
+	// fronts one connection never serves a tablegroup that is bound to another. It carries
+	// no credential: the connection itself is read with GetBackingConnection. A tablegroup
+	// that does not exist is NOT_FOUND.
+	GetTablegroupBinding(context.Context, *connect.Request[multipoolerservice.GetTablegroupBindingRequest]) (*connect.Response[multipoolerservice.GetTablegroupBindingResponse], error)
 }
 
 // NewMultipoolerServiceHandler builds an HTTP handler from the service implementation. It returns
@@ -490,6 +550,18 @@ func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect
 		connect.WithSchema(multipoolerServiceMethods.ByName("NotificationStream")),
 		connect.WithHandlerOptions(opts...),
 	)
+	multipoolerServiceGetBackingConnectionHandler := connect.NewUnaryHandler(
+		MultipoolerServiceGetBackingConnectionProcedure,
+		svc.GetBackingConnection,
+		connect.WithSchema(multipoolerServiceMethods.ByName("GetBackingConnection")),
+		connect.WithHandlerOptions(opts...),
+	)
+	multipoolerServiceGetTablegroupBindingHandler := connect.NewUnaryHandler(
+		MultipoolerServiceGetTablegroupBindingProcedure,
+		svc.GetTablegroupBinding,
+		connect.WithSchema(multipoolerServiceMethods.ByName("GetTablegroupBinding")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/multipoolerservice.MultipoolerService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case MultipoolerServiceExecuteQueryProcedure:
@@ -518,6 +590,10 @@ func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect
 			multipoolerServiceStreamPoolerHealthHandler.ServeHTTP(w, r)
 		case MultipoolerServiceNotificationStreamProcedure:
 			multipoolerServiceNotificationStreamHandler.ServeHTTP(w, r)
+		case MultipoolerServiceGetBackingConnectionProcedure:
+			multipoolerServiceGetBackingConnectionHandler.ServeHTTP(w, r)
+		case MultipoolerServiceGetTablegroupBindingProcedure:
+			multipoolerServiceGetTablegroupBindingHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -577,4 +653,12 @@ func (UnimplementedMultipoolerServiceHandler) StreamPoolerHealth(context.Context
 
 func (UnimplementedMultipoolerServiceHandler) NotificationStream(context.Context, *connect.BidiStream[multipoolerservice.NotificationStreamRequest, multipoolerservice.NotificationStreamResponse]) error {
 	return connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.NotificationStream is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) GetBackingConnection(context.Context, *connect.Request[multipoolerservice.GetBackingConnectionRequest]) (*connect.Response[multipoolerservice.GetBackingConnectionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.GetBackingConnection is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) GetTablegroupBinding(context.Context, *connect.Request[multipoolerservice.GetTablegroupBindingRequest]) (*connect.Response[multipoolerservice.GetTablegroupBindingResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.GetTablegroupBinding is not implemented"))
 }
