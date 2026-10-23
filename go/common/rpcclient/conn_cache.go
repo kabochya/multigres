@@ -136,6 +136,38 @@ func (cc *ConnConfig) TransportCredentials(logger *slog.Logger) (grpc.DialOption
 	return grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)), nil
 }
 
+// TransportCredentialsOr is TransportCredentials for a caller that has its own server
+// TLS settings: when none of the client flags is set, the certificate, key and CA the
+// caller serves with are used as the client's, so a cluster whose poolers serve TLS keeps
+// working when a pooler starts dialing another one. With the client flags set they win;
+// with neither, the result is TransportCredentials's.
+func (cc *ConnConfig) TransportCredentialsOr(logger *slog.Logger, cert, key, ca string) (grpc.DialOption, error) {
+	if cc != nil && (cc.cert.Get() != "" || cc.key.Get() != "" || cc.ca.Get() != "") || cert == "" {
+		return cc.TransportCredentials(logger)
+	}
+	name := ""
+	if cc != nil {
+		name = cc.name.Get()
+	}
+	tlsConfig, err := grpccommon.BuildClientTLSConfig(cert, key, ca, name)
+	if err != nil {
+		return nil, err
+	}
+	if tlsConfig == nil {
+		return cc.TransportCredentials(logger)
+	}
+	return grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)), nil
+}
+
+// TLSConfiguredOr reports whether TransportCredentialsOr, given the caller's own server
+// certificate, builds TLS credentials rather than insecure ones.
+func (cc *ConnConfig) TLSConfiguredOr(serverCert string) bool {
+	if cc != nil && (cc.cert.Get() != "" || cc.key.Get() != "" || cc.ca.Get() != "") {
+		return true
+	}
+	return serverCert != ""
+}
+
 // closeFunc allows a standalone function to implement io.Closer, similar to
 // how http.HandlerFunc allows standalone functions to implement http.Handler.
 type closeFunc func() error

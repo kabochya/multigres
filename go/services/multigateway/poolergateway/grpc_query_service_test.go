@@ -220,6 +220,14 @@ func (m *mockMultipoolerServiceClient) StreamPoolerHealth(ctx context.Context, i
 	return nil, nil
 }
 
+func (m *mockMultipoolerServiceClient) GetBackingConnection(ctx context.Context, in *multipoolerservice.GetBackingConnectionRequest, opts ...grpc.CallOption) (*multipoolerservice.GetBackingConnectionResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) GetTablegroupBinding(ctx context.Context, in *multipoolerservice.GetTablegroupBindingRequest, opts ...grpc.CallOption) (*multipoolerservice.GetTablegroupBindingResponse, error) {
+	return nil, nil
+}
+
 func (m *mockMultipoolerServiceClient) NotificationStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[multipoolerservice.NotificationStreamRequest, multipoolerservice.NotificationStreamResponse], error) {
 	return nil, nil
 }

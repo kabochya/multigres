@@ -217,3 +217,13 @@ func TestConnConfig_TransportCredentials_RequireTLSWithoutConfig(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "TLS is required")
 }
+
+func TestConnConfig_TLSConfiguredOr(t *testing.T) {
+	var none *ConnConfig
+	require.False(t, none.TLSConfiguredOr(""))
+	require.True(t, none.TLSConfiguredOr("server.crt"))
+
+	cc := NewConnConfig(viperutil.NewRegistry())
+	require.False(t, cc.TLSConfiguredOr(""))
+	require.True(t, cc.TLSConfiguredOr("server.crt"))
+}

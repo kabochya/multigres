@@ -18,6 +18,9 @@ package manager
 import (
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
 	"github.com/multigres/multigres/go/common/backup"
 	"github.com/multigres/multigres/go/common/topoclient"
 	"github.com/multigres/multigres/go/services/multipooler/internal/connpoolmanager"
@@ -83,6 +86,17 @@ type Config struct {
 	// monitor starts postgres as a primary rather than a standby.
 	StaticLeader bool
 
+	// BackingConnectionName is the backing connection an unmanaged pooler fronts.
+	// Empty for managed poolers. It must equal the tablegroup's backing
+	// connection for the pooler to report its backend ready.
+	BackingConnectionName string
+
+	// DefaultPrimaryTransport resolves the gRPC transport used to reach the default
+	// primary pooler: for an unmanaged pooler's bootstrap and its reads of the cluster metadata. It is
+	// built once at startup, so a TLS misconfiguration fails the process there rather than
+	// leaving every pooler closed. Nil means insecure.
+	DefaultPrimaryTransport func() (grpc.DialOption, error)
+
 	// ExternalBackend is the external PostgreSQL an unmanaged pooler fronts.
 	// Nil for managed poolers. It is the resolved form of --backing-connection.
 	ExternalBackend *ExternalBackend
@@ -93,4 +107,15 @@ type ExternalBackend struct {
 	Host     string
 	Port     int
 	Database string
+	// ExpectedSystemIdentifier is the pg_control_system() identifier the
+	// endpoint must report. The monitor withdraws readiness on any other value.
+	ExpectedSystemIdentifier string
+}
+
+// DefaultPrimaryDialOption returns the transport to the default primary pooler.
+func (c *Config) DefaultPrimaryDialOption() (grpc.DialOption, error) {
+	if c == nil || c.DefaultPrimaryTransport == nil {
+		return grpc.WithTransportCredentials(insecure.NewCredentials()), nil
+	}
+	return c.DefaultPrimaryTransport()
 }
