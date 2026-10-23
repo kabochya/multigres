@@ -43,11 +43,20 @@ func newTxTestConn() *server.Conn {
 
 // txMockIExecute is a mock IExecute for testing TransactionPrimitive.
 type txMockIExecute struct {
-	streamExecuteErr   error
-	streamExecuteSQL   []string
-	streamExecuteResv  []PlanExecInfo
-	streamExecuteCount int
-	callbackResult     *sqltypes.Result
+	streamExecuteErr error
+	// streamExecuteErrOnCall, when positive, limits streamExecuteErr to that call
+	// (counting from 1); zero returns it from every call.
+	streamExecuteErrOnCall int
+	streamExecuteSQL       []string
+	streamExecuteResv      []PlanExecInfo
+	streamExecuteCount     int
+	callbackResult         *sqltypes.Result
+
+	// portalErr is returned from every PortalStreamExecute; the portals run are recorded.
+	portalErr    error
+	portalSQL    []string
+	portalParams [][][]byte
+	portalInfo   []PlanExecInfo
 
 	concludeTransactionErr                error
 	concludeTransactionCount              int
@@ -70,7 +79,7 @@ func (m *txMockIExecute) StreamExecute(
 	m.streamExecuteSQL = append(m.streamExecuteSQL, sql)
 	m.streamExecuteResv = append(m.streamExecuteResv, info)
 	m.streamExecuteCount++
-	if m.streamExecuteErr != nil {
+	if m.streamExecuteErr != nil && (m.streamExecuteErrOnCall == 0 || m.streamExecuteErrOnCall == m.streamExecuteCount) {
 		return m.streamExecuteErr
 	}
 	if m.callbackResult != nil {
@@ -79,8 +88,11 @@ func (m *txMockIExecute) StreamExecute(
 	return nil
 }
 
-func (m *txMockIExecute) PortalStreamExecute(context.Context, string, string, *server.Conn, *handler.MultigatewayConnectionState, *preparedstatement.PortalInfo, int32, bool, PlanExecInfo, bool, func(context.Context, *sqltypes.Result) error) error {
-	return nil
+func (m *txMockIExecute) PortalStreamExecute(_ context.Context, _ string, _ string, _ *server.Conn, _ *handler.MultigatewayConnectionState, portal *preparedstatement.PortalInfo, _ int32, _ bool, info PlanExecInfo, _ bool, _ func(context.Context, *sqltypes.Result) error) error {
+	m.portalSQL = append(m.portalSQL, portal.PreparedStatementInfo.PreparedStatement.Query)
+	m.portalParams = append(m.portalParams, sqltypes.ParamsFromProto(portal.Portal.ParamLengths, portal.Portal.ParamValues))
+	m.portalInfo = append(m.portalInfo, info)
+	return m.portalErr
 }
 
 func (m *txMockIExecute) Describe(context.Context, string, string, *server.Conn, *handler.MultigatewayConnectionState, *preparedstatement.PortalInfo, *preparedstatement.PreparedStatementInfo) (*query.StatementDescription, error) {

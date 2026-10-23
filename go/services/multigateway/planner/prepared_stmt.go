@@ -51,7 +51,7 @@ func (p *Planner) planPrepareStmt(sql string, stmt *ast.PrepareStmt) (*engine.Pl
 	}
 
 	paramTypes := engine.ExtractParamTypeOids(stmt)
-	prim := engine.NewPreparePrimitive(p.defaultTableGroup, stmt.Name, innerQuery, paramTypes)
+	prim := engine.NewPreparePrimitive(p.tableGroup(), stmt.Name, innerQuery, paramTypes)
 	plan := engine.NewPlan(sql, prim)
 
 	p.logger.Debug("created prepare plan", "name", stmt.Name, "inner_query", innerQuery)
@@ -95,7 +95,7 @@ func (p *Planner) planExecuteStmt(sql string, stmt *ast.ExecuteStmt, conn *serve
 		// value: the wrapped-EXECUTE unwrapper's Route has no session-state
 		// channel, so it refuses such a body outright rather than reverting a
 		// value it cannot track (see tryUnwrapWrappedExecute).
-		pinned := sessionPinned(conn, state, p.defaultTableGroup, constants.DefaultShard) ||
+		pinned := sessionPinned(conn, state, p.tableGroup(), constants.DefaultShard) ||
 			engine.StatementReservesBackend(execInfo)
 		if !pinned {
 			if reverted := rewriteSetConfigToRevert(psi.AstStmt()); reverted != nil {
@@ -104,7 +104,7 @@ func (p *Planner) planExecuteStmt(sql string, stmt *ast.ExecuteStmt, conn *serve
 		}
 	}
 
-	prim := engine.NewExecutePrimitive(p.defaultTableGroup, stmt, setConfigs, bodyOverride)
+	prim := engine.NewExecutePrimitive(p.tableGroup(), stmt, setConfigs, bodyOverride)
 	plan := engine.NewPlan(sql, prim)
 	plan.ExecInfo = execInfo
 
@@ -173,9 +173,9 @@ func sqlPreparedSetConfigs(setConfigs []setConfigCall) []engine.SQLPreparedSetCo
 func (p *Planner) planDeallocateStmt(sql string, stmt *ast.DeallocateStmt) (*engine.Plan, error) {
 	var prim engine.Primitive
 	if stmt.IsAll {
-		prim = engine.NewDeallocateAllPrimitive(p.defaultTableGroup)
+		prim = engine.NewDeallocateAllPrimitive(p.tableGroup())
 	} else {
-		prim = engine.NewDeallocatePrimitive(p.defaultTableGroup, stmt.Name)
+		prim = engine.NewDeallocatePrimitive(p.tableGroup(), stmt.Name)
 	}
 	plan := engine.NewPlan(sql, prim)
 

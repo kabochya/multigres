@@ -267,6 +267,13 @@ message Target {
   // mode expresses the caller's writability / consistency needs.
   // See Mode for the semantics of each value.
   Mode mode = 5;
+
+  // control marks the request as cluster control traffic rather than application
+  // work (a NOTIFY): the gateway sends it to the default
+  // tablegroup, whichever tablegroup application statements are routed to, and never
+  // rewrites it to the application tablegroup. Poolers trust the gateway for this
+  // marking.
+  bool control = 6;
 }
 
 // PreparedStatement represents a prepared statement in the extended query protocol.
