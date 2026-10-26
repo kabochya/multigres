@@ -316,7 +316,7 @@ func (p *Planner) Plan(
 		return p.planUnlistenStmt(sql, stmt.(*ast.UnlistenStmt))
 
 	case ast.T_NotifyStmt:
-		return p.planNotifyStmt(sql)
+		return p.planNotifyStmt(sql, stmt.(*ast.NotifyStmt))
 
 	case ast.T_DiscardStmt:
 		return p.planDiscardStmt(sql, stmt.(*ast.DiscardStmt), conn)
@@ -740,9 +740,22 @@ func (p *Planner) planUnlistenStmt(sql string, stmt *ast.UnlistenStmt) (*engine.
 	return engine.NewPlan(sql, engine.NewUnlistenPrimitive(stmt.Conditionname, sql)), nil
 }
 
-// planNotifyStmt routes NOTIFY to the application's tablegroup as a regular query.
-func (p *Planner) planNotifyStmt(sql string) (*engine.Plan, error) {
-	return engine.NewPlan(sql, engine.NewRoute(p.tableGroup(), constants.DefaultShard, sql, nil)), nil
+// planNotifyStmt plans NOTIFY. LISTEN subscribes on the default cohort and stays
+// there, so a NOTIFY is always sent there; anywhere else it would never be delivered.
+// It is control traffic: application routing never moves it.
+//
+// While the application tablegroup is not the default one, a NOTIFY inside a transaction is not sent when it is
+// issued but after the transaction has committed, and is discarded by a rollback (see
+// engine.NotifyPrimitive). Once the application tablegroup is the default one,
+// application tables, triggers, NOTIFY and LISTEN are all on its primary: a NOTIFY
+// inside a transaction goes to the transaction's own backend and is atomic with it.
+// Known limits: pg_notify() inside a query, and NOTIFY run by a
+// trigger or function on the external source, run there and are not delivered to
+// LISTENers on the default cohort.
+func (p *Planner) planNotifyStmt(sql string, stmt *ast.NotifyStmt) (*engine.Plan, error) {
+	plan := engine.NewPlan(sql, engine.NewNotifyPrimitive(stmt, sql, p.tableGroup() != constants.DefaultTableGroup))
+	plan.ExecInfo.Control = true
+	return plan, nil
 }
 
 // tableGroup returns the tablegroup application queries of the planner's

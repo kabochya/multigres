@@ -303,14 +303,19 @@ func poolerRecord(t *testing.T, s *ShardSetup, name string) *clustermetadatapb.M
 }
 
 // TestUnmanagedPoolerWithAnotherSystemIdentifierNeverServes: the external database answers, but
-// it is not the one the connection names, so the pooler never reports its backend ready and stays
-// disabled.
+// it is not the one the connection names, so the pooler never reports its backend ready, stays
+// disabled, and a gateway that sends the database's application SQL to the tablegroup cannot
+// serve through it.
 func TestUnmanagedPoolerWithAnotherSystemIdentifierNeverServes(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires built binaries, etcd and PostgreSQL")
 	}
 	s := getSharedSetup(t)
 	extPort := startExternalPostgres(t)
+	extAdmin, err := pgx.Connect(t.Context(), externalDSN(extPort))
+	require.NoError(t, err)
+	defer extAdmin.Close(context.Background())
+	createAppRole(t, extAdmin, s)
 
 	seedBackingConnection(t, s, "wrong-identity", externalDSN(extPort), externalSystemIdentifier(t, extPort)+"0")
 	bindTablegroup(t, s, "wrongIdentityTG", "wrong-identity")
@@ -318,6 +323,16 @@ func TestUnmanagedPoolerWithAnotherSystemIdentifierNeverServes(t *testing.T) {
 
 	requireNeverReady(t, p, 8*time.Second)
 	require.Equal(t, clustermetadatapb.PoolerServingStatus_DISABLED, poolerRecord(t, s, "unmanaged-wrong-identity").GetServingStatus())
+
+	gwPort := startGatewayServing(t, s, "wrong-identity-gateway", "wrongIdentityTG")
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	conn, err := pgx.Connect(ctx, appDSN(gwPort))
+	if err == nil {
+		defer conn.Close(context.Background())
+		_, err = backendPort(ctx, conn)
+	}
+	require.Error(t, err, "the gateway must not serve through a pooler that is not ready")
 }
 
 // TestUnmanagedPoolerWithATablegroupBoundElsewhereNeverServes: the connection is the right one

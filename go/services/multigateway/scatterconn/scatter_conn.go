@@ -276,6 +276,7 @@ func (sc *ScatterConn) StreamExecute(
 		"in_transaction", conn.IsInTransaction())
 
 	target := sc.buildTarget(conn.Database(), tableGroup, shard, state)
+	target.Control = info.Control
 
 	eo := &querypb.ExecuteOptions{
 		UserAuth:                    userAuthFrom(conn),
@@ -286,7 +287,12 @@ func (sc *ScatterConn) StreamExecute(
 		PassthroughRow:              wantPassthroughRow(keepStructured),
 	}
 
-	ss := state.GetMatchingShardState(target)
+	// An autonomous statement is not part of the session: it neither uses nor changes
+	// its reservations.
+	var ss *handler.ShardState
+	if !info.Autonomous {
+		ss = state.GetMatchingShardState(target)
+	}
 
 	// This statement may touch a session-level advisory lock (acquire or
 	// release). When it does, ask the multipooler to re-probe pg_locks afterward
@@ -418,14 +424,20 @@ func (sc *ScatterConn) StreamExecute(
 	// Case 2: Need a new reserved connection — for transaction, temp table,
 	// portal pin (DECLARE WITH HOLD), or any combination.
 	pinPortalNames := info.PinPortals
-	if conn.IsInTransaction() || conn.UnsafeConnection() || info.TempTable || info.AdvisoryLock || info.LogicalReplicationSlot || info.SetSeed || len(pinPortalNames) > 0 {
+	// A control statement (a NOTIFY outside a transaction) does not make the unsafe
+	// connection's reservation: on an unsafe connection it would otherwise pin the default
+	// tablegroup's backend as the session's own state. Inside a transaction it is part of
+	// the transaction and reserves like any other statement.
+	unsafeReserves := conn.UnsafeConnection() && !info.Control
+	needsReservation := !info.Autonomous && (conn.IsInTransaction() || unsafeReserves || info.TempTable || info.AdvisoryLock || info.LogicalReplicationSlot || info.SetSeed || len(pinPortalNames) > 0)
+	if needsReservation {
 		reasons := reservationReasonsForExecInfo(info)
 		if conn.IsInTransaction() {
 			reasons |= protoutil.ReasonTransaction
 		}
 		// A unsafe connection reserves (and quarantines) its own backend on every
 		// statement — including plain ones that would otherwise skip reservation.
-		if conn.UnsafeConnection() {
+		if unsafeReserves {
 			reasons |= protoutil.ReasonUnsafeConnection
 		}
 		// If the session already has a temp table reservation on another shard,
@@ -531,6 +543,7 @@ func (sc *ScatterConn) PortalStreamExecute(
 
 	// Create target for routing
 	target := sc.buildTarget(conn.Database(), tableGroup, shard, state)
+	target.Control = info.Control
 
 	eo := &querypb.ExecuteOptions{
 		UserAuth:           userAuthFrom(conn),
@@ -564,7 +577,12 @@ func (sc *ScatterConn) PortalStreamExecute(
 	// reservation path below is chosen (see the end of the if/else).
 	recheckAdvisory := info.RecheckAdvisoryLocks
 
-	ss := state.GetMatchingShardState(target)
+	// An autonomous statement is not part of the session: it neither uses nor changes
+	// its reservations.
+	var ss *handler.ShardState
+	if !info.Autonomous {
+		ss = state.GetMatchingShardState(target)
+	}
 	// If we have a reserved connection, we have to ensure
 	// we are routing the query to the pooler where we got the reserved
 	// connection from. If a reparent happened, then we will get an error
@@ -611,7 +629,7 @@ func (sc *ScatterConn) PortalStreamExecute(
 		if reasons != 0 {
 			reservationOpts = &querypb.ReservationOptions{Reasons: reasons}
 		}
-	} else if conn.IsInTransaction() || conn.UnsafeConnection() || info.TempTable || info.AdvisoryLock || info.LogicalReplicationSlot || info.SetSeed {
+	} else if unsafeReservesPortal := conn.UnsafeConnection() && !info.Control; !info.Autonomous && (conn.IsInTransaction() || unsafeReservesPortal || info.TempTable || info.AdvisoryLock || info.LogicalReplicationSlot || info.SetSeed) {
 		// Case 2: Need a new reserved connection — for transaction, temp table,
 		// advisory lock, unsafe connection, or a combination. Build reservation
 		// options the same way the simple StreamExecute path does and pass them on
@@ -622,7 +640,7 @@ func (sc *ScatterConn) PortalStreamExecute(
 		}
 		// A unsafe connection reserves (and quarantines) its own backend on every
 		// statement — including plain ones that would otherwise skip reservation.
-		if conn.UnsafeConnection() {
+		if unsafeReservesPortal {
 			reasons |= protoutil.ReasonUnsafeConnection
 		}
 		if state.HasTempTableReservation() {
