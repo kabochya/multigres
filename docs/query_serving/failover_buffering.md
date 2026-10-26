@@ -183,6 +183,22 @@ Several mechanisms prevent unbounded buffering:
 | Gateway shutdown      | `MTB03`      | Gateway is shutting down — all entries evicted            |
 | Timing guard          | (no buffer)  | `MinTimeBetweenFailovers` not elapsed since last failover |
 
+## Unmanaged tablegroups
+
+A tablegroup served by an unmanaged pooler is a shard of one, and the pooler is its leader
+while its backend is ready. It has no replicas, so a read that asks for a replica
+(`INCONSISTENT` mode) of it finds none and fails as unavailable; only leader-routed modes are
+served, and buffered. An external source that is in recovery (a standby) is not writable:
+the pooler withdraws its readiness, reports no role and does not serve, so writes wait in the
+buffer until the buffer window ends, and reads fail as unavailable as well. There is no leader,
+and no replica, until the source is writable again.
+
+The application's role has to exist on the default cohort as well as on the external database,
+with the same SCRAM verifier. Application SQL authenticates against the unmanaged tablegroup,
+but a `NOTIFY` (and `LISTEN`) is control traffic: it goes to the default cohort, as the client's
+own role, with the keys of the client's login passed through. A role that exists only on the
+external database logs in and runs its queries, and then fails to `NOTIFY`.
+
 ## Configuration
 
 | Flag                                  | Default | Description                                            |

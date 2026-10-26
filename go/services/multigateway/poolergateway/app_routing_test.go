@@ -49,6 +49,13 @@ func reportHealth(conn *poolerConnection, status clustermetadatapb.PoolerServing
 	conn.processHealthResponse(resp)
 }
 
+// controlTarget is a control request's target: fixed to its tablegroup.
+func controlTarget(tableGroup string) *query.Target {
+	t := protoutil.NewTarget(constants.DefaultPostgresDatabase, tableGroup, constants.DefaultShard, query.Mode_MODE_WRITABLE)
+	t.Control = true
+	return t
+}
+
 func writableTarget(tableGroup string) *query.Target {
 	return protoutil.NewTarget(constants.DefaultPostgresDatabase, tableGroup, constants.DefaultShard, query.Mode_MODE_WRITABLE)
 }
@@ -119,6 +126,11 @@ func TestAppRoutingRewriteAndVersions(t *testing.T) {
 	assert.Equal(t, "migrateTG", r.AuthTableGroup("postgres"))
 	assert.Equal(t, constants.DefaultTableGroup, r.AuthTableGroup("other"), "a database the routing does not follow keeps the default")
 
+	// Control targets are not application targets, whatever their tablegroup.
+	meta := controlTarget(constants.DefaultTableGroup)
+	require.NoError(t, r.Rewrite(meta))
+	assert.Equal(t, constants.DefaultTableGroup, meta.GetShardKey().GetTableGroup())
+
 	// A same-version or older read changes nothing.
 	assert.False(t, r.Update("destTG", 1))
 	assert.False(t, r.Update("destTG", 0))
@@ -183,4 +195,40 @@ func TestAppRoutingDoesNotRewriteOtherDatabases(t *testing.T) {
 	mine := protoutil.NewTarget("appdb", PendingAppTableGroup, constants.DefaultShard, query.Mode_MODE_WRITABLE)
 	require.NoError(t, r.Rewrite(mine))
 	assert.Equal(t, "destTG", mine.GetShardKey().GetTableGroup())
+}
+
+// TestControlTargetsAreNeverRewritten: the default tablegroup can be the application
+// tablegroup, so a tablegroup says nothing about which kind of traffic a target is.
+// An application target on it follows routing; a control target on it does not, in
+// either direction of a cutover.
+func TestControlTargetsAreNeverRewritten(t *testing.T) {
+	r := NewAppRouting(constants.DefaultPostgresDatabase)
+	r.Update("migrateTG", 1)
+
+	control := controlTarget(constants.DefaultTableGroup)
+	require.NoError(t, r.Rewrite(control))
+	assert.Equal(t, constants.DefaultTableGroup, control.GetShardKey().GetTableGroup())
+
+	// The cutover into the default tablegroup: application traffic is there now.
+	require.True(t, r.Update(constants.DefaultTableGroup, 2))
+	app := writableTarget("migrateTG")
+	require.NoError(t, r.Rewrite(app))
+	assert.Equal(t, constants.DefaultTableGroup, app.GetShardKey().GetTableGroup())
+	require.NoError(t, r.Rewrite(control))
+	assert.Equal(t, constants.DefaultTableGroup, control.GetShardKey().GetTableGroup())
+
+	// The rollback: application traffic leaves it. A request that was bound for it
+	// follows, a control request does not.
+	require.True(t, r.Update("migrateTG", 3))
+	app = writableTarget(constants.DefaultTableGroup)
+	require.NoError(t, r.Rewrite(app))
+	assert.Equal(t, "migrateTG", app.GetShardKey().GetTableGroup(), "an application request bound for default follows the traffic back")
+	require.NoError(t, r.Rewrite(control))
+	assert.Equal(t, constants.DefaultTableGroup, control.GetShardKey().GetTableGroup(), "control traffic stays on default")
+
+	// Control traffic is not held for unknown routing either: the pointer is only
+	// needed to find where application traffic goes.
+	cold := NewAppRouting(constants.DefaultPostgresDatabase)
+	require.NoError(t, cold.Rewrite(controlTarget(constants.DefaultTableGroup)))
+	require.Error(t, cold.Rewrite(writableTarget(PendingAppTableGroup)))
 }
