@@ -52,6 +52,9 @@ import (
 )
 
 type Multigateway struct {
+	// routingSources are the routing sources built for this gateway by RegisterFlags.
+	routingSources []RoutingSource
+
 	cell viperutil.Value[string]
 	// serviceID string
 	serviceID viperutil.Value[string]
@@ -365,6 +368,12 @@ func (mg *Multigateway) RegisterFlags(fs *pflag.FlagSet) {
 		mg.queryLogSampleRate,
 	)
 	mg.replicaConfig.registerFlags(fs)
+	mg.routingSources = nil
+	for _, newSource := range routingSourceFactories {
+		src := newSource()
+		src.RegisterFlags(fs, mg.reg)
+		mg.routingSources = append(mg.routingSources, src)
+	}
 	if mg.bufferConfig != nil {
 		mg.bufferConfig.RegisterFlags(fs)
 	}
@@ -463,6 +472,15 @@ func (mg *Multigateway) Init(ctx context.Context, ts topoclient.Store) error {
 	// Pass ScatterConn as the IExecute implementation
 	mg.executor = executor.NewExecutor(mg.scatterConn, logger, mg.planCacheMemory.Get())
 	mg.executor.SetSlotBasedReplicationEnabled(mg.slotBasedReplicationEnabled.Get)
+
+	// A routing source, when one is registered and configured, follows where the
+	// application's traffic goes and tells the gateway.
+	routing := &gatewayRouting{executor: mg.executor, pg: mg.poolerGateway}
+	for _, src := range mg.routingSources {
+		if err := src.Start(mg.shutdownCtx, routing, logger); err != nil {
+			return fmt.Errorf("start routing source: %w", err)
+		}
+	}
 	// Started only now that mg.executor is assigned — see CobraPreRunE's doc
 	// comment, which subscribes mg.configReloaded, for why the consumer
 	// can't start any earlier.
