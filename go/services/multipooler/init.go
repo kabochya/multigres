@@ -507,11 +507,15 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context, ts topoclient.S
 	// uses the --multipooler-grpc-* client flags, as every dial to a pooler does, and nothing
 	// else: a cluster whose poolers serve TLS sets them on the unmanaged pooler too. A managed
 	// pooler never dials the default primary for this, and builds none.
-	var bootstrapTransport grpc.DialOption
+	var (
+		defaultPrimaryTransport func() (grpc.DialOption, error)
+		bootstrapTransport      grpc.DialOption
+	)
 	if unmanaged {
 		if bootstrapTransport, err = mp.defaultPrimaryConn.TransportCredentials(logger); err != nil {
 			return fmt.Errorf("default primary transport: %w", err)
 		}
+		defaultPrimaryTransport = func() (grpc.DialOption, error) { return bootstrapTransport, nil }
 	}
 
 	// An unmanaged pooler takes its endpoint and credentials from the named
@@ -689,7 +693,9 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context, ts topoclient.S
 
 		StaticLeader: mp.staticLeader,
 
-		ExternalBackend: externalBackend,
+		BackingConnectionName:   mp.backingConnection.Get(),
+		DefaultPrimaryTransport: defaultPrimaryTransport,
+		ExternalBackend:         externalBackend,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create multipooler: %w", err)
