@@ -26,6 +26,13 @@ import (
 // admission: a closed gate must never block the call that reopens it.
 type RoutingProvider interface {
 	GetRoutingState(ctx context.Context, req *multipoolerservicepb.GetRoutingStateRequest) (*multipoolerservicepb.GetRoutingStateResponse, error)
+	StartFence(ctx context.Context, req *multipoolerservicepb.StartFenceRequest) (*multipoolerservicepb.StartFenceResponse, error)
+	CommitFence(ctx context.Context, req *multipoolerservicepb.CommitFenceRequest) (*multipoolerservicepb.CommitFenceResponse, error)
+	UnfenceScope(ctx context.Context, req *multipoolerservicepb.UnfenceScopeRequest) (*multipoolerservicepb.UnfenceScopeResponse, error)
+	SwitchRouting(ctx context.Context, req *multipoolerservicepb.SwitchRoutingRequest) (*multipoolerservicepb.SwitchRoutingResponse, error)
+	RevertRouting(ctx context.Context, req *multipoolerservicepb.RevertRoutingRequest) (*multipoolerservicepb.RevertRoutingResponse, error)
+	FoldRouting(ctx context.Context, req *multipoolerservicepb.FoldRoutingRequest) (*multipoolerservicepb.FoldRoutingResponse, error)
+	CleanupOperation(ctx context.Context, req *multipoolerservicepb.CleanupOperationRequest) (*multipoolerservicepb.CleanupOperationResponse, error)
 	// RefreshAdmission re-reads and applies this pooler's application admission.
 	RefreshAdmission(ctx context.Context, req *multipoolerservicepb.RefreshAdmissionRequest) (*multipoolerservicepb.RefreshAdmissionResponse, error)
 }

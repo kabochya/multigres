@@ -37,3 +37,43 @@ func (s *poolerService) GetRoutingState(ctx context.Context, req *multipoolerpb.
 func (s *poolerService) RefreshAdmission(ctx context.Context, req *multipoolerpb.RefreshAdmissionRequest) (*multipoolerpb.RefreshAdmissionResponse, error) {
 	return serveRouting(ctx, s, req, poolerserver.RoutingProvider.RefreshAdmission)
 }
+
+// StartFence starts the fence of a scope. Only the default primary serves it. A start that some
+// member did not complete carries the per-member results, which serveControl passes through.
+func (s *poolerService) StartFence(ctx context.Context, req *multipoolerpb.StartFenceRequest) (*multipoolerpb.StartFenceResponse, error) {
+	return serveRouting(ctx, s, req, poolerserver.RoutingProvider.StartFence)
+}
+
+// CommitFence completes the fence of a scope when every member is clean. Only the default primary
+// serves it. A commit that some member did not allow carries the per-member results, which
+// serveControl passes through.
+func (s *poolerService) CommitFence(ctx context.Context, req *multipoolerpb.CommitFenceRequest) (*multipoolerpb.CommitFenceResponse, error) {
+	return serveRouting(ctx, s, req, poolerserver.RoutingProvider.CommitFence)
+}
+
+// UnfenceScope unfences a scope. Only the default primary serves it.
+func (s *poolerService) UnfenceScope(ctx context.Context, req *multipoolerpb.UnfenceScopeRequest) (*multipoolerpb.UnfenceScopeResponse, error) {
+	return serveRouting(ctx, s, req, poolerserver.RoutingProvider.UnfenceScope)
+}
+
+// SwitchRouting moves application traffic between two fenced tablegroups. Only the default primary
+// serves it.
+func (s *poolerService) SwitchRouting(ctx context.Context, req *multipoolerpb.SwitchRoutingRequest) (*multipoolerpb.SwitchRoutingResponse, error) {
+	return serveRouting(ctx, s, req, poolerserver.RoutingProvider.SwitchRouting)
+}
+
+// RevertRouting puts application traffic back on the home tablegroup. Only the default primary
+// serves it.
+func (s *poolerService) RevertRouting(ctx context.Context, req *multipoolerpb.RevertRoutingRequest) (*multipoolerpb.RevertRoutingResponse, error) {
+	return serveRouting(ctx, s, req, poolerserver.RoutingProvider.RevertRouting)
+}
+
+// FoldRouting completes a switched operation. Only the default primary serves it.
+func (s *poolerService) FoldRouting(ctx context.Context, req *multipoolerpb.FoldRoutingRequest) (*multipoolerpb.FoldRoutingResponse, error) {
+	return serveRouting(ctx, s, req, poolerserver.RoutingProvider.FoldRouting)
+}
+
+// CleanupOperation deletes the fences of an operation. Only the default primary serves it.
+func (s *poolerService) CleanupOperation(ctx context.Context, req *multipoolerpb.CleanupOperationRequest) (*multipoolerpb.CleanupOperationResponse, error) {
+	return serveRouting(ctx, s, req, poolerserver.RoutingProvider.CleanupOperation)
+}

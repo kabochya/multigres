@@ -454,3 +454,142 @@ func readRoutingState(ctx context.Context, store routingReader, req *multipooler
 	}
 	return resp, nil
 }
+
+func (pm *MultipoolerManager) newAdmissionCoordinator() (*admissionCoordinator, error) {
+	transport, err := pm.config.DefaultPrimaryDialOption()
+	if err != nil {
+		return nil, mterrors.Wrap(err, "default primary transport")
+	}
+	store, err := pm.routingStore()
+	if err != nil {
+		return nil, err
+	}
+	database := pm.record.ShardKey().GetDatabase()
+	members := topologyMembership{ts: pm.config.TopoClient}
+	return &admissionCoordinator{
+		store:     store,
+		members:   members,
+		refresher: grpcRefresher{transport: transport},
+		logger:    pm.logger,
+		isLeader:  func() error { return pm.requireDefaultPrimary(database) },
+		requiredNodes: func(ctx context.Context, db, tg string) (int, bool, error) {
+			return pm.requiredNodes(ctx, members, db, tg)
+		},
+	}, nil
+}
+
+// requiredNodes returns how many nodes the durability policy of the tablegroup needs to
+// acknowledge a write, and whether the tablegroup is managed. The default tablegroup's
+// is the committed rule of this pooler, its leader. Another tablegroup's cohort is not
+// local, and the policy the database was bootstrapped with stands in for it.
+//
+// Known limit: a managed tablegroup other than the default one is not asked for its
+// current rule.
+func (pm *MultipoolerManager) requiredNodes(ctx context.Context, members membership, db, tg string) (int, bool, error) {
+	if tg == pm.record.ShardKey().GetTableGroup() {
+		var policy *clustermetadatapb.DurabilityPolicy
+		if pm.consensusMgr != nil {
+			policy = pm.consensusMgr.CachedConsensusStatus().GetCurrentPosition().GetPosition().GetDecision().GetDurabilityPolicy()
+		}
+		return int(policy.GetRequiredCount()), true, nil
+	}
+	list, err := members.Snapshot(ctx, db, tg)
+	if err != nil {
+		return 0, false, err
+	}
+	managed := false
+	for _, p := range list {
+		if !p.unmanaged() {
+			managed = true
+		}
+	}
+	if !managed {
+		return 0, false, nil
+	}
+	policy, err := pm.loadDurabilityPolicy(ctx)
+	if err != nil {
+		return 0, true, err
+	}
+	return int(policy.GetRequiredCount()), true, nil
+}
+
+// StartFence starts the fence of a scope. Only the default primary serves it. The default
+// tablegroup can be fenced too, as the destination of a migration: its poolers then refuse
+// application work, and the default primary, which is in the fan-out like any other member, keeps
+// serving this control plane, since admission applies to application queries only.
+func (pm *MultipoolerManager) StartFence(ctx context.Context, req *multipoolerservicepb.StartFenceRequest) (*multipoolerservicepb.StartFenceResponse, error) {
+	c, err := pm.coordinatorFor(ctx, req.GetDatabase())
+	if err != nil {
+		return nil, err
+	}
+	return c.StartFence(ctx, req)
+}
+
+// CommitFence completes the fence of a scope that was started. Only the default primary serves
+// it.
+func (pm *MultipoolerManager) CommitFence(ctx context.Context, req *multipoolerservicepb.CommitFenceRequest) (*multipoolerservicepb.CommitFenceResponse, error) {
+	c, err := pm.coordinatorFor(ctx, req.GetDatabase())
+	if err != nil {
+		return nil, err
+	}
+	return c.CommitFence(ctx, req)
+}
+
+// UnfenceScope unfences a scope. Only the default primary serves it.
+func (pm *MultipoolerManager) UnfenceScope(ctx context.Context, req *multipoolerservicepb.UnfenceScopeRequest) (*multipoolerservicepb.UnfenceScopeResponse, error) {
+	c, err := pm.coordinatorFor(ctx, req.GetDatabase())
+	if err != nil {
+		return nil, err
+	}
+	return c.UnfenceScope(ctx, req)
+}
+
+// SwitchRouting moves application traffic between two fenced tablegroups. Only the default
+// primary serves it.
+func (pm *MultipoolerManager) SwitchRouting(ctx context.Context, req *multipoolerservicepb.SwitchRoutingRequest) (*multipoolerservicepb.SwitchRoutingResponse, error) {
+	c, err := pm.coordinatorFor(ctx, req.GetDatabase())
+	if err != nil {
+		return nil, err
+	}
+	return c.SwitchRouting(ctx, req)
+}
+
+// RevertRouting puts application traffic back on the home tablegroup. Only the default primary
+// serves it.
+func (pm *MultipoolerManager) RevertRouting(ctx context.Context, req *multipoolerservicepb.RevertRoutingRequest) (*multipoolerservicepb.RevertRoutingResponse, error) {
+	c, err := pm.coordinatorFor(ctx, req.GetDatabase())
+	if err != nil {
+		return nil, err
+	}
+	return c.RevertRouting(ctx, req)
+}
+
+// FoldRouting completes a switched operation. Only the default primary serves it.
+func (pm *MultipoolerManager) FoldRouting(ctx context.Context, req *multipoolerservicepb.FoldRoutingRequest) (*multipoolerservicepb.FoldRoutingResponse, error) {
+	c, err := pm.coordinatorFor(ctx, req.GetDatabase())
+	if err != nil {
+		return nil, err
+	}
+	return c.FoldRouting(ctx, req)
+}
+
+// CleanupOperation deletes the fences of an operation. Only the default primary serves it.
+func (pm *MultipoolerManager) CleanupOperation(ctx context.Context, req *multipoolerservicepb.CleanupOperationRequest) (*multipoolerservicepb.CleanupOperationResponse, error) {
+	c, err := pm.coordinatorFor(ctx, req.GetDatabase())
+	if err != nil {
+		return nil, err
+	}
+	return c.CleanupOperation(ctx, req)
+}
+
+// coordinatorFor returns the admission coordinator, after checking that this pooler is
+// the default primary of the database.
+func (pm *MultipoolerManager) coordinatorFor(ctx context.Context, database string) (*admissionCoordinator, error) {
+	if err := pm.requireDefaultPrimary(database); err != nil {
+		return nil, err
+	}
+	if pm.config == nil || pm.config.TopoClient == nil {
+		return nil, mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, "pooler discovery unavailable")
+	}
+	return pm.newAdmissionCoordinator()
+}

@@ -54,6 +54,9 @@ type fenceRow struct {
 	updatedAt   time.Time
 }
 
+// closed reports whether the scope refuses application work. A scope with no fence is open.
+func (r *fenceRow) closed() bool { return r != nil && r.state != stateUnfenced }
+
 func (r *fenceRow) proto() *multipoolerservicepb.AdmissionFence {
 	return &multipoolerservicepb.AdmissionFence{
 		OperationId: r.operationID,
@@ -87,6 +90,15 @@ func (r ruleRow) proto() *multipoolerservicepb.RoutingRuleState {
 	}
 }
 
+// The states of an operation, as they are persisted.
+const (
+	operationPrepare  = "PREPARE"
+	operationSwitched = "SWITCHED"
+	operationReverted = "REVERTED"
+	operationFolded   = "FOLDED"
+	operationCleaned  = "CLEANED"
+)
+
 // operationRow is a persisted operation: where it is, and the routing_version its last switch,
 // revert or fold produced.
 type operationRow struct {
@@ -105,6 +117,47 @@ type routingSnapshot struct {
 	rules      []ruleRow
 	fences     []fenceRow
 	operations []operationRow
+}
+
+// operationOf returns the operation, nil when nothing has been recorded of it.
+func (s *routingSnapshot) operationOf(operationID string) *operationRow {
+	for i := range s.operations {
+		if s.operations[i].operationID == operationID {
+			return &s.operations[i]
+		}
+	}
+	return nil
+}
+
+// effective resolves where the traffic goes: the home tablegroup, or, when a rule applies to
+// it, the rule's destination, applied once.
+func (s *routingSnapshot) effective() string {
+	for _, r := range s.rules {
+		if r.from == s.home {
+			return r.to
+		}
+	}
+	return s.home
+}
+
+// fenceOf returns the fence of the tablegroup scope, nil when it has none.
+func (s *routingSnapshot) fenceOf(tablegroup string) *fenceRow {
+	for i := range s.fences {
+		if s.fences[i].tablegroup == tablegroup {
+			return &s.fences[i]
+		}
+	}
+	return nil
+}
+
+// ruleOf returns the rule of the operation, nil when it has none.
+func (s *routingSnapshot) ruleOf(operationID string) *ruleRow {
+	for i := range s.rules {
+		if s.rules[i].operationID == operationID {
+			return &s.rules[i]
+		}
+	}
+	return nil
 }
 
 // fenceWrite is a compare-and-set of the fence of a tablegroup scope.
