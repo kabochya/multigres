@@ -194,6 +194,20 @@ func TestAdmissionUnreadableOrMissingStateNeverOpens(t *testing.T) {
 	require.False(t, h.gate.ApplicationOpen())
 }
 
+func TestAdmissionBackendUnavailableNeverOpens(t *testing.T) {
+	h := newAdmissionHarness(t, true)
+	h.pm.healthStreamer.setBackendReady(false)
+	_, err := h.pm.enforceAdmission(t.Context(), nil)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	require.False(t, h.gate.ApplicationOpen(), "an identity-unvalidated backend must not be admitted")
+
+	h.pm.healthStreamer.setBackendReady(true)
+	require.NoError(t, h.pm.healthStreamer.OnStateChange(t.Context(), servingstate.State{ServingStatus: clustermetadatapb.PoolerServingStatus_DISABLED}))
+	_, err = h.pm.enforceAdmission(t.Context(), nil)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+	require.False(t, h.gate.ApplicationOpen())
+}
+
 func TestRefreshFenceThenUnfence(t *testing.T) {
 	h := newAdmissionHarness(t, true)
 	closed := func() bool { return h.pm.healthStreamer.getState().AdmissionClosed }
@@ -432,6 +446,26 @@ func TestManagedPoolerReadsAdmissionOnlyAfterItIsRegistered(t *testing.T) {
 	require.Eventually(t, h.gate.ApplicationOpen, 5*time.Second, 20*time.Millisecond)
 }
 
+// TestAdmissionLoopRedecidesAfterTheGateWasClosedBehindIt: a decision recorded for
+// an earlier generation is not a decision, whatever happened to cause the close.
+func TestAdmissionLoopRedecidesAfterTheGateWasClosedBehindIt(t *testing.T) {
+	h := newAdmissionHarness(t, true)
+	_, err := h.pm.enforceAdmission(t.Context(), nil)
+	require.NoError(t, err)
+	require.True(t, h.gate.ApplicationOpen())
+
+	// A close that did not go through the lifecycle sink leaves the recorded
+	// decision pointing at a generation that no longer exists.
+	h.gate.CloseApplication()
+	require.False(t, h.gate.ApplicationOpen())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go h.pm.runAdmission(ctx)
+	h.pm.signalAdmission()
+	require.Eventually(t, h.gate.ApplicationOpen, 5*time.Second, 20*time.Millisecond)
+}
+
 // TestOpeningAndAConcurrentLifecycleChangeNeverLeaveAStaleDecisionOpen: whatever
 // the interleaving, an open gate always has a decision recorded for its current
 // generation, so the loop can tell it needs another read when it is closed.
@@ -585,6 +619,35 @@ func TestStopTopoRegistrationWithWorkStillRunningFailsClosed(t *testing.T) {
 	require.False(t, h.gate.ApplicationOpen())
 }
 
+// TestReplicaWithADownBackendAcknowledgesAnUnfence: opening is the safe direction, so one
+// replica whose postgres is down does not hold up the unfence of its cohort. It records the
+// decision and opens; nothing is admitted while it is not serving, and when its backend
+// comes back its serving status changes, which closes the gate and reads the row again. A
+// pooler that must be able to serve, an unmanaged one, still refuses.
+func TestReplicaWithADownBackendAcknowledgesAnUnfence(t *testing.T) {
+	h := newAdmissionHarness(t, false)
+	h.pm.record.registered.Store(true)
+	h.setRow(true, 1, "")
+	_, err := h.pm.enforceAdmission(t.Context(), nil)
+	require.NoError(t, err)
+	require.False(t, h.gate.ApplicationOpen())
+
+	// Its postgres goes down, and the cohort is unfenced meanwhile.
+	require.NoError(t, h.pm.healthStreamer.OnStateChange(t.Context(), servingstate.State{ServingStatus: clustermetadatapb.PoolerServingStatus_DISABLED}))
+	h.setRow(false, 2, "")
+	resp, err := h.refresh(false, 2)
+	require.NoError(t, err, "a dead replica must not hold up an unfence")
+	require.Equal(t, stateUnfenced, resp.State)
+	require.True(t, h.gate.ApplicationOpen(), "it opens: the serving status refuses what it cannot serve")
+
+	// An unmanaged pooler has no such latitude.
+	u := newAdmissionHarness(t, true)
+	u.setRow(false, 2, "src")
+	require.NoError(t, u.pm.healthStreamer.OnStateChange(t.Context(), servingstate.State{ServingStatus: clustermetadatapb.PoolerServingStatus_DISABLED}))
+	_, err = u.refresh(false, 2)
+	requireCode(t, mtrpcpb.Code_FAILED_PRECONDITION, err)
+}
+
 // TestALifecycleCloseIsReportedAsClosed: a failover closes the gate of a pooler until it has
 // read the admission state again. Gateways are told so, with the one closed signal, so that
 // they keep it unselected and the requests they buffered for the failover held.
@@ -663,6 +726,28 @@ func TestAReplicaPromotedWhileAFenceCommitsStaysClosed(t *testing.T) {
 	require.False(t, h.gate.ApplicationOpen())
 }
 
+// TestAPoolerThatCouldNotReadKeepsTryingUntilItCan: a pooler that has not decided retries
+// every interval, so a default primary that was not there at start is picked up as soon as
+// it is.
+func TestAPoolerThatCouldNotReadKeepsTryingUntilItCan(t *testing.T) {
+	old := admissionRetryInterval
+	admissionRetryInterval = 20 * time.Millisecond
+	t.Cleanup(func() { admissionRetryInterval = old })
+
+	h := newAdmissionHarness(t, true)
+	unavailable := errors.New("no default primary yet")
+	h.err.Store(&unavailable)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go h.pm.runAdmission(ctx)
+	h.pm.signalAdmission()
+	require.Eventually(t, func() bool { return h.reads.Load() > 3 }, 5*time.Second, 10*time.Millisecond, "it keeps trying")
+	require.False(t, h.gate.ApplicationOpen())
+
+	h.err.Store(nil)
+	require.Eventually(t, h.gate.ApplicationOpen, 10*time.Second, 10*time.Millisecond)
+}
+
 // TestADecidedPoolerDoesNotReadAgainUntilSomethingChanges: there is no periodic read. An
 // open pooler does not notice a fence it was not told of, and a closed one does not notice
 // an unfence: the migrator repeats the unfence until none of the members is unreached. A
@@ -698,6 +783,22 @@ func TestADecidedPoolerDoesNotReadAgainUntilSomethingChanges(t *testing.T) {
 	h.setRow(false, 2, "") // an unfence this pooler is not told of
 	testpoll.Never(t, func() bool { return h.reads.Load() != reads || h.gate.ApplicationOpen() }, 400*time.Millisecond, 10*time.Millisecond,
 		"a closed pooler that has decided does not read again")
+}
+
+// TestAnUnmanagedPoolersDecisionStandsAcrossAReconnect: its source is writable whatever
+// role it reports, so a serving change of the backend neither closes its gate nor makes it
+// read its row again.
+func TestAnUnmanagedPoolersDecisionStandsAcrossAReconnect(t *testing.T) {
+	h := newAdmissionHarness(t, true)
+	_, err := h.pm.enforceAdmission(t.Context(), nil)
+	require.NoError(t, err)
+	require.True(t, h.gate.ApplicationOpen())
+	reads := h.reads.Load()
+
+	require.NoError(t, admissionLifecycle{h.pm}.OnStateChange(t.Context(), servingstate.State{ServingStatus: clustermetadatapb.PoolerServingStatus_DISABLED}))
+	require.NoError(t, admissionLifecycle{h.pm}.OnStateChange(t.Context(), servingstate.State{ServingStatus: clustermetadatapb.PoolerServingStatus_SERVING}))
+	require.True(t, h.gate.ApplicationOpen())
+	require.Equal(t, reads, h.reads.Load())
 }
 
 // fakeRoutingReader is a store of routing state for tests.

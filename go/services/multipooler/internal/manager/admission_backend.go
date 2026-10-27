@@ -66,7 +66,11 @@ func (b managedAdmissionBackend) ReadyToAdmit() error {
 
 func (managedAdmissionBackend) ConnectionName() string { return "" }
 
-// newAdmissionBackend returns the backend of the pooler: that of a managed cohort.
-func newAdmissionBackend(pm *MultipoolerManager, _ bool) admissionBackend {
+// newAdmissionBackend returns the backend of the pooler: the managed one, or the one of an
+// external endpoint when the pooler is unmanaged.
+func newAdmissionBackend(pm *MultipoolerManager, unmanaged bool) admissionBackend {
+	if unmanaged {
+		return unmanagedAdmissionBackend{pm: pm}
+	}
 	return managedAdmissionBackend{pm: pm}
 }
