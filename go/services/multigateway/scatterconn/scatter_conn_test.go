@@ -44,6 +44,7 @@ import (
 type mockGateway struct {
 	// StreamExecute tracking
 	streamExecuteCalled         bool
+	streamExecuteTarget         *querypb.Target
 	streamExecuteSQL            string
 	streamExecuteOpts           *querypb.ExecuteOptions
 	streamExecuteReservationOps *querypb.ReservationOptions
@@ -107,7 +108,8 @@ type mockGateway struct {
 }
 
 // StreamExecute implements queryservice.QueryService.
-func (m *mockGateway) StreamExecute(_ context.Context, _ *querypb.Target, sql string, opts *querypb.ExecuteOptions, reservationOpts *querypb.ReservationOptions, callback func(context.Context, *sqltypes.Result) error) (*querypb.ReservedState, error) {
+func (m *mockGateway) StreamExecute(_ context.Context, target *querypb.Target, sql string, opts *querypb.ExecuteOptions, reservationOpts *querypb.ReservationOptions, callback func(context.Context, *sqltypes.Result) error) (*querypb.ReservedState, error) {
+	m.streamExecuteTarget = target
 	m.streamExecuteCalled = true
 	m.streamExecuteSQL = sql
 	m.streamExecuteOpts = opts
@@ -1715,4 +1717,100 @@ func TestReleaseAll_MidTransactionStampsPreBeginMap(t *testing.T) {
 	require.NotNil(t, mock2.releaseReservedConnectionSettings)
 	assert.Equal(t, "9MB", mock2.releaseReservedConnectionSettings["work_mem"],
 		"without a transaction the current map is the correct label")
+}
+
+// TestScatterConn_AnAutonomousStatementIgnoresTheSessionsTransaction: what a transaction
+// sends after it has committed (its NOTIFYs) runs on a pooled connection, as control
+// traffic, whatever the session's transaction status is, and reserves nothing.
+func TestScatterConn_AnAutonomousStatementIgnoresTheSessionsTransaction(t *testing.T) {
+	gw := &mockGateway{callbackResult: &sqltypes.Result{CommandTag: "SELECT"}}
+	sc := NewScatterConn(gw, slog.Default())
+	state := handler.NewMultigatewayConnectionState()
+	conn := newTestConn()
+	conn.SetTxnStatus(protocol.TxnStatusInBlock)
+
+	require.NoError(t, sc.StreamExecute(context.Background(), conn, "default", "", "SELECT pg_notify('a', 'b')", nil, state,
+		engine.PlanExecInfo{Control: true, Autonomous: true}, false, func(context.Context, *sqltypes.Result) error { return nil }))
+	require.True(t, gw.streamExecuteCalled)
+	require.True(t, gw.streamExecuteTarget.GetControl())
+	require.Nil(t, gw.streamExecuteReservationOps, "no reservation, in a transaction or not")
+	require.Empty(t, state.ShardStates)
+}
+
+// TestScatterConn_AnAutonomousPortalIgnoresTheSessionsState: the delivery of a committed
+// transaction's NOTIFYs is a parameterized statement, and it too neither uses the session's
+// reservation on the default tablegroup nor starts one.
+func TestScatterConn_AnAutonomousPortalIgnoresTheSessionsState(t *testing.T) {
+	gw := &mockGateway{callbackResult: &sqltypes.Result{CommandTag: "SELECT"}}
+	sc := NewScatterConn(gw, slog.Default())
+	state := handler.NewMultigatewayConnectionState()
+	conn := newTestConn()
+	conn.SetTxnStatus(protocol.TxnStatusInBlock)
+	state.SetReservedConnection(protoutil.NewTarget("", "default", "", querypb.Mode_MODE_WRITABLE), &querypb.ReservedState{
+		ReservedConnectionId: 8, PoolerId: &clustermetadatapb.ID{Cell: "cell1", Name: "pooler1"}, ReservationReasons: protoutil.ReasonTempTable,
+	})
+
+	require.NoError(t, sc.PortalStreamExecute(context.Background(), "default", "", conn, state, testPortalInfo(), 0, false,
+		engine.PlanExecInfo{Control: true, Autonomous: true}, false, func(context.Context, *sqltypes.Result) error { return nil }))
+	require.True(t, gw.portalCalled)
+	require.False(t, gw.queryServiceByIDCalled, "the session's pooler is not looked up")
+	require.Zero(t, gw.portalOpts.GetReservedConnectionId(), "the session's reservation is not used")
+	require.Nil(t, gw.portalReservationOps, "and none is started")
+}
+
+// TestScatterConn_ControlStatementsAreMarkedControl: a statement the planner marks
+// as control reaches the gateway on a control target; others do not.
+func TestScatterConn_ControlStatementsAreMarkedControl(t *testing.T) {
+	gw := &mockGateway{callbackResult: &sqltypes.Result{CommandTag: "NOTIFY"}}
+	sc := NewScatterConn(gw, slog.Default())
+	state := handler.NewMultigatewayConnectionState()
+	conn := newTestConn()
+	noop := func(context.Context, *sqltypes.Result) error { return nil }
+
+	require.NoError(t, sc.StreamExecute(context.Background(), conn, "default", "", "NOTIFY c", nil, state, engine.PlanExecInfo{Control: true}, false, noop))
+	require.True(t, gw.streamExecuteTarget.GetControl())
+	require.NoError(t, sc.StreamExecute(context.Background(), conn, "default", "", "SELECT 1", nil, state, engine.PlanExecInfo{}, false, noop))
+	require.False(t, gw.streamExecuteTarget.GetControl())
+}
+
+// TestScatterConn_AControlStatementOnAnUnsafeConnectionMakesNoReservation: a control NOTIFY
+// outside a transaction goes to the default tablegroup while the application is elsewhere. On an
+// unsafe connection, which reserves a backend for every statement, it must not take a reservation
+// of the session's there: the next application statement would then find session state on
+// another tablegroup and end the session.
+func TestScatterConn_AControlStatementOnAnUnsafeConnectionMakesNoReservation(t *testing.T) {
+	gw := &mockGateway{callbackResult: &sqltypes.Result{CommandTag: "NOTIFY"}}
+	sc := NewScatterConn(gw, slog.Default())
+	state := handler.NewMultigatewayConnectionState()
+	conn := server.NewTestConn(&bytes.Buffer{}, server.WithTestUnsafeConnection()).Conn
+	cb := func(context.Context, *sqltypes.Result) error { return nil }
+
+	require.NoError(t, sc.StreamExecute(context.Background(), conn, "default", "", "NOTIFY c, 'p'", nil, state, engine.PlanExecInfo{Control: true}, false, cb))
+	require.True(t, gw.streamExecuteCalled)
+	require.Nil(t, gw.streamExecuteReservationOps, "no reservation is asked for")
+
+	// The application's next statement, on its own tablegroup, is not refused.
+	gw.streamExecuteCalled = false
+	require.NoError(t, sc.StreamExecute(context.Background(), conn, "app", "", "SELECT 1", nil, state, engine.PlanExecInfo{}, false, cb))
+	require.True(t, gw.streamExecuteCalled)
+}
+
+// TestScatterConn_AControlNotifyInATransactionStillJoinsIt: when the application is on the default
+// tablegroup, a NOTIFY inside a transaction is an ordinary statement of the transaction even
+// though it is marked control: it must reserve the transaction's backend, or it would run
+// outside the transaction and be delivered at once instead of at the commit.
+func TestScatterConn_AControlNotifyInATransactionStillJoinsIt(t *testing.T) {
+	gw := &mockGateway{
+		callbackResult:           &sqltypes.Result{CommandTag: "NOTIFY"},
+		streamExecuteReturnState: &querypb.ReservedState{ReservedConnectionId: 3, PoolerId: &clustermetadatapb.ID{Cell: "cell1", Name: "pooler1"}, ReservationReasons: protoutil.ReasonTransaction},
+	}
+	sc := NewScatterConn(gw, slog.Default())
+	state := handler.NewMultigatewayConnectionState()
+	conn := newTestConn()
+	conn.SetTxnStatus(protocol.TxnStatusInBlock)
+	state.PendingBeginQuery = "BEGIN"
+	require.NoError(t, sc.StreamExecute(context.Background(), conn, "default", "", "NOTIFY c, 'p'", nil, state, engine.PlanExecInfo{Control: true}, false,
+		func(context.Context, *sqltypes.Result) error { return nil }))
+	require.NotNil(t, gw.streamExecuteReservationOps)
+	require.True(t, protoutil.HasTransactionReason(gw.streamExecuteReservationOps.GetReasons()), "it joins the transaction")
 }

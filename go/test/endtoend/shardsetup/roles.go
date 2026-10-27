@@ -17,6 +17,7 @@ package shardsetup
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -33,4 +34,22 @@ func (s *ShardSetup) ConnectPrimaryAdmin(t *testing.T) *pgx.Conn {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close(context.Background()) })
 	return conn
+}
+
+// RoleVerifier returns the stored SCRAM verifier of a role.
+func RoleVerifier(ctx context.Context, conn *pgx.Conn, role string) (string, error) {
+	var verifier string
+	err := conn.QueryRow(ctx, "SELECT rolpassword FROM pg_authid WHERE rolname = $1", role).Scan(&verifier)
+	return verifier, err
+}
+
+// CreateRoleWithVerifier creates a login role whose stored verifier is exactly
+// verifier. PostgreSQL stores a password that is already a SCRAM verifier
+// verbatim, which is what lets one role authenticate against two databases with
+// the same client proof: SCRAM key passthrough needs byte-identical verifiers on
+// both sides.
+func CreateRoleWithVerifier(ctx context.Context, conn *pgx.Conn, role, verifier string) error {
+	literal := "'" + strings.ReplaceAll(verifier, "'", "''") + "'"
+	_, err := conn.Exec(ctx, "CREATE ROLE "+pgx.Identifier{role}.Sanitize()+" LOGIN PASSWORD "+literal)
+	return err
 }

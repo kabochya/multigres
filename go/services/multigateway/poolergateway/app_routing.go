@@ -27,7 +27,10 @@ import (
 // All application SQL of a database goes to one tablegroup, which may be the default
 // tablegroup itself. A routing source (nothing is configured by default: application SQL then
 // goes to the default tablegroup, as it always did) tells the gateway through Update; on a
-// change the gateway swaps the tablegroup its planner targets and rewrites retries.
+// change the gateway swaps the tablegroup its planner targets and rewrites retries. Control
+// traffic (NOTIFY, LISTEN) is not application traffic: its targets are marked, stay on the
+// default tablegroup and are never rewritten. Which tablegroup a request is for says nothing
+// about which kind it is.
 
 // PendingAppTableGroup is the tablegroup application SQL is planned against
 // before the first successful read of the routing. Requests for it fail
@@ -100,12 +103,12 @@ func (r *AppRouting) Update(tablegroup string, version int64) bool {
 }
 
 // Rewrite points an application target at the current application tablegroup.
-// A target of another database is left alone. Before the
+// A control target and a target of another database are left alone. Before the
 // routing is known the request fails closed with a bufferable error. Targets are built per
 // call, so it swaps the target's key in place; the old key, which a buffered request may
 // hold, is not edited.
 func (r *AppRouting) Rewrite(target *query.Target) error {
-	if r == nil || target == nil || target.GetShardKey() == nil {
+	if r == nil || target == nil || target.GetShardKey() == nil || target.GetControl() {
 		return nil
 	}
 	sk := target.GetShardKey()
