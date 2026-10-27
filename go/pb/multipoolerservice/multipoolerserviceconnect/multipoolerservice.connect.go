@@ -94,6 +94,33 @@ const (
 	// MultipoolerServiceGetTablegroupBindingProcedure is the fully-qualified name of the
 	// MultipoolerService's GetTablegroupBinding RPC.
 	MultipoolerServiceGetTablegroupBindingProcedure = "/multipoolerservice.MultipoolerService/GetTablegroupBinding"
+	// MultipoolerServiceGetRoutingStateProcedure is the fully-qualified name of the
+	// MultipoolerService's GetRoutingState RPC.
+	MultipoolerServiceGetRoutingStateProcedure = "/multipoolerservice.MultipoolerService/GetRoutingState"
+	// MultipoolerServiceStartFenceProcedure is the fully-qualified name of the MultipoolerService's
+	// StartFence RPC.
+	MultipoolerServiceStartFenceProcedure = "/multipoolerservice.MultipoolerService/StartFence"
+	// MultipoolerServiceCommitFenceProcedure is the fully-qualified name of the MultipoolerService's
+	// CommitFence RPC.
+	MultipoolerServiceCommitFenceProcedure = "/multipoolerservice.MultipoolerService/CommitFence"
+	// MultipoolerServiceUnfenceScopeProcedure is the fully-qualified name of the MultipoolerService's
+	// UnfenceScope RPC.
+	MultipoolerServiceUnfenceScopeProcedure = "/multipoolerservice.MultipoolerService/UnfenceScope"
+	// MultipoolerServiceSwitchRoutingProcedure is the fully-qualified name of the MultipoolerService's
+	// SwitchRouting RPC.
+	MultipoolerServiceSwitchRoutingProcedure = "/multipoolerservice.MultipoolerService/SwitchRouting"
+	// MultipoolerServiceRevertRoutingProcedure is the fully-qualified name of the MultipoolerService's
+	// RevertRouting RPC.
+	MultipoolerServiceRevertRoutingProcedure = "/multipoolerservice.MultipoolerService/RevertRouting"
+	// MultipoolerServiceFoldRoutingProcedure is the fully-qualified name of the MultipoolerService's
+	// FoldRouting RPC.
+	MultipoolerServiceFoldRoutingProcedure = "/multipoolerservice.MultipoolerService/FoldRouting"
+	// MultipoolerServiceCleanupOperationProcedure is the fully-qualified name of the
+	// MultipoolerService's CleanupOperation RPC.
+	MultipoolerServiceCleanupOperationProcedure = "/multipoolerservice.MultipoolerService/CleanupOperation"
+	// MultipoolerServiceRefreshAdmissionProcedure is the fully-qualified name of the
+	// MultipoolerService's RefreshAdmission RPC.
+	MultipoolerServiceRefreshAdmissionProcedure = "/multipoolerservice.MultipoolerService/RefreshAdmission"
 )
 
 // MultipoolerServiceClient is a client for the multipoolerservice.MultipoolerService service.
@@ -179,6 +206,144 @@ type MultipoolerServiceClient interface {
 	// no credential: the connection itself is read with GetBackingConnection. A tablegroup
 	// that does not exist is NOT_FOUND.
 	GetTablegroupBinding(context.Context, *connect.Request[multipoolerservice.GetTablegroupBindingRequest]) (*connect.Response[multipoolerservice.GetTablegroupBindingResponse], error)
+	// GetRoutingState returns the authoritative routing and admission metadata, read in one
+	// snapshot: the home tablegroup, the routing rules, the admission fences, and the
+	// routing_version they are at. Use it to decide which versions to pass, and to reconcile
+	// an interrupted operation, including after the migration controller itself changes
+	// leader. A scope with no fence is unfenced. When since_version is the current
+	// routing_version the response has not_modified set and omits the home and the rules;
+	// the fences are always returned, because they change without a change of the
+	// routing_version.
+	GetRoutingState(context.Context, *connect.Request[multipoolerservice.GetRoutingStateRequest]) (*connect.Response[multipoolerservice.GetRoutingStateResponse], error)
+	// StartFence begins a fence of one scope for an operation: it writes FENCING and tells
+	// every member, in every cell, to close its gate, and returns at once. It waits for
+	// nothing. Each member closes, and answers in the same call what it holds (see FenceBusy):
+	// clean, busy (with what holds it) or unreachable (with the error). Whether anything is
+	// held, and what to do about it, is the controller's; CommitFence is the call that
+	// completes the fence.
+	//
+	// The version names a fence attempt. expected_version is the version the caller read (the
+	// one GetRoutingState or an earlier response returned, which the caller passes back as it
+	// got it; zero for a scope with no fence). If the scope is unfenced at that version (no
+	// fence, or UNFENCED) this begins a new attempt: the coordinator writes FENCING at the next
+	// version, taking the scope over if another operation left it UNFENCED, and asks the
+	// members. If it is FENCING for this operation at the version, or at the version after, this
+	// is a repeat of the attempt, whose reply may have been lost: nothing is written and the
+	// members are asked again, which closes any that missed it. If it is FENCED for this
+	// operation at the version, or the one after, the attempt is complete and the call succeeds
+	// without asking anyone. Any other state is rejected with FAILED_PRECONDITION, including a
+	// scope that is FENCING or FENCED for another operation. The response returns the fence,
+	// FENCING (or FENCED) and its version, which is what the controller passes to CommitFence
+	// and to unfence. If every member answered the call succeeds, whatever each holds; if one
+	// did not answer it fails with ABORTED, the fence stays FENCING, the per-member results are
+	// the StartFenceResponse in the error's details, and the controller calls it again.
+	//
+	// A tablegroup whose durability policy, or the control home's, needs fewer than two nodes
+	// is refused with FAILED_PRECONDITION before anything is written, and so is one with more
+	// than one unmanaged pooler. A pooler that is not the default primary answers UNAVAILABLE.
+	StartFence(context.Context, *connect.Request[multipoolerservice.StartFenceRequest]) (*connect.Response[multipoolerservice.StartFenceResponse], error)
+	// CommitFence completes the current fence attempt of a scope, when nothing is left. It
+	// asks every member of the tablegroup, from a fresh listing of its poolers, to apply the
+	// fence and say what it holds, which closes a member that is not closed yet and waits for
+	// nothing. If every member says it holds nothing (its gate is closed, no application
+	// request is running and no application reservation is held), it writes FENCED at the same
+	// version, the version does not change, and returns the fence. A fenced scope is one in
+	// which nothing is running and, the gates being closed, nothing can start.
+	//
+	// Otherwise it writes nothing and fails with ABORTED, the fence staying FENCING, and the
+	// per-member results are the CommitFenceResponse in the error's details: a member is busy
+	// (a request is running or an application reservation is held, with what holds it: see
+	// FenceBusy) or unreachable (with the error). Every member is asked even when one fails.
+	// There is no way to skip or exclude a member: a pooler is left out only by being gone from
+	// topology, and one that does not answer fails the call, as does one that joined, which is
+	// asked like the rest. A commit that runs while another commit of the same fence completes
+	// it may answer ABORTED; asked again it succeeds, since the fence is FENCED at the version.
+	// CommitFence is idempotent: if the fence is FENCED for the operation at the version the
+	// call succeeds, asking nobody, and any other state or version is rejected with
+	// FAILED_PRECONDITION. The version is the one the fence had when the attempt began, as the
+	// start returned it, and the commit does not change it.
+	//
+	// Waiting is the controller's. It calls CommitFence again, as often and for as long as its
+	// policy says, and decides what to do about what it finds. Busy reports facts. Ordinary
+	// work finishes by itself: requests on an existing reservation still pass a closed gate, so
+	// a transaction can commit, and an idle reservation is reaped by the reserved pool's
+	// inactivity timeout. A controller that does not want to wait may end a session on the
+	// source (see HeldReservation); Multigres itself never ends a client's state. Control
+	// traffic, the LISTEN connection and logical replication streams are not application work:
+	// moving the consumers of a replication stream is the migration's job, and the pooler ends
+	// the streams it has at shutdown. Assumption: replication connections through the pooler
+	// are used only for replication. SQL sent over a replication connection is not covered by
+	// fencing, and callers must not use replication connections for writes.
+	//
+	// The fence covers what goes through the pooler and nothing else. That every application
+	// writer goes through it, and that the writers that cannot (scheduled jobs, background
+	// workers on the source) have been stopped, is a precondition of a cutover that the
+	// migration workflow meets: direct connections to the database are neither fenced nor looked
+	// for.
+	//
+	// The fence returns no WAL position. After it succeeds nothing more is written through the
+	// fenced poolers, and the controller reads the position it needs from the source itself.
+	CommitFence(context.Context, *connect.Request[multipoolerservice.CommitFenceRequest]) (*connect.Response[multipoolerservice.CommitFenceResponse], error)
+	// UnfenceScope writes UNFENCED, at the next version, over the fence of a scope and asks the
+	// members to reopen on a best-effort basis, reporting the ones it could not reach: there is
+	// no acknowledgement barrier, since a pooler opens once it reads UNFENCED. The fence stays,
+	// UNFENCED, until CleanupOperation deletes it. The controller repeats the call with the same
+	// version until none is unreached; that is safe, because a repeat is a success that writes
+	// nothing.
+	//
+	// expected_version is the version v of the fence being undone. If the fence is FENCING or
+	// FENCED for the operation at v the coordinator writes UNFENCED at v+1. If it is already
+	// UNFENCED for the operation at v+1 the unfence was done: the call succeeds, writes nothing,
+	// and asks the members again. Any other state is rejected.
+	UnfenceScope(context.Context, *connect.Request[multipoolerservice.UnfenceScopeRequest]) (*connect.Response[multipoolerservice.UnfenceScopeResponse], error)
+	// SwitchRouting adds the routing rule of an operation, so that the traffic of the rule's
+	// from_tablegroup goes to its to_tablegroup, in one transaction that also checks the
+	// preconditions: the routing is at expected_routing_version; from_tablegroup is the home
+	// tablegroup and is not the default tablegroup; no other rule exists; and the fences of
+	// from_tablegroup and to_tablegroup are both FENCED for this operation (a completed fence:
+	// FENCING is refused with FAILED_PRECONDITION), read with a row lock so that neither can
+	// change under the write. It bumps routing_version. Success means the routing metadata
+	// committed; it does not unfence anything. A retry after the switch, which finds the
+	// operation SWITCHED at the version after expected_routing_version, with the rule it asked
+	// for, succeeds and writes nothing. An operation that was cleaned up, or folded, is refused. That the operation exists as a whole, and that the rules cover the keyspace
+	// exactly, are not checked yet.
+	SwitchRouting(context.Context, *connect.Request[multipoolerservice.SwitchRoutingRequest]) (*connect.Response[multipoolerservice.SwitchRoutingResponse], error)
+	// RevertRouting deletes the routing rule of an operation, so that the traffic goes back to
+	// the home tablegroup, under the same preconditions as SwitchRouting: the routing is at
+	// expected_routing_version, and the fences of the rule's two tablegroups are FENCED for this
+	// operation. It bumps routing_version. A retry after the revert, which finds the
+	// operation REVERTED at the version after expected_routing_version, succeeds and writes
+	// nothing; an operation in any other state, whatever the version, is refused.
+	RevertRouting(context.Context, *connect.Request[multipoolerservice.RevertRoutingRequest]) (*connect.Response[multipoolerservice.RevertRoutingResponse], error)
+	// FoldRouting completes a switched operation: in one transaction it makes the rule's
+	// to_tablegroup the home tablegroup, deletes the rule and bumps routing_version, so that the
+	// routing is empty again. It needs no fence, because the effective tablegroup is the same
+	// before and after, and it refuses to run if it would not be: the call resolves the traffic
+	// before and after and fails with FAILED_PRECONDITION if they differ. A retry after the
+	// fold, which finds the operation FOLDED at the version after expected_routing_version,
+	// succeeds and writes nothing; an operation in any other state, whatever the version, is
+	// refused.
+	//
+	// PROTOTYPE STUB: this moves a home pointer. The routing-rule implementation that replaces
+	// it moves the catalog membership of the tablegroup instead.
+	FoldRouting(context.Context, *connect.Request[multipoolerservice.FoldRoutingRequest]) (*connect.Response[multipoolerservice.FoldRoutingResponse], error)
+	// CleanupOperation deletes the fences of an operation and ends the operation for good: a later
+	// call that names it, a StartFence replayed after the cleanup for one, is refused with
+	// FAILED_PRECONDITION. It is refused with FAILED_PRECONDITION while the operation has a
+	// routing rule, or has a fence that is FENCING, and it is ABORTED, deleting nothing, if a
+	// routing change committed since the state was read. A fence that is FENCED is deleted too, but
+	// deleting a fence tells no pooler anything: a pooler that decided to refuse application work
+	// keeps that decision until it restarts or its role changes, and nothing refreshes it. So
+	// cleaning up UNFENCED fences changes nothing for serving, and cleaning up a FENCED one requires
+	// that the poolers of its scope are gone: the controller keeps the source fenced after the fold
+	// until its unmanaged poolers are decommissioned, and cleans up after. Cleaning up an operation
+	// that has nothing left succeeds.
+	CleanupOperation(context.Context, *connect.Request[multipoolerservice.CleanupOperationRequest]) (*connect.Response[multipoolerservice.CleanupOperationResponse], error)
+	// RefreshAdmission is called by the coordinator on each member of a tablegroup, for a
+	// start and for a commit alike. The pooler re-reads its tablegroup's fence from the control
+	// home, applies it (closes its gate, or opens it) and reports what it holds, without
+	// waiting for anything. Migration controllers do not call this.
+	RefreshAdmission(context.Context, *connect.Request[multipoolerservice.RefreshAdmissionRequest]) (*connect.Response[multipoolerservice.RefreshAdmissionResponse], error)
 }
 
 // NewMultipoolerServiceClient constructs a client for the multipoolerservice.MultipoolerService
@@ -282,6 +447,60 @@ func NewMultipoolerServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			connect.WithSchema(multipoolerServiceMethods.ByName("GetTablegroupBinding")),
 			connect.WithClientOptions(opts...),
 		),
+		getRoutingState: connect.NewClient[multipoolerservice.GetRoutingStateRequest, multipoolerservice.GetRoutingStateResponse](
+			httpClient,
+			baseURL+MultipoolerServiceGetRoutingStateProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("GetRoutingState")),
+			connect.WithClientOptions(opts...),
+		),
+		startFence: connect.NewClient[multipoolerservice.StartFenceRequest, multipoolerservice.StartFenceResponse](
+			httpClient,
+			baseURL+MultipoolerServiceStartFenceProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("StartFence")),
+			connect.WithClientOptions(opts...),
+		),
+		commitFence: connect.NewClient[multipoolerservice.CommitFenceRequest, multipoolerservice.CommitFenceResponse](
+			httpClient,
+			baseURL+MultipoolerServiceCommitFenceProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("CommitFence")),
+			connect.WithClientOptions(opts...),
+		),
+		unfenceScope: connect.NewClient[multipoolerservice.UnfenceScopeRequest, multipoolerservice.UnfenceScopeResponse](
+			httpClient,
+			baseURL+MultipoolerServiceUnfenceScopeProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("UnfenceScope")),
+			connect.WithClientOptions(opts...),
+		),
+		switchRouting: connect.NewClient[multipoolerservice.SwitchRoutingRequest, multipoolerservice.SwitchRoutingResponse](
+			httpClient,
+			baseURL+MultipoolerServiceSwitchRoutingProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("SwitchRouting")),
+			connect.WithClientOptions(opts...),
+		),
+		revertRouting: connect.NewClient[multipoolerservice.RevertRoutingRequest, multipoolerservice.RevertRoutingResponse](
+			httpClient,
+			baseURL+MultipoolerServiceRevertRoutingProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("RevertRouting")),
+			connect.WithClientOptions(opts...),
+		),
+		foldRouting: connect.NewClient[multipoolerservice.FoldRoutingRequest, multipoolerservice.FoldRoutingResponse](
+			httpClient,
+			baseURL+MultipoolerServiceFoldRoutingProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("FoldRouting")),
+			connect.WithClientOptions(opts...),
+		),
+		cleanupOperation: connect.NewClient[multipoolerservice.CleanupOperationRequest, multipoolerservice.CleanupOperationResponse](
+			httpClient,
+			baseURL+MultipoolerServiceCleanupOperationProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("CleanupOperation")),
+			connect.WithClientOptions(opts...),
+		),
+		refreshAdmission: connect.NewClient[multipoolerservice.RefreshAdmissionRequest, multipoolerservice.RefreshAdmissionResponse](
+			httpClient,
+			baseURL+MultipoolerServiceRefreshAdmissionProcedure,
+			connect.WithSchema(multipoolerServiceMethods.ByName("RefreshAdmission")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -302,6 +521,15 @@ type multipoolerServiceClient struct {
 	notificationStream        *connect.Client[multipoolerservice.NotificationStreamRequest, multipoolerservice.NotificationStreamResponse]
 	getBackingConnection      *connect.Client[multipoolerservice.GetBackingConnectionRequest, multipoolerservice.GetBackingConnectionResponse]
 	getTablegroupBinding      *connect.Client[multipoolerservice.GetTablegroupBindingRequest, multipoolerservice.GetTablegroupBindingResponse]
+	getRoutingState           *connect.Client[multipoolerservice.GetRoutingStateRequest, multipoolerservice.GetRoutingStateResponse]
+	startFence                *connect.Client[multipoolerservice.StartFenceRequest, multipoolerservice.StartFenceResponse]
+	commitFence               *connect.Client[multipoolerservice.CommitFenceRequest, multipoolerservice.CommitFenceResponse]
+	unfenceScope              *connect.Client[multipoolerservice.UnfenceScopeRequest, multipoolerservice.UnfenceScopeResponse]
+	switchRouting             *connect.Client[multipoolerservice.SwitchRoutingRequest, multipoolerservice.SwitchRoutingResponse]
+	revertRouting             *connect.Client[multipoolerservice.RevertRoutingRequest, multipoolerservice.RevertRoutingResponse]
+	foldRouting               *connect.Client[multipoolerservice.FoldRoutingRequest, multipoolerservice.FoldRoutingResponse]
+	cleanupOperation          *connect.Client[multipoolerservice.CleanupOperationRequest, multipoolerservice.CleanupOperationResponse]
+	refreshAdmission          *connect.Client[multipoolerservice.RefreshAdmissionRequest, multipoolerservice.RefreshAdmissionResponse]
 }
 
 // ExecuteQuery calls multipoolerservice.MultipoolerService.ExecuteQuery.
@@ -377,6 +605,51 @@ func (c *multipoolerServiceClient) GetBackingConnection(ctx context.Context, req
 // GetTablegroupBinding calls multipoolerservice.MultipoolerService.GetTablegroupBinding.
 func (c *multipoolerServiceClient) GetTablegroupBinding(ctx context.Context, req *connect.Request[multipoolerservice.GetTablegroupBindingRequest]) (*connect.Response[multipoolerservice.GetTablegroupBindingResponse], error) {
 	return c.getTablegroupBinding.CallUnary(ctx, req)
+}
+
+// GetRoutingState calls multipoolerservice.MultipoolerService.GetRoutingState.
+func (c *multipoolerServiceClient) GetRoutingState(ctx context.Context, req *connect.Request[multipoolerservice.GetRoutingStateRequest]) (*connect.Response[multipoolerservice.GetRoutingStateResponse], error) {
+	return c.getRoutingState.CallUnary(ctx, req)
+}
+
+// StartFence calls multipoolerservice.MultipoolerService.StartFence.
+func (c *multipoolerServiceClient) StartFence(ctx context.Context, req *connect.Request[multipoolerservice.StartFenceRequest]) (*connect.Response[multipoolerservice.StartFenceResponse], error) {
+	return c.startFence.CallUnary(ctx, req)
+}
+
+// CommitFence calls multipoolerservice.MultipoolerService.CommitFence.
+func (c *multipoolerServiceClient) CommitFence(ctx context.Context, req *connect.Request[multipoolerservice.CommitFenceRequest]) (*connect.Response[multipoolerservice.CommitFenceResponse], error) {
+	return c.commitFence.CallUnary(ctx, req)
+}
+
+// UnfenceScope calls multipoolerservice.MultipoolerService.UnfenceScope.
+func (c *multipoolerServiceClient) UnfenceScope(ctx context.Context, req *connect.Request[multipoolerservice.UnfenceScopeRequest]) (*connect.Response[multipoolerservice.UnfenceScopeResponse], error) {
+	return c.unfenceScope.CallUnary(ctx, req)
+}
+
+// SwitchRouting calls multipoolerservice.MultipoolerService.SwitchRouting.
+func (c *multipoolerServiceClient) SwitchRouting(ctx context.Context, req *connect.Request[multipoolerservice.SwitchRoutingRequest]) (*connect.Response[multipoolerservice.SwitchRoutingResponse], error) {
+	return c.switchRouting.CallUnary(ctx, req)
+}
+
+// RevertRouting calls multipoolerservice.MultipoolerService.RevertRouting.
+func (c *multipoolerServiceClient) RevertRouting(ctx context.Context, req *connect.Request[multipoolerservice.RevertRoutingRequest]) (*connect.Response[multipoolerservice.RevertRoutingResponse], error) {
+	return c.revertRouting.CallUnary(ctx, req)
+}
+
+// FoldRouting calls multipoolerservice.MultipoolerService.FoldRouting.
+func (c *multipoolerServiceClient) FoldRouting(ctx context.Context, req *connect.Request[multipoolerservice.FoldRoutingRequest]) (*connect.Response[multipoolerservice.FoldRoutingResponse], error) {
+	return c.foldRouting.CallUnary(ctx, req)
+}
+
+// CleanupOperation calls multipoolerservice.MultipoolerService.CleanupOperation.
+func (c *multipoolerServiceClient) CleanupOperation(ctx context.Context, req *connect.Request[multipoolerservice.CleanupOperationRequest]) (*connect.Response[multipoolerservice.CleanupOperationResponse], error) {
+	return c.cleanupOperation.CallUnary(ctx, req)
+}
+
+// RefreshAdmission calls multipoolerservice.MultipoolerService.RefreshAdmission.
+func (c *multipoolerServiceClient) RefreshAdmission(ctx context.Context, req *connect.Request[multipoolerservice.RefreshAdmissionRequest]) (*connect.Response[multipoolerservice.RefreshAdmissionResponse], error) {
+	return c.refreshAdmission.CallUnary(ctx, req)
 }
 
 // MultipoolerServiceHandler is an implementation of the multipoolerservice.MultipoolerService
@@ -463,6 +736,144 @@ type MultipoolerServiceHandler interface {
 	// no credential: the connection itself is read with GetBackingConnection. A tablegroup
 	// that does not exist is NOT_FOUND.
 	GetTablegroupBinding(context.Context, *connect.Request[multipoolerservice.GetTablegroupBindingRequest]) (*connect.Response[multipoolerservice.GetTablegroupBindingResponse], error)
+	// GetRoutingState returns the authoritative routing and admission metadata, read in one
+	// snapshot: the home tablegroup, the routing rules, the admission fences, and the
+	// routing_version they are at. Use it to decide which versions to pass, and to reconcile
+	// an interrupted operation, including after the migration controller itself changes
+	// leader. A scope with no fence is unfenced. When since_version is the current
+	// routing_version the response has not_modified set and omits the home and the rules;
+	// the fences are always returned, because they change without a change of the
+	// routing_version.
+	GetRoutingState(context.Context, *connect.Request[multipoolerservice.GetRoutingStateRequest]) (*connect.Response[multipoolerservice.GetRoutingStateResponse], error)
+	// StartFence begins a fence of one scope for an operation: it writes FENCING and tells
+	// every member, in every cell, to close its gate, and returns at once. It waits for
+	// nothing. Each member closes, and answers in the same call what it holds (see FenceBusy):
+	// clean, busy (with what holds it) or unreachable (with the error). Whether anything is
+	// held, and what to do about it, is the controller's; CommitFence is the call that
+	// completes the fence.
+	//
+	// The version names a fence attempt. expected_version is the version the caller read (the
+	// one GetRoutingState or an earlier response returned, which the caller passes back as it
+	// got it; zero for a scope with no fence). If the scope is unfenced at that version (no
+	// fence, or UNFENCED) this begins a new attempt: the coordinator writes FENCING at the next
+	// version, taking the scope over if another operation left it UNFENCED, and asks the
+	// members. If it is FENCING for this operation at the version, or at the version after, this
+	// is a repeat of the attempt, whose reply may have been lost: nothing is written and the
+	// members are asked again, which closes any that missed it. If it is FENCED for this
+	// operation at the version, or the one after, the attempt is complete and the call succeeds
+	// without asking anyone. Any other state is rejected with FAILED_PRECONDITION, including a
+	// scope that is FENCING or FENCED for another operation. The response returns the fence,
+	// FENCING (or FENCED) and its version, which is what the controller passes to CommitFence
+	// and to unfence. If every member answered the call succeeds, whatever each holds; if one
+	// did not answer it fails with ABORTED, the fence stays FENCING, the per-member results are
+	// the StartFenceResponse in the error's details, and the controller calls it again.
+	//
+	// A tablegroup whose durability policy, or the control home's, needs fewer than two nodes
+	// is refused with FAILED_PRECONDITION before anything is written, and so is one with more
+	// than one unmanaged pooler. A pooler that is not the default primary answers UNAVAILABLE.
+	StartFence(context.Context, *connect.Request[multipoolerservice.StartFenceRequest]) (*connect.Response[multipoolerservice.StartFenceResponse], error)
+	// CommitFence completes the current fence attempt of a scope, when nothing is left. It
+	// asks every member of the tablegroup, from a fresh listing of its poolers, to apply the
+	// fence and say what it holds, which closes a member that is not closed yet and waits for
+	// nothing. If every member says it holds nothing (its gate is closed, no application
+	// request is running and no application reservation is held), it writes FENCED at the same
+	// version, the version does not change, and returns the fence. A fenced scope is one in
+	// which nothing is running and, the gates being closed, nothing can start.
+	//
+	// Otherwise it writes nothing and fails with ABORTED, the fence staying FENCING, and the
+	// per-member results are the CommitFenceResponse in the error's details: a member is busy
+	// (a request is running or an application reservation is held, with what holds it: see
+	// FenceBusy) or unreachable (with the error). Every member is asked even when one fails.
+	// There is no way to skip or exclude a member: a pooler is left out only by being gone from
+	// topology, and one that does not answer fails the call, as does one that joined, which is
+	// asked like the rest. A commit that runs while another commit of the same fence completes
+	// it may answer ABORTED; asked again it succeeds, since the fence is FENCED at the version.
+	// CommitFence is idempotent: if the fence is FENCED for the operation at the version the
+	// call succeeds, asking nobody, and any other state or version is rejected with
+	// FAILED_PRECONDITION. The version is the one the fence had when the attempt began, as the
+	// start returned it, and the commit does not change it.
+	//
+	// Waiting is the controller's. It calls CommitFence again, as often and for as long as its
+	// policy says, and decides what to do about what it finds. Busy reports facts. Ordinary
+	// work finishes by itself: requests on an existing reservation still pass a closed gate, so
+	// a transaction can commit, and an idle reservation is reaped by the reserved pool's
+	// inactivity timeout. A controller that does not want to wait may end a session on the
+	// source (see HeldReservation); Multigres itself never ends a client's state. Control
+	// traffic, the LISTEN connection and logical replication streams are not application work:
+	// moving the consumers of a replication stream is the migration's job, and the pooler ends
+	// the streams it has at shutdown. Assumption: replication connections through the pooler
+	// are used only for replication. SQL sent over a replication connection is not covered by
+	// fencing, and callers must not use replication connections for writes.
+	//
+	// The fence covers what goes through the pooler and nothing else. That every application
+	// writer goes through it, and that the writers that cannot (scheduled jobs, background
+	// workers on the source) have been stopped, is a precondition of a cutover that the
+	// migration workflow meets: direct connections to the database are neither fenced nor looked
+	// for.
+	//
+	// The fence returns no WAL position. After it succeeds nothing more is written through the
+	// fenced poolers, and the controller reads the position it needs from the source itself.
+	CommitFence(context.Context, *connect.Request[multipoolerservice.CommitFenceRequest]) (*connect.Response[multipoolerservice.CommitFenceResponse], error)
+	// UnfenceScope writes UNFENCED, at the next version, over the fence of a scope and asks the
+	// members to reopen on a best-effort basis, reporting the ones it could not reach: there is
+	// no acknowledgement barrier, since a pooler opens once it reads UNFENCED. The fence stays,
+	// UNFENCED, until CleanupOperation deletes it. The controller repeats the call with the same
+	// version until none is unreached; that is safe, because a repeat is a success that writes
+	// nothing.
+	//
+	// expected_version is the version v of the fence being undone. If the fence is FENCING or
+	// FENCED for the operation at v the coordinator writes UNFENCED at v+1. If it is already
+	// UNFENCED for the operation at v+1 the unfence was done: the call succeeds, writes nothing,
+	// and asks the members again. Any other state is rejected.
+	UnfenceScope(context.Context, *connect.Request[multipoolerservice.UnfenceScopeRequest]) (*connect.Response[multipoolerservice.UnfenceScopeResponse], error)
+	// SwitchRouting adds the routing rule of an operation, so that the traffic of the rule's
+	// from_tablegroup goes to its to_tablegroup, in one transaction that also checks the
+	// preconditions: the routing is at expected_routing_version; from_tablegroup is the home
+	// tablegroup and is not the default tablegroup; no other rule exists; and the fences of
+	// from_tablegroup and to_tablegroup are both FENCED for this operation (a completed fence:
+	// FENCING is refused with FAILED_PRECONDITION), read with a row lock so that neither can
+	// change under the write. It bumps routing_version. Success means the routing metadata
+	// committed; it does not unfence anything. A retry after the switch, which finds the
+	// operation SWITCHED at the version after expected_routing_version, with the rule it asked
+	// for, succeeds and writes nothing. An operation that was cleaned up, or folded, is refused. That the operation exists as a whole, and that the rules cover the keyspace
+	// exactly, are not checked yet.
+	SwitchRouting(context.Context, *connect.Request[multipoolerservice.SwitchRoutingRequest]) (*connect.Response[multipoolerservice.SwitchRoutingResponse], error)
+	// RevertRouting deletes the routing rule of an operation, so that the traffic goes back to
+	// the home tablegroup, under the same preconditions as SwitchRouting: the routing is at
+	// expected_routing_version, and the fences of the rule's two tablegroups are FENCED for this
+	// operation. It bumps routing_version. A retry after the revert, which finds the
+	// operation REVERTED at the version after expected_routing_version, succeeds and writes
+	// nothing; an operation in any other state, whatever the version, is refused.
+	RevertRouting(context.Context, *connect.Request[multipoolerservice.RevertRoutingRequest]) (*connect.Response[multipoolerservice.RevertRoutingResponse], error)
+	// FoldRouting completes a switched operation: in one transaction it makes the rule's
+	// to_tablegroup the home tablegroup, deletes the rule and bumps routing_version, so that the
+	// routing is empty again. It needs no fence, because the effective tablegroup is the same
+	// before and after, and it refuses to run if it would not be: the call resolves the traffic
+	// before and after and fails with FAILED_PRECONDITION if they differ. A retry after the
+	// fold, which finds the operation FOLDED at the version after expected_routing_version,
+	// succeeds and writes nothing; an operation in any other state, whatever the version, is
+	// refused.
+	//
+	// PROTOTYPE STUB: this moves a home pointer. The routing-rule implementation that replaces
+	// it moves the catalog membership of the tablegroup instead.
+	FoldRouting(context.Context, *connect.Request[multipoolerservice.FoldRoutingRequest]) (*connect.Response[multipoolerservice.FoldRoutingResponse], error)
+	// CleanupOperation deletes the fences of an operation and ends the operation for good: a later
+	// call that names it, a StartFence replayed after the cleanup for one, is refused with
+	// FAILED_PRECONDITION. It is refused with FAILED_PRECONDITION while the operation has a
+	// routing rule, or has a fence that is FENCING, and it is ABORTED, deleting nothing, if a
+	// routing change committed since the state was read. A fence that is FENCED is deleted too, but
+	// deleting a fence tells no pooler anything: a pooler that decided to refuse application work
+	// keeps that decision until it restarts or its role changes, and nothing refreshes it. So
+	// cleaning up UNFENCED fences changes nothing for serving, and cleaning up a FENCED one requires
+	// that the poolers of its scope are gone: the controller keeps the source fenced after the fold
+	// until its unmanaged poolers are decommissioned, and cleans up after. Cleaning up an operation
+	// that has nothing left succeeds.
+	CleanupOperation(context.Context, *connect.Request[multipoolerservice.CleanupOperationRequest]) (*connect.Response[multipoolerservice.CleanupOperationResponse], error)
+	// RefreshAdmission is called by the coordinator on each member of a tablegroup, for a
+	// start and for a commit alike. The pooler re-reads its tablegroup's fence from the control
+	// home, applies it (closes its gate, or opens it) and reports what it holds, without
+	// waiting for anything. Migration controllers do not call this.
+	RefreshAdmission(context.Context, *connect.Request[multipoolerservice.RefreshAdmissionRequest]) (*connect.Response[multipoolerservice.RefreshAdmissionResponse], error)
 }
 
 // NewMultipoolerServiceHandler builds an HTTP handler from the service implementation. It returns
@@ -562,6 +973,60 @@ func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect
 		connect.WithSchema(multipoolerServiceMethods.ByName("GetTablegroupBinding")),
 		connect.WithHandlerOptions(opts...),
 	)
+	multipoolerServiceGetRoutingStateHandler := connect.NewUnaryHandler(
+		MultipoolerServiceGetRoutingStateProcedure,
+		svc.GetRoutingState,
+		connect.WithSchema(multipoolerServiceMethods.ByName("GetRoutingState")),
+		connect.WithHandlerOptions(opts...),
+	)
+	multipoolerServiceStartFenceHandler := connect.NewUnaryHandler(
+		MultipoolerServiceStartFenceProcedure,
+		svc.StartFence,
+		connect.WithSchema(multipoolerServiceMethods.ByName("StartFence")),
+		connect.WithHandlerOptions(opts...),
+	)
+	multipoolerServiceCommitFenceHandler := connect.NewUnaryHandler(
+		MultipoolerServiceCommitFenceProcedure,
+		svc.CommitFence,
+		connect.WithSchema(multipoolerServiceMethods.ByName("CommitFence")),
+		connect.WithHandlerOptions(opts...),
+	)
+	multipoolerServiceUnfenceScopeHandler := connect.NewUnaryHandler(
+		MultipoolerServiceUnfenceScopeProcedure,
+		svc.UnfenceScope,
+		connect.WithSchema(multipoolerServiceMethods.ByName("UnfenceScope")),
+		connect.WithHandlerOptions(opts...),
+	)
+	multipoolerServiceSwitchRoutingHandler := connect.NewUnaryHandler(
+		MultipoolerServiceSwitchRoutingProcedure,
+		svc.SwitchRouting,
+		connect.WithSchema(multipoolerServiceMethods.ByName("SwitchRouting")),
+		connect.WithHandlerOptions(opts...),
+	)
+	multipoolerServiceRevertRoutingHandler := connect.NewUnaryHandler(
+		MultipoolerServiceRevertRoutingProcedure,
+		svc.RevertRouting,
+		connect.WithSchema(multipoolerServiceMethods.ByName("RevertRouting")),
+		connect.WithHandlerOptions(opts...),
+	)
+	multipoolerServiceFoldRoutingHandler := connect.NewUnaryHandler(
+		MultipoolerServiceFoldRoutingProcedure,
+		svc.FoldRouting,
+		connect.WithSchema(multipoolerServiceMethods.ByName("FoldRouting")),
+		connect.WithHandlerOptions(opts...),
+	)
+	multipoolerServiceCleanupOperationHandler := connect.NewUnaryHandler(
+		MultipoolerServiceCleanupOperationProcedure,
+		svc.CleanupOperation,
+		connect.WithSchema(multipoolerServiceMethods.ByName("CleanupOperation")),
+		connect.WithHandlerOptions(opts...),
+	)
+	multipoolerServiceRefreshAdmissionHandler := connect.NewUnaryHandler(
+		MultipoolerServiceRefreshAdmissionProcedure,
+		svc.RefreshAdmission,
+		connect.WithSchema(multipoolerServiceMethods.ByName("RefreshAdmission")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/multipoolerservice.MultipoolerService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case MultipoolerServiceExecuteQueryProcedure:
@@ -594,6 +1059,24 @@ func NewMultipoolerServiceHandler(svc MultipoolerServiceHandler, opts ...connect
 			multipoolerServiceGetBackingConnectionHandler.ServeHTTP(w, r)
 		case MultipoolerServiceGetTablegroupBindingProcedure:
 			multipoolerServiceGetTablegroupBindingHandler.ServeHTTP(w, r)
+		case MultipoolerServiceGetRoutingStateProcedure:
+			multipoolerServiceGetRoutingStateHandler.ServeHTTP(w, r)
+		case MultipoolerServiceStartFenceProcedure:
+			multipoolerServiceStartFenceHandler.ServeHTTP(w, r)
+		case MultipoolerServiceCommitFenceProcedure:
+			multipoolerServiceCommitFenceHandler.ServeHTTP(w, r)
+		case MultipoolerServiceUnfenceScopeProcedure:
+			multipoolerServiceUnfenceScopeHandler.ServeHTTP(w, r)
+		case MultipoolerServiceSwitchRoutingProcedure:
+			multipoolerServiceSwitchRoutingHandler.ServeHTTP(w, r)
+		case MultipoolerServiceRevertRoutingProcedure:
+			multipoolerServiceRevertRoutingHandler.ServeHTTP(w, r)
+		case MultipoolerServiceFoldRoutingProcedure:
+			multipoolerServiceFoldRoutingHandler.ServeHTTP(w, r)
+		case MultipoolerServiceCleanupOperationProcedure:
+			multipoolerServiceCleanupOperationHandler.ServeHTTP(w, r)
+		case MultipoolerServiceRefreshAdmissionProcedure:
+			multipoolerServiceRefreshAdmissionHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -661,4 +1144,40 @@ func (UnimplementedMultipoolerServiceHandler) GetBackingConnection(context.Conte
 
 func (UnimplementedMultipoolerServiceHandler) GetTablegroupBinding(context.Context, *connect.Request[multipoolerservice.GetTablegroupBindingRequest]) (*connect.Response[multipoolerservice.GetTablegroupBindingResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.GetTablegroupBinding is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) GetRoutingState(context.Context, *connect.Request[multipoolerservice.GetRoutingStateRequest]) (*connect.Response[multipoolerservice.GetRoutingStateResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.GetRoutingState is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) StartFence(context.Context, *connect.Request[multipoolerservice.StartFenceRequest]) (*connect.Response[multipoolerservice.StartFenceResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.StartFence is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) CommitFence(context.Context, *connect.Request[multipoolerservice.CommitFenceRequest]) (*connect.Response[multipoolerservice.CommitFenceResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.CommitFence is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) UnfenceScope(context.Context, *connect.Request[multipoolerservice.UnfenceScopeRequest]) (*connect.Response[multipoolerservice.UnfenceScopeResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.UnfenceScope is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) SwitchRouting(context.Context, *connect.Request[multipoolerservice.SwitchRoutingRequest]) (*connect.Response[multipoolerservice.SwitchRoutingResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.SwitchRouting is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) RevertRouting(context.Context, *connect.Request[multipoolerservice.RevertRoutingRequest]) (*connect.Response[multipoolerservice.RevertRoutingResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.RevertRouting is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) FoldRouting(context.Context, *connect.Request[multipoolerservice.FoldRoutingRequest]) (*connect.Response[multipoolerservice.FoldRoutingResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.FoldRouting is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) CleanupOperation(context.Context, *connect.Request[multipoolerservice.CleanupOperationRequest]) (*connect.Response[multipoolerservice.CleanupOperationResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.CleanupOperation is not implemented"))
+}
+
+func (UnimplementedMultipoolerServiceHandler) RefreshAdmission(context.Context, *connect.Request[multipoolerservice.RefreshAdmissionRequest]) (*connect.Response[multipoolerservice.RefreshAdmissionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("multipoolerservice.MultipoolerService.RefreshAdmission is not implemented"))
 }

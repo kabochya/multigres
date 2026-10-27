@@ -908,10 +908,12 @@ type Target struct {
 	// See Mode for the semantics of each value.
 	Mode Mode `protobuf:"varint,5,opt,name=mode,proto3,enum=query.Mode" json:"mode,omitempty"`
 	// control marks the request as cluster control traffic rather than application
-	// work (a NOTIFY): the gateway sends it to the default
-	// tablegroup, whichever tablegroup application statements are routed to, and never
-	// rewrites it to the application tablegroup. Poolers trust the gateway for this
-	// marking.
+	// work (a NOTIFY): the gateway sends it to the default tablegroup, whichever
+	// tablegroup application statements are routed to, and never rewrites it to the
+	// application tablegroup. A pooler's application admission gate does not apply to it,
+	// so it is served while the tablegroup is fenced. Only a request that reserves no
+	// connection is exempt; one that would start a reservation is still gated. Poolers
+	// trust the gateway for this marking.
 	Control       bool `protobuf:"varint,6,opt,name=control,proto3" json:"control,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

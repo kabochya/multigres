@@ -232,6 +232,42 @@ func (m *mockMultipoolerServiceClient) NotificationStream(ctx context.Context, o
 	return nil, nil
 }
 
+func (m *mockMultipoolerServiceClient) GetRoutingState(ctx context.Context, in *multipoolerservice.GetRoutingStateRequest, opts ...grpc.CallOption) (*multipoolerservice.GetRoutingStateResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) UnfenceScope(ctx context.Context, in *multipoolerservice.UnfenceScopeRequest, opts ...grpc.CallOption) (*multipoolerservice.UnfenceScopeResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) SwitchRouting(ctx context.Context, in *multipoolerservice.SwitchRoutingRequest, opts ...grpc.CallOption) (*multipoolerservice.SwitchRoutingResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) RevertRouting(ctx context.Context, in *multipoolerservice.RevertRoutingRequest, opts ...grpc.CallOption) (*multipoolerservice.RevertRoutingResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) FoldRouting(ctx context.Context, in *multipoolerservice.FoldRoutingRequest, opts ...grpc.CallOption) (*multipoolerservice.FoldRoutingResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) CleanupOperation(ctx context.Context, in *multipoolerservice.CleanupOperationRequest, opts ...grpc.CallOption) (*multipoolerservice.CleanupOperationResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) StartFence(ctx context.Context, in *multipoolerservice.StartFenceRequest, opts ...grpc.CallOption) (*multipoolerservice.StartFenceResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) CommitFence(ctx context.Context, in *multipoolerservice.CommitFenceRequest, opts ...grpc.CallOption) (*multipoolerservice.CommitFenceResponse, error) {
+	return nil, nil
+}
+
+func (m *mockMultipoolerServiceClient) RefreshAdmission(ctx context.Context, in *multipoolerservice.RefreshAdmissionRequest, opts ...grpc.CallOption) (*multipoolerservice.RefreshAdmissionResponse, error) {
+	return nil, nil
+}
+
 func (m *mockMultipoolerServiceClient) DiscardTempTables(ctx context.Context, in *multipoolerservice.DiscardTempTablesRequest, opts ...grpc.CallOption) (*multipoolerservice.DiscardTempTablesResponse, error) {
 	return nil, nil
 }

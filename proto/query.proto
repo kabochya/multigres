@@ -269,10 +269,12 @@ message Target {
   Mode mode = 5;
 
   // control marks the request as cluster control traffic rather than application
-  // work (a NOTIFY): the gateway sends it to the default
-  // tablegroup, whichever tablegroup application statements are routed to, and never
-  // rewrites it to the application tablegroup. Poolers trust the gateway for this
-  // marking.
+  // work (a NOTIFY): the gateway sends it to the default tablegroup, whichever
+  // tablegroup application statements are routed to, and never rewrites it to the
+  // application tablegroup. A pooler's application admission gate does not apply to it,
+  // so it is served while the tablegroup is fenced. Only a request that reserves no
+  // connection is exempt; one that would start a reservation is still gated. Poolers
+  // trust the gateway for this marking.
   bool control = 6;
 }
 
