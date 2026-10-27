@@ -272,7 +272,9 @@ func (l *Listener) run(ctx context.Context, requests chan request, stopped chan 
 	connect := func() {
 		releaseConn()
 		var err error
-		conn, err = l.poolManager.NewReservedConn(ctx, nil, l.poolManager.PgUser(), nil, nil)
+		// The LISTEN connection is infrastructure, not client work: a fence of the
+		// application must not wait for it or drop it.
+		conn, err = l.poolManager.NewReservedConn(ctx, nil, l.poolManager.PgUser(), nil, nil, reserved.WithoutDrainAccounting())
 		if err != nil {
 			l.logger.ErrorContext(ctx, "pubsub: failed to acquire reserved connection", "error", err)
 			conn = nil

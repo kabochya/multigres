@@ -91,12 +91,15 @@ type Pool struct {
 	cancel context.CancelFunc
 
 	// Metrics
-	reserveCount    atomic.Int64
-	releaseCount    atomic.Int64
-	killCount       atomic.Int64
-	timeoutCount    atomic.Int64
-	txCommitCount   atomic.Int64
-	txRollbackCount atomic.Int64
+	reserveCount atomic.Int64
+	releaseCount atomic.Int64
+	killCount    atomic.Int64
+	// afterNotInUseCheck, when set (tests), runs in DiscardIfGone between the check that a
+	// reservation is not in use and the look at its socket, with p.mu held.
+	afterNotInUseCheck func()
+	timeoutCount       atomic.Int64
+	txCommitCount      atomic.Int64
+	txRollbackCount    atomic.Int64
 
 	// txnMetrics publishes transaction outcomes (commit/rollback/abort) and
 	// durations as OTel metrics.
@@ -193,6 +196,7 @@ func (p *Pool) NewConn(ctx context.Context, settings *connstate.Settings, opts .
 
 	// Create reserved connection.
 	rc := newConn(pooled, connID, p, o.releaseCleanups)
+	rc.uncounted = o.uncounted
 	rc.SetInactivityTimeout(p.config.InactivityTimeout)
 
 	// Register in active map.
@@ -201,7 +205,7 @@ func (p *Pool) NewConn(ctx context.Context, settings *connstate.Settings, opts .
 	p.mu.Unlock()
 
 	p.reserveCount.Add(1)
-	if p.config.OnReserve != nil {
+	if p.config.OnReserve != nil && !rc.uncounted {
 		p.config.OnReserve()
 	}
 
@@ -410,7 +414,7 @@ func (p *Pool) release(rc *Conn, reason ReleaseReason, gatewaySessionSettings ma
 	// was tainted above.
 	rc.pooled.Recycle()
 
-	if p.config.OnRelease != nil {
+	if p.config.OnRelease != nil && !rc.uncounted {
 		p.config.OnRelease()
 	}
 
@@ -446,7 +450,7 @@ func (p *Pool) Close() {
 	// Cancel the pool's context to stop the background killer.
 	p.cancel()
 
-	// Collect all connections to taint.
+	// Collect all connections to release.
 	conns := make([]*Conn, 0, len(p.active))
 	for _, rc := range p.active {
 		conns = append(conns, rc)
@@ -454,10 +458,12 @@ func (p *Pool) Close() {
 	p.active = make(map[int64]*Conn)
 	p.mu.Unlock()
 
-	// Taint all connections since they may be in an inconsistent state.
+	// Release every connection with an error reason, which taints it since it may be in an
+	// inconsistent state, and closes it. That calls OnRelease for each, so a count of open
+	// reservations reaches zero when the pool closes with some open, and a Release that a
+	// handler may still make for the connection is a no-op.
 	for _, rc := range conns {
-		rc.pooled.Taint()
-		rc.pooled.Close()
+		rc.Release(ReleaseError, nil)
 	}
 
 	// Close the underlying regular pool.
@@ -587,6 +593,71 @@ func (p *Pool) ForEachActive(fn func(connID int64, rc *Conn) bool) {
 			return
 		}
 	}
+}
+
+// Hold marks a request as running on the reserved connection connID until the returned
+// function is called, without extending the connection's life. It does nothing, and
+// returns a function that does nothing, when there is no such connection.
+func (p *Pool) Hold(connID int64) func() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	rc, ok := p.active[connID]
+	if !ok {
+		return noopEnd
+	}
+	// The mark is made under the lock that DiscardIfGone holds while it looks at the
+	// connection: a connection that is not in use under p.mu has no request that is about to
+	// read from it, so looking at it can neither take the connection from a request nor wait for
+	// one.
+	rc.BeginUse()
+	return rc.EndUse
+}
+
+func noopEnd() {}
+
+// DiscardIfGone drops the reservation connID if the server has ended its connection: it closes
+// the connection and releases the reservation, and ends nothing on the server. A reservation that
+// a request is running on is not touched, the request finds out for itself. It reports whether it
+// dropped one. Whether a request is running is read under p.mu, which Hold takes to mark one, so a
+// connection that is not in use here is not being read by a request, and looking at it (which
+// takes the connection's read lock) cannot wait behind one.
+func (p *Pool) DiscardIfGone(connID int64) bool {
+	p.mu.Lock()
+	rc, ok := p.active[connID]
+	if ok && rc.inUse.Load() > 0 {
+		ok = false
+	}
+	if ok && p.afterNotInUseCheck != nil {
+		p.afterNotInUseCheck()
+	}
+	if ok && !rc.BackendGone() {
+		ok = false
+	}
+	if ok {
+		delete(p.active, connID)
+	}
+	p.mu.Unlock()
+	if !ok {
+		return false
+	}
+	rc.pooled.Taint()
+	rc.Release(ReleasePeerGone, nil)
+	return true
+}
+
+// HeldReservations describes the reservations that are client work (not the LISTEN
+// connection or a replication stream), at now. It ends nothing.
+func (p *Pool) HeldReservations(now time.Time) []Held {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	held := make([]Held, 0, len(p.active))
+	for _, rc := range p.active {
+		if rc.uncounted || rc.released.Load() {
+			continue
+		}
+		held = append(held, rc.Held(now))
+	}
+	return held
 }
 
 // KillAll kills all active reserved connections.

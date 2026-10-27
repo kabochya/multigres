@@ -15,7 +15,9 @@
 package manager
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -83,4 +85,22 @@ func TestMarkPreparingFailedLeavesAShutdownEntry(t *testing.T) {
 	require.Equal(t, clustermetadatapb.PoolerLifecycleStatus_LIFECYCLE_SHUTDOWN, info.GetLifecycleStatus().GetStatus())
 	require.Equal(t, clustermetadatapb.PoolerServingStatus_DISABLED, info.GetServingStatus())
 	require.Nil(t, info.GetRoutingState())
+}
+
+// TestRecordIsRegisteredOnceItsFirstRegistrationLands: managed admission waits on
+// this flag, so it must come from a real registration, not only be settable.
+func TestRecordIsRegisteredOnceItsFirstRegistrationLands(t *testing.T) {
+	ts, _ := memorytopo.NewServerAndFactory(t.Context(), "zone1")
+	defer ts.Close()
+	record, err := newPoolerRecord(newTestLogger(), ts, preparingRecord("managed-1", clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_MANAGED))
+	require.NoError(t, err)
+	require.False(t, record.IsRegistered())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	record.Register(ctx, func(string) {})
+	defer record.Unregister(context.WithoutCancel(ctx), nil)
+	require.Eventually(t, record.IsRegistered, 10*time.Second, 20*time.Millisecond)
+	_, err = ts.GetMultipooler(t.Context(), record.Id())
+	require.NoError(t, err, "registered means it is in topology")
 }

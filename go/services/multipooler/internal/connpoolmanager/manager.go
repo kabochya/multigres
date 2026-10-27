@@ -21,9 +21,11 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/multigres/multigres/go/common/mterrors"
 	"github.com/multigres/multigres/go/common/pgprotocol/client"
@@ -1079,6 +1081,15 @@ func (m *Manager) WaitForDrain(ctx context.Context) error {
 	}
 }
 
+// WaitForApplicationDrain blocks until no reserved connection that is client work is
+// left. It does not wait for the single-query borrows of the regular pool, which a
+// request's admission permit already covers, and which control traffic (NOTIFY,
+// credential lookups) keeps nonzero for as long as it runs: waiting for the instant
+// at which none is borrowed could miss it forever.
+func (m *Manager) WaitForApplicationDrain(ctx context.Context) error {
+	return m.WaitForReservedDrain(ctx)
+}
+
 // WaitForReservedDrain blocks until all RESERVED connections (transactions, temp
 // tables, portals, COPY, etc.) have been released or ctx is cancelled. Unlike
 // WaitForDrain it ignores transient single-query borrows, so the first stage of
@@ -1115,6 +1126,87 @@ func (m *Manager) CloseReservedConnections(ctx context.Context) int {
 		total += pool.CloseReservedConnections(ctx)
 	}
 	return total
+}
+
+// HoldReservedConn marks a request as running on the user's reserved connection connID
+// until the returned function is called, without extending the connection's life. It
+// does nothing when there is no such connection.
+func (m *Manager) HoldReservedConn(connID int64, user string) func() {
+	pools := m.userPoolsSnapshot.Load()
+	if pools == nil {
+		return func() {}
+	}
+	pool, ok := (*pools)[user]
+	if !ok {
+		return func() {}
+	}
+	return pool.HoldReservedConn(connID)
+}
+
+// ApplicationReservations returns how many reserved connections that are client work
+// are held now: the count the drain waits on. Infrastructure connections, such as the
+// LISTEN connection of the pubsub listener, are not counted.
+func (m *Manager) ApplicationReservations() int64 {
+	m.drainMu.Lock()
+	defer m.drainMu.Unlock()
+	return m.reservedCount
+}
+
+// HeldReservation is a held application reservation and the user whose pool holds it.
+type HeldReservation struct {
+	User string
+	reserved.Held
+}
+
+// ReleaseGone drops, from the held reservations, the ones whose connection the server has ended,
+// as a session that a controller terminated is: they hold nothing, so their connections are
+// closed and they are released, and the ones that remain are returned. It looks only at the
+// sockets: nothing is sent to the server and nothing is read from it. A reservation that a
+// request is running on is kept, the request finds out for itself.
+func (m *Manager) ReleaseGone(held []HeldReservation) []HeldReservation {
+	pools := m.userPoolsSnapshot.Load()
+	if pools == nil {
+		return held
+	}
+	live := make([]HeldReservation, 0, len(held))
+	for _, h := range held {
+		if pool, ok := (*pools)[h.User]; ok && !h.InUse && pool.DiscardReservedConnIfGone(h.ConnID) {
+			m.logger.Info("released a reservation whose backend was ended", "backend_pid", h.BackendPID, "user", h.User)
+			continue
+		}
+		live = append(live, h)
+	}
+	return live
+}
+
+// HeldReservations describes the application reservations held now, the longest held
+// first and at most limit of them, and how many more there are. It ends nothing.
+func (m *Manager) HeldReservations(limit int) ([]HeldReservation, int) {
+	now := time.Now()
+	var all []HeldReservation
+	if pools := m.userPoolsSnapshot.Load(); pools != nil {
+		for user, pool := range *pools {
+			for _, h := range pool.HeldReservations(now) {
+				all = append(all, HeldReservation{User: user, Held: h})
+			}
+		}
+	}
+	return capHeld(all, limit)
+}
+
+// capHeld orders held reservations by how long they have been held, the longest first,
+// and keeps at most limit of them, returning how many it left out.
+func capHeld(all []HeldReservation, limit int) ([]HeldReservation, int) {
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].HeldFor != all[j].HeldFor {
+			return all[i].HeldFor > all[j].HeldFor
+		}
+		return all[i].ConnID < all[j].ConnID
+	})
+	if limit >= 0 && len(all) > limit {
+		return all[:limit], len(all) - limit
+	}
+	return all, 0
 }
 
 // IsClosed reports whether the manager is terminally closed. It returns false
