@@ -45,9 +45,9 @@ type backingConnection struct {
 // Validate checks that the connection is complete enough to dial.
 func (c *backingConnection) Validate() error {
 	// One server: the pooler's admin connection must reach the same server as its
-	// application connections, so that what the pooler learns about the server it probes
-	// holds for the server the application uses. A list of hosts, a path or credentials
-	// in the host could send the two apart.
+	// application connections, because what a fence concludes from looking at the backends
+	// of the server it reaches has to concern the server the application uses. A list of
+	// hosts, a path or credentials in the host could send the two apart.
 	if strings.TrimSpace(c.Host) == "" || strings.ContainsAny(c.Host, "/ @,\t\n") {
 		return errors.New("backing connection requires a single hostname or IP address host")
 	}

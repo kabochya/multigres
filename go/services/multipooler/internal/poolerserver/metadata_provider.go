@@ -22,7 +22,8 @@ import (
 )
 
 // MetadataProvider serves the manager's cluster metadata held on the default primary: the
-// backing connections, and the binding of a tablegroup to one.
+// backing connections, and the binding of a tablegroup to one. These calls are independent of
+// application query admission.
 type MetadataProvider interface {
 	GetBackingConnection(ctx context.Context, req *multipoolerservicepb.GetBackingConnectionRequest) (*multipoolerservicepb.GetBackingConnectionResponse, error)
 	GetTablegroupBinding(ctx context.Context, req *multipoolerservicepb.GetTablegroupBindingRequest) (*multipoolerservicepb.GetTablegroupBindingResponse, error)

@@ -26,8 +26,8 @@ import (
 )
 
 // serveControl runs one call of one of the manager's control-plane services and converts its
-// error for gRPC. An error that carries a gRPC status with details is passed through as it is; any
-// other keeps the message context it was wrapped in.
+// error for gRPC. An error that carries a gRPC status with details, such as a fence's per-member
+// results, is passed through as it is; any other keeps the message context it was wrapped in.
 func serveControl[P, Req, Resp any](
 	ctx context.Context,
 	provider func() (P, error),

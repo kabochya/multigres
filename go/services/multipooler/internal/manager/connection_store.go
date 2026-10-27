@@ -34,7 +34,7 @@ import (
 // PROTOTYPE STUB: the directory of backing connections, and the binding of a tablegroup to
 // one, registered as the pooler's connection directory. The connections are in the
 // multigres.connection table and the binding is the backing_connection column of the existing
-// multigres.tablegroup table.
+// multigres.tablegroup table. This side knows nothing of admission and routing.
 
 // connectionStore reads the backing connections of the prototype from the default primary,
 // through the admin pool.

@@ -27,11 +27,11 @@ import (
 )
 
 // defaultPrimaryClient is the connection a pooler keeps to the default primary, to read the
-// cluster metadata, such as the binding of its tablegroup. It resolves the default primary from topology and dials once, and
-// reuses the connection for every read; a read that fails because the connection is gone,
-// or because that pooler is not the default primary any more, drops it and resolves
-// again once. Without it every read listed the poolers of the database and dialed a new
-// connection.
+// cluster metadata, such as the binding of its tablegroup, and its admission row. It resolves
+// the default primary from topology and dials once, and reuses the connection for every read; a
+// read that fails because the connection is gone, or because that pooler is not the default
+// primary any more, drops it and resolves again once. Without it every read listed the poolers
+// of the database and dialed a new connection.
 type defaultPrimaryClient struct {
 	pm *MultipoolerManager
 

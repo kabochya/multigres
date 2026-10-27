@@ -502,21 +502,16 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context, ts topoclient.S
 	}
 	unmanaged := mode == clustermetadatapb.PoolerManagementMode_POOLER_MANAGEMENT_MODE_UNMANAGED
 
-	// Transport to the default primary pooler, used by an unmanaged pooler to fetch its backing
-	// connection at bootstrap. It is built now, so that a misconfiguration fails at startup. It
-	// uses the --multipooler-grpc-* client flags, as every dial to a pooler does, and nothing
-	// else: a cluster whose poolers serve TLS sets them on the unmanaged pooler too. A managed
-	// pooler never dials the default primary for this, and builds none.
-	var (
-		defaultPrimaryTransport func() (grpc.DialOption, error)
-		bootstrapTransport      grpc.DialOption
-	)
-	if unmanaged {
-		if bootstrapTransport, err = mp.defaultPrimaryConn.TransportCredentials(logger); err != nil {
-			return fmt.Errorf("default primary transport: %w", err)
-		}
-		defaultPrimaryTransport = func() (grpc.DialOption, error) { return bootstrapTransport, nil }
+	// Transport to the default primary pooler, used to fetch a backing connection at bootstrap
+	// and to read admission state afterwards. Every pooler uses it (it reads its admission
+	// state from the default primary), so it is built now, so that a misconfiguration fails at
+	// startup. It uses the --multipooler-grpc-* client flags, as every dial to a pooler does, and
+	// nothing else: a cluster whose poolers serve TLS sets them on every pooler.
+	bootstrapTransport, err := mp.defaultPrimaryConn.TransportCredentials(logger)
+	if err != nil {
+		return fmt.Errorf("default primary transport: %w", err)
 	}
+	defaultPrimaryTransport := func() (grpc.DialOption, error) { return bootstrapTransport, nil }
 
 	// An unmanaged pooler takes its endpoint and credentials from the named
 	// backing connection; a managed one takes the admin password from its own
@@ -703,6 +698,8 @@ func (mp *Multipooler) initMultipooler(startCtx context.Context, ts topoclient.S
 
 	// Start the MultipoolerManager
 	poolerManager.Start(mp.senv)
+	// A controlled pooler opens only once it has read its admission state.
+	poolerManager.StartAdmission()
 	// Launch the background backup-health poller (service-level concern, kept
 	// out of manager.Start so RPC unit tests don't run background DB queries).
 	poolerManager.StartBackupHealth()
@@ -805,8 +802,10 @@ func (mp *Multipooler) abandonStartup() {
 	// The server never started, so there is no context to derive this from.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second) //nolint:gocritic // entry point after a failed start
 	defer cancel()
-	if mp.poolerManager != nil {
-		mp.poolerManager.StopTopoRegistration(ctx)
+	if mp.poolerManager != nil && !mp.poolerManager.StopTopoRegistration(ctx) {
+		// The manager left the record unpublished on purpose, because work it
+		// admitted was still running: that decision is not ours to override.
+		return
 	}
 	if mp.preparing == nil {
 		return

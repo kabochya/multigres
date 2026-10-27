@@ -92,9 +92,9 @@ type Config struct {
 	BackingConnectionName string
 
 	// DefaultPrimaryTransport resolves the gRPC transport used to reach the default
-	// primary pooler: for an unmanaged pooler's bootstrap and its reads of the cluster metadata. It is
-	// built once at startup, so a TLS misconfiguration fails the process there rather than
-	// leaving every pooler closed. Nil means insecure.
+	// primary pooler: for admission reads, for an unmanaged pooler's bootstrap and for its reads of
+	// the cluster metadata. It is built once at startup, so a TLS misconfiguration fails the
+	// process there rather than leaving every pooler closed. Nil means insecure.
 	DefaultPrimaryTransport func() (grpc.DialOption, error)
 
 	// ExternalBackend is the external PostgreSQL an unmanaged pooler fronts.

@@ -46,7 +46,7 @@ var (
 // bootstrap, in the order the design requires:
 //
 //  1. register in topology as DISABLED/UNMANAGED, before any metadata read, so
-//     the pooler is visible in topology while it prepares;
+//     a coordinator that snapshots topology can see this pooler;
 //  2. discover the default primary through topology;
 //  3. fetch the named backing connection from it.
 //
@@ -71,7 +71,7 @@ func bootstrapBackingConnection(ctx context.Context, ts topoclient.Store, initia
 	})
 	if err != nil {
 		// Do not leave a DISABLED entry behind for a pooler that is about to exit:
-		// it would keep gateways waiting on it.
+		// it would keep gateways and coordinators waiting on it.
 		markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		if markErr := manager.MarkPreparingFailed(markCtx, ts, initial); markErr != nil {
@@ -118,12 +118,13 @@ func (d *defaultPrimarySource) BackingConnection(ctx context.Context, name strin
 }
 
 // requireSingleUnmanagedPooler refuses to start a second unmanaged pooler for a tablegroup:
-// exactly one is supported per tablegroup. A restart of the same pooler, under the same id, is not a second one,
+// exactly one is supported per tablegroup (the coordinator refuses to fence a
+// tablegroup with more). A restart of the same pooler, under the same id, is not a second one,
 // and neither is a pooler that announced shutdown. The record of one that crashed stays until
 // it is removed, and blocks a pooler with another id.
 //
 // This is a check, not a lock: two poolers that start at the same instant can both pass it.
-// That is a known limit of this prototype.
+// The coordinator's refusal is what holds then.
 func requireSingleUnmanagedPooler(ctx context.Context, ts topoclient.Store, initial *clustermetadatapb.Multipooler) error {
 	key := initial.GetShardKey()
 	list, err := metadataclient.Poolers(ctx, ts, key.GetDatabase())

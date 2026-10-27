@@ -15,8 +15,13 @@
 // Package protometadata holds the throwaway metadata tables the unmanaged
 // pooler prototype keeps on the default primary.
 //
-// PROTOTYPE STUB: delete this package when the real catalog lands. The connection side
-// (connection_schema.go) is the connections table, and the column of the existing
-// multigres.tablegroup table that binds a tablegroup to one. It is created lazily by one
-// idempotent statement.
+// PROTOTYPE STUB: delete this package when the real catalog lands. There are two
+// independent pieces, each created lazily by one idempotent statement:
+//
+//   - the connection side (connection_schema.go): the connections table, and the column of
+//     the existing multigres.tablegroup table that binds a tablegroup to one;
+//   - the fence and routing side (routing_schema.go): the admission fences, the routing rules
+//     and the catalog state.
+//
+// Neither refers to the other.
 package protometadata

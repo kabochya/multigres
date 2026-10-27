@@ -100,9 +100,9 @@ func TestParseBackingDSN(t *testing.T) {
 	}
 }
 
-// TestParseBackingDSNRequiresASingleServer: the pooler checks the identity of the server its admin
-// connection reaches, so a URL that could send the admin connection and the application
-// connections to different servers is refused.
+// TestParseBackingDSNRequiresASingleServer: fence safety looks at the backends of the server the
+// pooler's admin connection reaches, so a URL that could send the admin connection and the
+// application connections to different servers is refused.
 func TestParseBackingDSNRequiresASingleServer(t *testing.T) {
 	for _, bad := range []string{
 		"postgres://u@h1:5432,h2:5432/db",
