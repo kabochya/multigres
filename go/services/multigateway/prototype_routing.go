@@ -53,7 +53,7 @@ func (r *staticRouting) RegisterFlags(fs *pflag.FlagSet, reg *viperutil.Registry
 	viperutil.BindFlags(fs, r.database, r.tablegroup)
 }
 
-func (r *staticRouting) Start(ctx context.Context, sink RoutingSink, logger *slog.Logger) error {
+func (r *staticRouting) Start(ctx context.Context, sink RoutingSink, _ ControlPlane, logger *slog.Logger) error {
 	db, tg := r.database.Get(), r.tablegroup.Get()
 	if db == "" && tg == "" {
 		return nil

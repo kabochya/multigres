@@ -64,7 +64,7 @@ func TestTheStaticRoutingSourceIsRegisteredAndOffUnlessConfigured(t *testing.T) 
 
 	off := newStaticRouting(t)
 	sink := newTestGatewayRouting()
-	require.NoError(t, off.Start(t.Context(), sink, slog.Default()), "not configured: nothing started, nothing needed")
+	require.NoError(t, off.Start(t.Context(), sink, nil, slog.Default()), "not configured: nothing started, nothing needed")
 	_, err := sink.Update("app", "migrateTG", 1)
 	require.Error(t, err, "nothing is followed")
 }
@@ -77,7 +77,7 @@ func TestTheStaticRoutingSourceSendsTheDatabaseToItsTablegroup(t *testing.T) {
 	require.Equal(t, "migrateTG", r.tablegroup.Get())
 
 	sink := newTestGatewayRouting()
-	require.NoError(t, r.Start(t.Context(), sink, slog.Default()))
+	require.NoError(t, r.Start(t.Context(), sink, nil, slog.Default()))
 	tg, known := sink.routing.Current()
 	require.True(t, known, "known when Start returns, so no request meets an unknown routing")
 	require.Equal(t, "migrateTG", tg)
@@ -86,6 +86,6 @@ func TestTheStaticRoutingSourceSendsTheDatabaseToItsTablegroup(t *testing.T) {
 // TestTheStaticRoutingSourceNeedsBothFlags: one of the two alone is a mistake, not a default.
 func TestTheStaticRoutingSourceNeedsBothFlags(t *testing.T) {
 	for _, args := range [][]string{{"--routing-database=app"}, {"--routing-tablegroup=migrateTG"}} {
-		require.ErrorContains(t, newStaticRouting(t, args...).Start(t.Context(), newTestGatewayRouting(), slog.Default()), "set together")
+		require.ErrorContains(t, newStaticRouting(t, args...).Start(t.Context(), newTestGatewayRouting(), nil, slog.Default()), "set together")
 	}
 }

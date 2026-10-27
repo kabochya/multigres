@@ -206,7 +206,7 @@ func (n *NotifyPrimitive) String() string { return "Notify(" + n.channel + ")" }
 // just committed, in order, as one parameterized statement to the default tablegroup:
 // PostgreSQL collapses identical channel and payload pairs within one transaction, and
 // the recorded ones are already collapsed. It runs outside the session's transaction and
-// as control traffic. A
+// as control traffic, so it passes the gate of a fenced default tablegroup. A
 // notification never turns a commit into an error: if it cannot be delivered within a
 // short time it is dropped with a warning on the result. The statement commits on its own,
 // so all of them are delivered or none is (one that timed out may have been delivered all

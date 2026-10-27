@@ -89,6 +89,7 @@ const transactionReadOnlyOptionName = "transaction_read_only"
 // Only PRIMARY traffic is buffered, and only for:
 //   - no writable primary in the gateway's current routing view
 //   - MTF01: multipooler signals planned failover (SERVING_RDONLY)
+//   - MTF02: multipooler's application admission gate is closed (a fence)
 //   - an internal pre-execution marker from backend acquisition
 //   - 25006, or the exact 0A000 BEGIN READ WRITE recovery rejection, when the
 //     request is safe to replay: a single autocommit query, or the first
@@ -97,7 +98,7 @@ func classifyError(err error, target *query.Target, retryReadOnlyError bool) err
 	if !modeRequiresLeader(target.GetMode()) {
 		return actionFail
 	}
-	if isNoWritablePrimaryError(err) || mterrors.IsErrorCode(err, mterrors.MTF01.ID) || mterrors.IsPreExecutionUnavailable(err) {
+	if isNoWritablePrimaryError(err) || mterrors.IsErrorCode(err, mterrors.MTF01.ID, mterrors.MTF02.ID) || mterrors.IsPreExecutionUnavailable(err) {
 		return actionBuffer
 	}
 	if retryReadOnlyError && (mterrors.IsErrorCode(err, mterrors.PgSSReadOnlyTransaction) || isReadWriteDuringRecoveryError(err)) {
@@ -120,7 +121,7 @@ type PoolerGateway struct {
 	cache *poolerwatch.PoolerCache[*poolerConnection]
 
 	// appRouting, when set, steers application targets to the tablegroup the
-	// application's traffic goes to. See app_routing.go.
+	// default primary's routing resolves to. See app_routing.go.
 	appRouting *AppRouting
 
 	// logger for debugging
@@ -374,17 +375,49 @@ func (pg *PoolerGateway) withBuffering(
 	retryReadOnlyError bool,
 	inner func(conn *poolerConnection) error,
 ) error {
-	bufferedOnce := false
+	selectConn := pg.loadBalancer.getConnection
+	if target.GetControl() {
+		// Control traffic is not application work: a pooler whose application gate
+		// is closed serves it, so a fence does not hold it back.
+		selectConn = pg.loadBalancer.getControlConnection
+	}
+	return pg.withBufferingSelecting(ctx, target, singleQuery, retryReadOnlyError, selectConn, inner)
+}
+
+// withBufferingSelecting is withBuffering with the pooler selection supplied by
+// the caller.
+func (pg *PoolerGateway) withBufferingSelecting(
+	ctx context.Context,
+	target *query.Target,
+	singleQuery bool,
+	retryReadOnlyError bool,
+	selectConn func(*query.Target) (*poolerConnection, error),
+	inner func(conn *poolerConnection) error,
+) error {
+	// bufferedOn is the shard the request has already waited for. A request waits once per
+	// shard: a routing move ends a wait and points the request at the tablegroup that now
+	// carries the traffic, which may itself still be closed, and then it waits there.
+	bufferedOn := ""
+
+	// errKey is the shard the last error came from. A routing move between that
+	// error and the next attempt points the request at another tablegroup, and the
+	// error says nothing about it: waiting for it to recover would buffer a healthy
+	// shard until the buffer's own timeout.
+	errKey := ""
 
 	var err error
 	for range constants.MaxBufferingRetries + 1 {
-		// Re-resolve the application tablegroup on every attempt, so that a retry uses the
-		// routing as it is then.
-		rewriteErr := pg.appRouting.Rewrite(target)
+		// Re-resolve the application tablegroup on every attempt: a request that
+		// waited out a cutover must retry against the tablegroup that now owns
+		// the traffic, not the one it was planned for.
+		routingChanged, rewriteErr := pg.appRouting.rewrite(target)
 		// Buffer operations are keyed on the target's full ShardKey
 		// (database + tableGroup + shard) — no need to copy field-by-field.
 		sk := target.GetShardKey()
-		if pg.buffer != nil && !bufferedOnce && modeRequiresLeader(target.GetMode()) {
+		if err != nil && errKey != shardKeyString(sk) {
+			err = nil
+		}
+		if pg.buffer != nil && bufferedOn != shardKeyString(sk) && modeRequiresLeader(target.GetMode()) {
 			var retryDone buffer.RetryDoneFunc
 			var bufErr error
 			if err == nil {
@@ -398,20 +431,46 @@ func (pg *PoolerGateway) withBuffering(
 				// rejects them throughout the drain, so a wasted round-trip is
 				// pointless.
 				if !singleQuery {
-					retryDone, bufErr = pg.buffer.WaitIfAlreadyBuffering(ctx, sk)
+					waitCtx, stop := contextUntil(ctx, routingChanged)
+					retryDone, bufErr = pg.buffer.WaitIfAlreadyBuffering(waitCtx, sk)
+					stop()
 				}
 			} else {
 				// Reactive: after a buffer-worthy error, wait for failover to end.
-				retryDone, bufErr = pg.buffer.WaitForFailoverEnd(ctx, sk)
+				// A routing change ends the wait: what was being waited for is
+				// the old tablegroup, which no longer carries this request.
+				waitCtx, stop := contextUntil(ctx, routingChanged)
+				if isAdmissionClosedError(err) {
+					// A pooler whose gate is closed (a fence in a migration) is not a
+					// flapping failover, so the guard against buffering again soon
+					// after the last cycle does not apply: a rollback shortly after a
+					// cutover must wait like the cutover did. That holds for any closed
+					// gate, one signal whatever closed it, so it also holds for a pooler
+					// that is closed only until it has read its admission state after a
+					// failover, a wait of a second or two. A leader that is lost keeps
+					// the guard, whichever tablegroup it is for.
+					waitCtx = buffer.IgnoringMinTimeBetweenFailovers(waitCtx)
+				}
+				retryDone, bufErr = pg.buffer.WaitForFailoverEnd(waitCtx, sk)
+				stop()
 			}
-			if bufErr != nil {
+			// A routing change ends the wait, however the buffer reports it: what
+			// was being waited for is the tablegroup that just lost the traffic.
+			routingMoved := ctx.Err() == nil && isClosed(routingChanged)
+			if bufErr != nil && !routingMoved {
 				return bufErr
 			}
 			if retryDone != nil {
 				// Hold the drain slot until all bounded retries finish. This keeps
 				// DrainConcurrency as backpressure if the new primary fails again.
 				defer retryDone()
-				bufferedOnce = true
+				bufferedOn = shardKeyString(sk)
+			}
+			if routingMoved {
+				// The error that sent this request to wait belongs to the
+				// tablegroup it just left: start over against the new one.
+				err = nil
+				continue
 			}
 		}
 
@@ -419,10 +478,11 @@ func (pg *PoolerGateway) withBuffering(
 		if rewriteErr != nil {
 			err = rewriteErr
 		} else {
-			conn, err = pg.loadBalancer.getConnection(target)
+			conn, err = selectConn(target)
 		}
 		if err != nil {
 			if classifyError(err, target, retryReadOnlyError) == actionBuffer {
+				errKey = shardKeyString(sk)
 				continue
 			}
 			pg.recordUnbufferedFailure(ctx, sk, err)
@@ -438,13 +498,61 @@ func (pg *PoolerGateway) withBuffering(
 		err = inner(conn)
 		if err != nil {
 			if classifyError(err, target, retryReadOnlyError) == actionBuffer {
+				errKey = shardKeyString(sk)
 				continue
 			}
 			pg.recordUnbufferedFailure(ctx, sk, err)
 		}
 		return translatePreExecutionUnavailable(err)
 	}
+	if err == nil {
+		// The attempts ran out on routing moves, each of which ended a wait: the request
+		// never reached a pooler. It must not report success, so it fails with an error
+		// the client retries.
+		err = newNoWritablePrimaryError("application routing kept changing while the request waited")
+	}
 	return translatePreExecutionUnavailable(err)
+}
+
+// shardKeyString identifies a shard for comparing where a request has waited.
+func shardKeyString(sk *clustermetadatapb.ShardKey) string {
+	return sk.GetDatabase() + "/" + sk.GetTableGroup() + "/" + sk.GetShard()
+}
+
+// contextUntil returns a context that ends when parent does or when ch closes.
+// A nil ch never closes. A ch that is closed already ends the context before it
+// is returned, not on a goroutine's schedule: the buffer starts no wait on an
+// ended context, so a request whose routing moved before it got to wait cannot
+// open a buffer for the tablegroup that lost the traffic.
+func contextUntil(parent context.Context, ch <-chan struct{}) (context.Context, context.CancelFunc) {
+	if ch == nil {
+		return parent, func() {}
+	}
+	ctx, cancel := context.WithCancel(parent)
+	if isClosed(ch) {
+		cancel()
+		return ctx, cancel
+	}
+	go func() {
+		select {
+		case <-ch:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
+}
+
+func isClosed(ch <-chan struct{}) bool {
+	if ch == nil {
+		return false
+	}
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
 }
 
 // isClientDrivenFailure reports whether err is a cancellation or timeout the
@@ -710,7 +818,13 @@ func (pg *PoolerGateway) GetAuthCredentials(ctx context.Context, req *multipoole
 	}
 
 	var resp *multipoolerpb.GetAuthCredentialsResponse
-	err := pg.withBuffering(ctx, target, false, false, func(conn *poolerConnection) error {
+	// Credential lookups are not application work, so a closed application gate
+	// does not exclude a pooler from answering them.
+	//
+	// singleQuery: it does not queue behind a buffer that other requests of the
+	// shard are waiting in, since the selection above already ignores the gate; it
+	// only waits, reactively, if no pooler can answer at all.
+	err := pg.withBufferingSelecting(ctx, target, true, false, pg.loadBalancer.getControlConnection, func(conn *poolerConnection) error {
 		var err error
 		resp, err = conn.ServiceClient().GetAuthCredentials(ctx, req)
 		// Convert gRPC error so classifyError can read the PgDiagnostic SQLSTATE.
@@ -742,11 +856,12 @@ func (pg *PoolerGateway) GetAuthCredentials(ctx context.Context, req *multipoole
 }
 
 // GetConnection selects a poolerConnection matching the target. External
-// entry point for callers that need to dispatch directly to a pooler
-// (e.g. the LISTEN/NOTIFY manager). Query routing inside the gateway uses
-// the load balancer through withBuffering.
+// entry point for callers that need to dispatch directly to a pooler: the
+// LISTEN/NOTIFY manager and the reads of a routing source, both control traffic, which a
+// pooler with a closed application gate still serves. Query routing inside the
+// gateway uses the load balancer through withBuffering.
 func (pg *PoolerGateway) GetConnection(target *query.Target) (*poolerConnection, error) {
-	return pg.loadBalancer.getConnection(target)
+	return pg.loadBalancer.getControlConnection(target)
 }
 
 // CopySendData implements queryservice.QueryService.

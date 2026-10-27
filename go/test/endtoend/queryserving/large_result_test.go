@@ -15,6 +15,11 @@
 package queryserving
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"fmt"
+	"hash"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,4 +82,50 @@ func TestLargeResultThroughGateway(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestLargeCopyToSpansSeveralStreamChunks verifies that a COPY TO whose output spans
+// many stream chunks arrives complete, row for row, repeatedly on one connection.
+func TestLargeCopyToSpansSeveralStreamChunks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	if utils.ShouldSkipRealPostgres() {
+		t.Skip("PostgreSQL binaries not found, skipping")
+	}
+
+	setup := getSharedSetup(t)
+	ctx := utils.WithTimeout(t, 120*time.Second)
+
+	for _, target := range setup.ComparisonTargets(t) {
+		t.Run(target.Name, func(t *testing.T) {
+			connStr := shardsetup.GetTestUserDSN("localhost", target.Port, "sslmode=disable", "connect_timeout=5")
+			conn, err := pgx.Connect(ctx, connStr)
+			require.NoError(t, err)
+			defer conn.Close(ctx)
+
+			const rows = 200_000
+			// What the server sends, row by row: the id, a tab, 100 characters, a newline.
+			expected := sha256.New()
+			for g := 1; g <= rows; g++ {
+				writeCopyRow(expected, g)
+			}
+			for i := range 6 {
+				var out bytes.Buffer
+				tag, err := conn.PgConn().CopyTo(ctx, &out,
+					"COPY (SELECT g, repeat('y', 100) FROM generate_series(1, 200000) g) TO STDOUT")
+				require.NoError(t, err, "large copy out %d", i)
+				require.EqualValues(t, rows, tag.RowsAffected())
+				require.Equal(t, rows, bytes.Count(out.Bytes(), []byte("\n")))
+				require.Greater(t, out.Len(), 10<<20, "the result must span many chunks")
+				got := sha256.Sum256(out.Bytes())
+				require.Equal(t, expected.Sum(nil), got[:], "every row arrived, in order, unchanged")
+			}
+		})
+	}
+}
+
+// writeCopyRow writes the text of row g of the COPY the test runs.
+func writeCopyRow(h hash.Hash, g int) {
+	fmt.Fprintf(h, "%d\t%s\n", g, strings.Repeat("y", 100))
 }

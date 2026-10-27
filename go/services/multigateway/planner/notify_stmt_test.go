@@ -41,7 +41,7 @@ func TestPlan_NotifyStaysOnTheDefaultTableGroup(t *testing.T) {
 	notify, ok := plan.Primitive.(*engine.NotifyPrimitive)
 	require.True(t, ok, "expected NotifyPrimitive, got %T", plan.Primitive)
 	assert.Equal(t, "default", notify.GetTableGroup())
-	assert.True(t, plan.ExecInfo.Control, "NOTIFY is control traffic: application routing never moves it")
+	assert.True(t, plan.ExecInfo.Control, "NOTIFY is control traffic: a fenced default tablegroup still serves it")
 	assert.True(t, notify.DefersInTransaction(), "inside a transaction it waits for the commit while the application is elsewhere")
 
 	other := "SELECT 1"

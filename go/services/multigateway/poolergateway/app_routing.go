@@ -27,10 +27,12 @@ import (
 // All application SQL of a database goes to one tablegroup, which may be the default
 // tablegroup itself. A routing source (nothing is configured by default: application SQL then
 // goes to the default tablegroup, as it always did) tells the gateway through Update; on a
-// change the gateway swaps the tablegroup its planner targets and rewrites retries. Control
-// traffic (NOTIFY, LISTEN) is not application traffic: its targets are marked, stay on the
-// default tablegroup and are never rewritten. Which tablegroup a request is for says nothing
-// about which kind it is.
+// change the gateway swaps the tablegroup its planner targets and rewrites in-flight
+// retries. Control traffic (NOTIFY, credential lookups, LISTEN) is not application
+// traffic: its targets are marked, stay on the default tablegroup and are never rewritten.
+// Which tablegroup a request is for says nothing about which kind it is. Safety does not
+// depend on how fresh the view is: a gateway that is behind only reaches a fenced pooler,
+// which rejects with a bufferable error.
 
 // PendingAppTableGroup is the tablegroup application SQL is planned against
 // before the first successful read of the routing. Requests for it fail
@@ -41,18 +43,32 @@ const PendingAppTableGroup = "__routing_pending__"
 type AppRouting struct {
 	database string
 
-	mu      sync.Mutex
-	current string
-	version int64
-	known   bool
+	mu       sync.Mutex
+	current  string
+	version  int64
+	known    bool
+	onChange []func(old, new string)
 	// inStep are callbacks run under the lock, in the same step as the change: what they
 	// update is never behind the view that Rewrite and Current give.
 	inStep []func(old, new string)
+	// changed is closed, and replaced, whenever the application tablegroup
+	// changes: a waiter that resolved the tablegroup before the change learns
+	// that what it resolved is stale.
+	changed chan struct{}
 }
 
 // NewAppRouting returns routing state for database, unknown until first Update.
 func NewAppRouting(database string) *AppRouting {
-	return &AppRouting{database: database}
+	return &AppRouting{database: database, changed: make(chan struct{})}
+}
+
+// OnChange registers a callback run, outside the lock and in registration
+// order, when the application tablegroup changes (old is empty on the first
+// read).
+func (r *AppRouting) OnChange(f func(old, new string)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onChange = append(r.onChange, f)
 }
 
 // OnChangeInStep registers a callback run under the lock, in registration order and
@@ -87,8 +103,8 @@ func (r *AppRouting) Update(tablegroup string, version int64) bool {
 		return false
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.known && version <= r.version {
+		r.mu.Unlock()
 		return false
 	}
 	old := r.current
@@ -96,6 +112,15 @@ func (r *AppRouting) Update(tablegroup string, version int64) bool {
 	r.current, r.version, r.known = tablegroup, version, true
 	if changed {
 		for _, cb := range r.inStep {
+			cb(old, tablegroup)
+		}
+		close(r.changed)
+		r.changed = make(chan struct{})
+	}
+	callbacks := append([]func(old, new string){}, r.onChange...)
+	r.mu.Unlock()
+	if changed {
+		for _, cb := range callbacks {
 			cb(old, tablegroup)
 		}
 	}
@@ -108,22 +133,30 @@ func (r *AppRouting) Update(tablegroup string, version int64) bool {
 // call, so it swaps the target's key in place; the old key, which a buffered request may
 // hold, is not edited.
 func (r *AppRouting) Rewrite(target *query.Target) error {
+	_, err := r.rewrite(target)
+	return err
+}
+
+// rewrite is Rewrite that also returns a channel closed when the application
+// tablegroup next changes, captured together with the rewrite so no change can
+// fall between them. It is nil when the target is not an application target.
+func (r *AppRouting) rewrite(target *query.Target) (<-chan struct{}, error) {
 	if r == nil || target == nil || target.GetShardKey() == nil || target.GetControl() {
-		return nil
+		return nil, nil
 	}
 	sk := target.GetShardKey()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	// Routing follows one database; another database's targets are not rewritten.
 	if sk.GetDatabase() != r.database {
-		return nil
+		return nil, nil
 	}
 	if !r.known {
-		return newNoWritablePrimaryError("application routing for database=%s is not known yet", r.database)
+		return r.changed, newNoWritablePrimaryError("application routing for database=%s is not known yet", r.database)
 	}
 	// Replace the key rather than edit it: a buffered request holds the old one.
 	target.ShardKey = &clustermetadatapb.ShardKey{Database: sk.GetDatabase(), TableGroup: r.current, Shard: sk.GetShard()}
-	return nil
+	return r.changed, nil
 }
 
 // AuthTableGroup is the tablegroup whose poolers answer credential lookups for
@@ -142,7 +175,39 @@ func (r *AppRouting) AuthTableGroup(database string) string {
 	return PendingAppTableGroup
 }
 
-// SetAppRouting wires application routing into the gateway.
+// SetAppRouting wires application routing into the gateway. On a change it
+// releases requests buffered for the tablegroup that lost the traffic, so they
+// retry against the new one immediately instead of waiting out the buffer window.
 func (pg *PoolerGateway) SetAppRouting(r *AppRouting) {
 	pg.appRouting = r
+	r.OnChange(func(old, _ string) {
+		if old == "" || old == PendingAppTableGroup {
+			// The routing became known: release everything held while it was not.
+			pg.drainTableGroup(PendingAppTableGroup)
+			return
+		}
+		pg.drainTableGroup(old)
+	})
+}
+
+// drainTableGroup stops buffering for every shard of a tablegroup.
+func (pg *PoolerGateway) drainTableGroup(tablegroup string) {
+	if pg.buffer == nil {
+		return
+	}
+	pg.loadBalancer.mu.Lock()
+	var keys []*clustermetadatapb.ShardKey
+	for _, summary := range pg.loadBalancer.shards {
+		if summary.shardKey.GetDatabase() == pg.appRouting.database && summary.shardKey.GetTableGroup() == tablegroup {
+			keys = append(keys, summary.shardKey)
+		}
+	}
+	pg.loadBalancer.mu.Unlock()
+	for _, key := range keys {
+		pg.buffer.StopBuffering(key)
+	}
+	// Requests held while routing was unknown are keyed by the pending group.
+	if tablegroup == PendingAppTableGroup {
+		pg.buffer.StopBuffering(&clustermetadatapb.ShardKey{Database: pg.appRouting.database, TableGroup: PendingAppTableGroup, Shard: constants.DefaultShard})
+	}
 }

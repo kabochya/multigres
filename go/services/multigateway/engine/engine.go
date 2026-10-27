@@ -97,8 +97,9 @@ type PlanExecInfo struct {
 
 	// Control marks the statement as cluster control traffic rather than
 	// application work (see application routing). It is sent to the
-	// default tablegroup whatever tablegroup application statements are routed to, and is
-	// never rewritten by application routing. Set for NOTIFY.
+	// default tablegroup whatever tablegroup application statements are routed to, is
+	// served by a pooler whose application admission gate is closed, and is never
+	// rewritten by application routing. Set for NOTIFY.
 	Control bool
 
 	// Autonomous runs the statement outside the session's transaction: it never

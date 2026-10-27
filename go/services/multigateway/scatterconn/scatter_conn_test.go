@@ -47,6 +47,8 @@ type mockGateway struct {
 	streamExecuteTarget         *querypb.Target
 	streamExecuteSQL            string
 	streamExecuteOpts           *querypb.ExecuteOptions
+	releasedConnectionIDs       []uint64
+	discardedConnectionIDs      []uint64
 	streamExecuteReservationOps *querypb.ReservationOptions
 	streamExecuteErr            error
 	streamExecuteReturnState    *querypb.ReservedState
@@ -76,10 +78,12 @@ type mockGateway struct {
 	copyReadyReturnState    *querypb.ReservedState
 	copyReadyReservationOps *querypb.ReservationOptions
 	copyReadyErr            error
+	copyReadyCalled         bool
 
 	// CopyOutReady tracking
 	copyOutReadyReturnState    *querypb.ReservedState
 	copyOutReadyReservationOps *querypb.ReservationOptions
+	copyOutReadyCalled         bool
 
 	// CopyFinalize tracking
 	copyFinalizeResult      *sqltypes.Result
@@ -109,8 +113,8 @@ type mockGateway struct {
 
 // StreamExecute implements queryservice.QueryService.
 func (m *mockGateway) StreamExecute(_ context.Context, target *querypb.Target, sql string, opts *querypb.ExecuteOptions, reservationOpts *querypb.ReservationOptions, callback func(context.Context, *sqltypes.Result) error) (*querypb.ReservedState, error) {
-	m.streamExecuteTarget = target
 	m.streamExecuteCalled = true
+	m.streamExecuteTarget = target
 	m.streamExecuteSQL = sql
 	m.streamExecuteOpts = opts
 	m.streamExecuteReservationOps = reservationOpts
@@ -161,6 +165,7 @@ func (m *mockGateway) Describe(context.Context, *querypb.Target, *querypb.Prepar
 func (m *mockGateway) Close() error { return nil }
 
 func (m *mockGateway) CopyReady(_ context.Context, _ *querypb.Target, _ string, _ *querypb.ExecuteOptions, reservationOpts *querypb.ReservationOptions) (int16, []int16, *querypb.ReservedState, error) {
+	m.copyReadyCalled = true
 	m.copyReadyReservationOps = reservationOpts
 	return m.copyReadyFormat, m.copyReadyColumnFormats, m.copyReadyReturnState, m.copyReadyErr
 }
@@ -178,6 +183,7 @@ func (m *mockGateway) CopyAbort(_ context.Context, _ *querypb.Target, _ string, 
 }
 
 func (m *mockGateway) CopyOutReady(_ context.Context, _ *querypb.Target, _ string, _ *querypb.ExecuteOptions, reservationOpts *querypb.ReservationOptions) (int16, []int16, []*mterrors.PgDiagnostic, *querypb.ReservedState, error) {
+	m.copyOutReadyCalled = true
 	m.copyOutReadyReservationOps = reservationOpts
 	return 0, nil, nil, m.copyOutReadyReturnState, nil
 }
@@ -187,6 +193,7 @@ func (m *mockGateway) CopyOutStream(_ context.Context, _ *querypb.Target, _ *que
 }
 
 func (m *mockGateway) ReleaseReservedConnection(_ context.Context, _ *querypb.Target, options *querypb.ExecuteOptions, keepStickyReservations bool) (*querypb.ReservedState, error) {
+	m.releasedConnectionIDs = append(m.releasedConnectionIDs, options.GetReservedConnectionId())
 	m.releaseReservedConnectionKeepSticky = keepStickyReservations
 	m.releaseReservedConnectionSettings = options.GetSessionSettings()
 	return m.releaseReservedConnectionReturnState, m.releaseReservedConnectionErr
@@ -199,6 +206,7 @@ func (m *mockGateway) ConcludeTransaction(_ context.Context, _ *querypb.Target, 
 }
 
 func (m *mockGateway) DiscardTempTables(ctx context.Context, target *querypb.Target, options *querypb.ExecuteOptions) (*sqltypes.Result, *querypb.ReservedState, error) {
+	m.discardedConnectionIDs = append(m.discardedConnectionIDs, options.GetReservedConnectionId())
 	return nil, nil, m.discardTempTablesErr
 }
 
@@ -260,6 +268,7 @@ func TestScatterConn_Case2_InTransactionNoReservedConn(t *testing.T) {
 	state := handler.NewMultigatewayConnectionState()
 	conn := newTestConn()
 	conn.SetTxnStatus(protocol.TxnStatusInBlock)
+	state.PendingBeginQuery = "BEGIN" // the BEGIN is deferred to the first statement
 
 	err := sc.StreamExecute(context.Background(), conn, "tg1", "", "SELECT 1", nil, state, engine.PlanExecInfo{}, false,
 		func(_ context.Context, _ *sqltypes.Result) error { return nil })
@@ -286,6 +295,7 @@ func TestScatterConn_Case2_ReserveError(t *testing.T) {
 	state := handler.NewMultigatewayConnectionState()
 	conn := newTestConn()
 	conn.SetTxnStatus(protocol.TxnStatusInBlock)
+	state.PendingBeginQuery = "BEGIN" // the BEGIN is deferred to the first statement
 
 	err := sc.StreamExecute(context.Background(), conn, "tg1", "", "SELECT 1", nil, state, engine.PlanExecInfo{}, false,
 		func(_ context.Context, _ *sqltypes.Result) error { return nil })
@@ -620,6 +630,7 @@ func TestScatterConn_Portal_FirstStatementReservesViaPortalRPC(t *testing.T) {
 	state := handler.NewMultigatewayConnectionState()
 	conn := newTestConn()
 	conn.SetTxnStatus(protocol.TxnStatusInBlock)
+	state.PendingBeginQuery = "BEGIN" // the BEGIN is deferred to the first statement
 
 	err := sc.PortalStreamExecute(context.Background(), "tg1", "", conn, state,
 		testPortalInfo(), 0, false,
@@ -863,6 +874,7 @@ func TestScatterConn_NewTransactionErrorAppliesReturnedReservedState(t *testing.
 	state := handler.NewMultigatewayConnectionState()
 	conn := newTestConn()
 	conn.SetTxnStatus(protocol.TxnStatusInBlock)
+	state.PendingBeginQuery = "BEGIN" // the BEGIN is deferred to the first statement
 
 	err := sc.StreamExecute(context.Background(), conn, "tg1", "", "INSERT INTO t VALUES (1)", nil, state, engine.PlanExecInfo{}, false,
 		func(_ context.Context, _ *sqltypes.Result) error { return nil })
@@ -1719,6 +1731,92 @@ func TestReleaseAll_MidTransactionStampsPreBeginMap(t *testing.T) {
 		"without a transaction the current map is the correct label")
 }
 
+// pinnedCopyGateway models a shard served by several interchangeable poolers
+// with application routing that re-resolves a COPY's target while it starts: the
+// COPY begins on dst-2, under the destination tablegroup, though the statement
+// was planned for the source.
+type pinnedCopyGateway struct {
+	*mockGateway
+	rewriteTo string
+	poolerID  *clustermetadatapb.ID
+
+	directDataCalls int
+	byIDRequests    []*clustermetadatapb.ID
+	pinned          *pinnedCopyService
+}
+
+func (g *pinnedCopyGateway) CopyReady(_ context.Context, target *querypb.Target, _ string, _ *querypb.ExecuteOptions, _ *querypb.ReservationOptions) (int16, []int16, *querypb.ReservedState, error) {
+	// Rewrite replaces the key, as application routing does.
+	target.ShardKey = &clustermetadatapb.ShardKey{Database: target.GetShardKey().GetDatabase(), TableGroup: g.rewriteTo, Shard: target.GetShardKey().GetShard()}
+	return 0, nil, &querypb.ReservedState{ReservedConnectionId: 7, PoolerId: g.poolerID, ReservationReasons: protoutil.ReasonCopy}, nil
+}
+
+// The unpinned data-phase methods stand for "some other pooler": a stream is not
+// there.
+func (g *pinnedCopyGateway) CopySendData(context.Context, *querypb.Target, []byte, *querypb.ExecuteOptions) error {
+	g.directDataCalls++
+	return errors.New("no active COPY stream")
+}
+
+func (g *pinnedCopyGateway) CopyFinalize(context.Context, *querypb.Target, []byte, *querypb.ExecuteOptions) (*sqltypes.Result, *querypb.ReservedState, error) {
+	g.directDataCalls++
+	return nil, nil, errors.New("no active COPY stream")
+}
+
+func (g *pinnedCopyGateway) QueryServiceByID(_ context.Context, id *clustermetadatapb.ID, _ *querypb.Target) (queryservice.QueryService, error) {
+	g.byIDRequests = append(g.byIDRequests, id)
+	g.pinned = &pinnedCopyService{QueryService: g}
+	return g.pinned, nil
+}
+
+// pinnedCopyService is the pooler the COPY stream lives on.
+type pinnedCopyService struct {
+	queryservice.QueryService
+	sent      []*querypb.Target
+	finalized []*querypb.Target
+}
+
+func (s *pinnedCopyService) CopySendData(_ context.Context, target *querypb.Target, _ []byte, _ *querypb.ExecuteOptions) error {
+	s.sent = append(s.sent, target)
+	return nil
+}
+
+func (s *pinnedCopyService) CopyFinalize(_ context.Context, target *querypb.Target, _ []byte, _ *querypb.ExecuteOptions) (*sqltypes.Result, *querypb.ReservedState, error) {
+	s.finalized = append(s.finalized, target)
+	return &sqltypes.Result{CommandTag: "COPY 1"}, nil, nil
+}
+
+// TestScatterConn_CopyDataPhaseFollowsThePoolerAndTargetThatStartedIt: the data
+// phase of a COPY must reach the pooler that holds the stream, under the target
+// the reservation was recorded with, even when routing moved the COPY off the
+// tablegroup it was planned for and the shard has other interchangeable poolers.
+func TestScatterConn_CopyDataPhaseFollowsThePoolerAndTargetThatStartedIt(t *testing.T) {
+	poolerID := &clustermetadatapb.ID{Cell: "cell1", Name: "dst-2"}
+	gw := &pinnedCopyGateway{mockGateway: &mockGateway{}, rewriteTo: "destTG", poolerID: poolerID}
+	sc := NewScatterConn(gw, slog.Default())
+	state := handler.NewMultigatewayConnectionState()
+	conn := newTestConn()
+	ctx := context.Background()
+
+	_, _, err := sc.CopyInitiate(ctx, conn, "migrateTG", "", "COPY t FROM STDIN", state,
+		func(context.Context, *sqltypes.Result) error { return nil })
+	require.NoError(t, err)
+
+	// The statement still says migrateTG, as its plan does.
+	require.NoError(t, sc.CopySendData(ctx, conn, "migrateTG", "", state, []byte("1\n")))
+	require.Zero(t, gw.directDataCalls, "the data phase must not be sent to a pooler selected afresh")
+	require.Len(t, gw.byIDRequests, 1)
+	require.Equal(t, "dst-2", gw.byIDRequests[0].GetName())
+	require.Len(t, gw.pinned.sent, 1)
+	require.Equal(t, "destTG", gw.pinned.sent[0].GetShardKey().GetTableGroup(), "under the target the COPY started with")
+
+	require.NoError(t, sc.CopyFinalize(ctx, conn, "migrateTG", "", state, nil,
+		func(context.Context, *sqltypes.Result) error { return nil }))
+	require.Zero(t, gw.directDataCalls)
+	require.Len(t, gw.pinned.finalized, 1)
+	require.Nil(t, state.CopyTarget(), "the COPY's target is forgotten once it ends")
+}
+
 // TestScatterConn_AnAutonomousStatementIgnoresTheSessionsTransaction: what a transaction
 // sends after it has committed (its NOTIFYs) runs on a pooled connection, as control
 // traffic, whatever the session's transaction status is, and reserves nothing.
@@ -1813,4 +1911,372 @@ func TestScatterConn_AControlNotifyInATransactionStillJoinsIt(t *testing.T) {
 		func(context.Context, *sqltypes.Result) error { return nil }))
 	require.NotNil(t, gw.streamExecuteReservationOps)
 	require.True(t, protoutil.HasTransactionReason(gw.streamExecuteReservationOps.GetReasons()), "it joins the transaction")
+}
+
+// TestScatterConn_AFirstStatementOfATransactionStartsItOnTheCurrentTablegroup: a transaction
+// that has not begun on any pooler yet starts where its first statement goes, whichever
+// tablegroup the traffic is on.
+func TestScatterConn_AFirstStatementOfATransactionStartsItOnTheCurrentTablegroup(t *testing.T) {
+	gw := &mockGateway{callbackResult: &sqltypes.Result{CommandTag: "SELECT 1"}}
+	sc := NewScatterConn(gw, slog.Default())
+	state := handler.NewMultigatewayConnectionState()
+	conn := newTestConn()
+	beginTransactionOn(t, sc, gw, conn, state, "new")
+}
+
+// TestScatterConn_AReapedReservationAndAMoveFailWith40001: the pooler reaped a reservation of the
+// session's and then the traffic moved. What the gateway still tracks is stale, and the move hides
+// the loss, so the next statement that needs a reservation fails with 40001 whatever the
+// reservation held: a transaction (the client rolls back, and the next transaction starts on the
+// tablegroup that has the traffic) or a temporary table (the session goes on). On every path that
+// can start a reservation.
+func TestScatterConn_AReapedReservationAndAMoveFailWith40001(t *testing.T) {
+	ctx := context.Background()
+	cb := func(context.Context, *sqltypes.Result) error { return nil }
+	paths := map[string]func(sc *ScatterConn, gw *mockGateway, conn *server.Conn, state *handler.MultigatewayConnectionState) (called bool, err error){
+		"statement": func(sc *ScatterConn, gw *mockGateway, conn *server.Conn, state *handler.MultigatewayConnectionState) (bool, error) {
+			err := sc.StreamExecute(ctx, conn, "new", "", "CREATE TEMP TABLE y (i int)", nil, state, engine.PlanExecInfo{TempTable: true}, false, cb)
+			return gw.streamExecuteCalled, err
+		},
+		"portal": func(sc *ScatterConn, gw *mockGateway, conn *server.Conn, state *handler.MultigatewayConnectionState) (bool, error) {
+			err := sc.PortalStreamExecute(ctx, "new", "", conn, state, testPortalInfo(), 0, false, engine.PlanExecInfo{TempTable: true}, false, cb)
+			return gw.portalCalled, err
+		},
+		"copy from stdin": func(sc *ScatterConn, gw *mockGateway, conn *server.Conn, state *handler.MultigatewayConnectionState) (bool, error) {
+			conn.SetTxnStatus(protocol.TxnStatusInBlock)
+			_, _, err := sc.CopyInitiate(ctx, conn, "new", "", "COPY t FROM STDIN", state, cb)
+			return gw.copyReadyCalled, err
+		},
+		"copy to stdout": func(sc *ScatterConn, gw *mockGateway, conn *server.Conn, state *handler.MultigatewayConnectionState) (bool, error) {
+			conn.SetTxnStatus(protocol.TxnStatusInBlock)
+			_, _, _, err := sc.CopyOutInitiate(ctx, conn, "new", "", "COPY t TO STDOUT", state)
+			return gw.copyOutReadyCalled, err
+		},
+	}
+	old := protoutil.NewTarget("", "old", "", querypb.Mode_MODE_WRITABLE)
+	for name, run := range paths {
+		t.Run(name+": a lost temporary table ends the session", func(t *testing.T) {
+			gw := &mockGateway{callbackResult: &sqltypes.Result{CommandTag: "SELECT 1"}}
+			sc := NewScatterConn(gw, slog.Default())
+			state := handler.NewMultigatewayConnectionState()
+			conn := newTestConn()
+			// A reservation for a temporary table on "old", which the pooler then reaped.
+			state.SetReservedConnection(old, &querypb.ReservedState{
+				ReservedConnectionId: 5,
+				PoolerId:             &clustermetadatapb.ID{Cell: "cell1", Name: "pooler1"},
+				ReservationReasons:   protoutil.ReasonTempTable,
+			})
+			called, err := run(sc, gw, conn, state)
+			requireSessionEnded(t, err, "temp_table")
+			require.False(t, called, "nothing is sent to a pooler")
+			require.Nil(t, state.GetMatchingShardState(old), "the stale entry is dropped")
+		})
+		t.Run(name+": a lost transaction is a 40001, a rollback, and a new transaction on the new tablegroup", func(t *testing.T) {
+			gw := &mockGateway{callbackResult: &sqltypes.Result{CommandTag: "SELECT 1"}}
+			sc := NewScatterConn(gw, slog.Default())
+			state := handler.NewMultigatewayConnectionState()
+			conn := newTestConn()
+			beginTransactionOn(t, sc, gw, conn, state, "old") // the pooler then reaps it
+			gw.streamExecuteCalled = false
+			called, err := run(sc, gw, conn, state)
+			requireEndedWith40001(t, err)
+			require.False(t, called)
+			require.Nil(t, state.GetMatchingShardState(old), "the stale entry is dropped")
+			requireRollbackThenANewTransactionOn(t, sc, gw, conn, state, "new")
+		})
+	}
+}
+
+// TestScatterConn_AReservationOnAnotherTablegroupEndsTheSession: a temporary table's reservation
+// is on one tablegroup, and a statement arrives for another, as after the application's traffic
+// moved. The reservation is gone with the old tablegroup's backend (a fence waits for reservations
+// to be released), and the move hides that loss, so the session ends, as it does when a
+// failover or a reap takes a reservation that held session state, and the stale entry is
+// dropped, whether or not the statement needs a reservation of its own: a plain autocommit
+// statement included.
+func TestScatterConn_AReservationOnAnotherTablegroupEndsTheSession(t *testing.T) {
+	newSession := func(t *testing.T) (*mockGateway, *ScatterConn, *handler.MultigatewayConnectionState, *server.Conn) {
+		gw := &mockGateway{
+			streamExecuteReturnState: &querypb.ReservedState{
+				ReservedConnectionId: 5,
+				PoolerId:             &clustermetadatapb.ID{Cell: "cell1", Name: "pooler1"},
+				ReservationReasons:   protoutil.ReasonTempTable,
+			},
+			callbackResult: &sqltypes.Result{CommandTag: "SELECT 1"},
+		}
+		sc := NewScatterConn(gw, slog.Default())
+		state := handler.NewMultigatewayConnectionState()
+		conn := newTestConn()
+		cb := func(context.Context, *sqltypes.Result) error { return nil }
+		require.NoError(t, sc.StreamExecute(context.Background(), conn, "old", "", "CREATE TEMP TABLE x (i int)", nil, state, engine.PlanExecInfo{TempTable: true}, false, cb))
+		gw.streamExecuteCalled = false
+		return gw, sc, state, conn
+	}
+	cb := func(context.Context, *sqltypes.Result) error { return nil }
+	old := protoutil.NewTarget("", "old", "", querypb.Mode_MODE_WRITABLE)
+
+	t.Run("a plain statement", func(t *testing.T) {
+		gw, sc, state, conn := newSession(t)
+		err := sc.StreamExecute(context.Background(), conn, "new", "", "UPDATE t SET i = 1", nil, state, engine.PlanExecInfo{}, false, cb)
+		requireSessionEnded(t, err, "temp_table")
+		require.False(t, gw.streamExecuteCalled, "nothing runs on the new tablegroup on the strength of a lost reservation")
+		require.Nil(t, state.GetMatchingShardState(old), "the stale entry is dropped")
+	})
+	t.Run("a statement that needs a reservation of its own", func(t *testing.T) {
+		gw, sc, state, conn := newSession(t)
+		err := sc.StreamExecute(context.Background(), conn, "new", "", "CREATE TEMP TABLE y (i int)", nil, state, engine.PlanExecInfo{TempTable: true}, false, cb)
+		requireSessionEnded(t, err, "temp_table")
+		require.False(t, gw.streamExecuteCalled)
+	})
+	t.Run("a portal that cannot suspend", func(t *testing.T) {
+		gw, sc, state, conn := newSession(t)
+		err := sc.PortalStreamExecute(context.Background(), "new", "", conn, state, testPortalInfo(), 0, false, engine.PlanExecInfo{}, false, cb)
+		requireSessionEnded(t, err, "temp_table")
+		require.False(t, gw.portalCalled)
+	})
+	t.Run("a portal that may suspend", func(t *testing.T) {
+		gw, sc, state, conn := newSession(t)
+		err := sc.PortalStreamExecute(context.Background(), "new", "", conn, state, testPortalInfo(), 10, false, engine.PlanExecInfo{}, false, cb)
+		requireSessionEnded(t, err, "temp_table")
+		require.False(t, gw.portalCalled, "nothing is sent to a pooler")
+	})
+	t.Run("COPY FROM and COPY TO outside a transaction", func(t *testing.T) {
+		gw, sc, state, conn := newSession(t)
+		_, _, err := sc.CopyInitiate(context.Background(), conn, "new", "", "COPY t FROM STDIN", state, cb)
+		requireSessionEnded(t, err, "temp_table")
+		require.False(t, gw.copyReadyCalled)
+
+		gw, sc, state, conn = newSession(t)
+		_, _, _, err = sc.CopyOutInitiate(context.Background(), conn, "new", "", "COPY t TO STDOUT", state)
+		requireSessionEnded(t, err, "temp_table")
+		require.False(t, gw.copyOutReadyCalled)
+	})
+	t.Run("autonomous and control statements are not part of the session", func(t *testing.T) {
+		gw, sc, state, conn := newSession(t)
+		require.NoError(t, sc.StreamExecute(context.Background(), conn, "new", "", "SELECT pg_notify('c', 'p')", nil, state, engine.PlanExecInfo{Autonomous: true}, false, cb))
+		require.True(t, gw.streamExecuteCalled)
+		gw.streamExecuteCalled = false
+		require.NoError(t, sc.StreamExecute(context.Background(), conn, "default", "", "SELECT 1", nil, state, engine.PlanExecInfo{Control: true}, false, cb))
+		require.True(t, gw.streamExecuteCalled)
+		require.NotNil(t, state.GetMatchingShardState(old), "neither touched the session's state")
+	})
+	t.Run("on the tablegroup that holds the state nothing is refused", func(t *testing.T) {
+		gw, sc, state, conn := newSession(t)
+		require.NoError(t, sc.StreamExecute(context.Background(), conn, "old", "", "SELECT 1", nil, state, engine.PlanExecInfo{}, false, cb))
+		require.NoError(t, sc.PortalStreamExecute(context.Background(), "old", "", conn, state, testPortalInfo(), 10, false, engine.PlanExecInfo{}, false, cb))
+		require.True(t, gw.portalCalled)
+	})
+}
+
+// TestScatterConn_ASuspendedPortalInATransactionIsALostTransaction: the pooler adds the portal
+// reason to a transaction's reservation whenever a portal suspends, which a fetch-size cursor
+// does all the time. When that reservation is lost and the traffic moved it is a lost
+// transaction: 40001, a rollback, and a new transaction on the new tablegroup. A session that
+// also holds WITH HOLD cursors loses session state with the reservation, and its session ends.
+func TestScatterConn_ASuspendedPortalInATransactionIsALostTransaction(t *testing.T) {
+	ctx := context.Background()
+	old := protoutil.NewTarget("", "old", "", querypb.Mode_MODE_WRITABLE)
+	setup := func() (*mockGateway, *ScatterConn, *handler.MultigatewayConnectionState, *server.Conn) {
+		gw := &mockGateway{callbackResult: &sqltypes.Result{CommandTag: "SELECT 1"}}
+		sc := NewScatterConn(gw, slog.Default())
+		state := handler.NewMultigatewayConnectionState()
+		conn := newTestConn()
+		conn.SetTxnStatus(protocol.TxnStatusInBlock)
+		state.SetReservedConnection(old, &querypb.ReservedState{
+			ReservedConnectionId: 9,
+			PoolerId:             &clustermetadatapb.ID{Cell: "cell1", Name: "pooler1"},
+			ReservationReasons:   protoutil.ReasonTransaction | protoutil.ReasonPortal,
+		})
+		return gw, sc, state, conn
+	}
+	run := func(sc *ScatterConn, conn *server.Conn, state *handler.MultigatewayConnectionState) error {
+		return sc.StreamExecute(ctx, conn, "new", "", "UPDATE t SET i = 1", nil, state, engine.PlanExecInfo{}, false,
+			func(context.Context, *sqltypes.Result) error { return nil })
+	}
+
+	for _, withHold := range []bool{false, true} {
+		gw, sc, state, conn := setup()
+		if withHold {
+			state.OpenHoldCursors["c"] = true
+		}
+		err := run(sc, conn, state)
+		require.False(t, gw.streamExecuteCalled)
+		if withHold {
+			// A WITH HOLD cursor outlives its transaction: session state a retry cannot restore.
+			requireSessionEnded(t, err, "portal")
+			continue
+		}
+		requireEndedWith40001(t, err)
+		requireRollbackThenANewTransactionOn(t, sc, gw, conn, state, "new")
+	}
+}
+
+// TestScatterConn_ASuspendedPortalOutsideATransactionEndsTheSession: the pooler reserves a
+// portal suspended outside a transaction with the portal reason alone. When that reservation is
+// lost and the traffic moved, the portal must not be bound again on the new tablegroup on its next
+// Execute, returning its first rows again with no error: the session ends, and the stale entry
+// is dropped.
+func TestScatterConn_ASuspendedPortalOutsideATransactionEndsTheSession(t *testing.T) {
+	gw := &mockGateway{callbackResult: &sqltypes.Result{CommandTag: "SELECT 1"}}
+	sc := NewScatterConn(gw, slog.Default())
+	state := handler.NewMultigatewayConnectionState()
+	conn := newTestConn()
+	old := protoutil.NewTarget("", "old", "", querypb.Mode_MODE_WRITABLE)
+	state.SetReservedConnection(old, &querypb.ReservedState{
+		ReservedConnectionId: 9,
+		PoolerId:             &clustermetadatapb.ID{Cell: "cell1", Name: "pooler1"},
+		ReservationReasons:   protoutil.ReasonPortal,
+	})
+	err := sc.PortalStreamExecute(context.Background(), "new", "", conn, state, testPortalInfo(), 10, false, engine.PlanExecInfo{}, false,
+		func(context.Context, *sqltypes.Result) error { return nil })
+	requireSessionEnded(t, err, "portal")
+	require.False(t, gw.portalCalled, "the portal is not bound again on the new tablegroup")
+	require.Nil(t, state.GetMatchingShardState(old))
+}
+
+// TestScatterConn_ATransactionNeverSpansTablegroups: a transaction whose reservation is on one
+// tablegroup does not take a new reservation on another when the next statement targets it,
+// as it does after the application's traffic was moved: the statement fails with 40001, which
+// ends the transaction, and nothing is sent to a pooler.
+func TestScatterConn_ATransactionNeverSpansTablegroups(t *testing.T) {
+	gw := &mockGateway{callbackResult: &sqltypes.Result{CommandTag: "SELECT 1"}}
+	sc := NewScatterConn(gw, slog.Default())
+	state := handler.NewMultigatewayConnectionState()
+	conn := newTestConn()
+	beginTransactionOn(t, sc, gw, conn, state, "old")
+
+	err := sc.StreamExecute(context.Background(), conn, "new", "", "INSERT INTO t VALUES (1)", nil, state, engine.PlanExecInfo{}, false,
+		func(_ context.Context, _ *sqltypes.Result) error { return nil })
+	require.Error(t, err)
+	var pgErr *mterrors.PgDiagnostic
+	require.ErrorAs(t, err, &pgErr)
+	require.Equal(t, mterrors.PgSSSerializationFailure, pgErr.Code, "an error that ends the transaction and invites a retry of all of it")
+	require.Contains(t, err.Error(), `"old"`)
+	require.Contains(t, err.Error(), `"new"`)
+	require.False(t, gw.streamExecuteCalled, "no reservation is started on the other tablegroup")
+	require.Equal(t, protocol.TxnStatusFailed, conn.TxnStatus(), "the transaction is over until the client rolls back")
+	require.Nil(t, state.GetMatchingShardState(protoutil.NewTarget("", "old", "", querypb.Mode_MODE_WRITABLE)),
+		"the entry for the old reservation is stale, since the fence that preceded the move waited for it to be released, and is dropped")
+	requireRollbackThenANewTransactionOn(t, sc, gw, conn, state, "new")
+}
+
+// TestScatterConn_ATransactionWhoseReservationWasLostIsNotRestarted: the pooler reaped an idle
+// transaction's reservation (the gateway's state for it is gone), and traffic was moved. The
+// next statement of the transaction fails instead of starting a new transaction on the new
+// tablegroup that would commit only its second half.
+func TestScatterConn_ATransactionWhoseReservationWasLostIsNotRestarted(t *testing.T) {
+	gw := &mockGateway{callbackResult: &sqltypes.Result{CommandTag: "SELECT 1"}}
+	sc := NewScatterConn(gw, slog.Default())
+	state := handler.NewMultigatewayConnectionState()
+	conn := newTestConn()
+	beginTransactionOn(t, sc, gw, conn, state, "old")
+	state.ClearReservedConnection(protoutil.NewTarget("", "old", "", querypb.Mode_MODE_WRITABLE))
+
+	err := sc.StreamExecute(context.Background(), conn, "new", "", "INSERT INTO t VALUES (2)", nil, state, engine.PlanExecInfo{}, false,
+		func(_ context.Context, _ *sqltypes.Result) error { return nil })
+	var pgErr *mterrors.PgDiagnostic
+	require.ErrorAs(t, err, &pgErr)
+	require.Equal(t, mterrors.PgSSSerializationFailure, pgErr.Code)
+	require.Contains(t, err.Error(), "is gone")
+	require.False(t, gw.streamExecuteCalled)
+	require.Equal(t, protocol.TxnStatusFailed, conn.TxnStatus())
+}
+
+// TestScatterConn_CopyAbortForgetsTheCopyTargetEvenWhenAlreadyCleanedUp.
+func TestScatterConn_CopyAbortForgetsTheCopyTargetEvenWhenAlreadyCleanedUp(t *testing.T) {
+	gw := &mockGateway{}
+	sc := NewScatterConn(gw, slog.Default())
+	state := handler.NewMultigatewayConnectionState()
+	conn := newTestConn()
+	state.SetCopyTarget(protoutil.NewTarget("", "tg1", "", querypb.Mode_MODE_WRITABLE))
+
+	require.NoError(t, sc.CopyAbort(context.Background(), conn, "tg1", "", state))
+	require.Nil(t, state.CopyTarget())
+}
+
+// TestScatterConn_TheTransactionRuleHoldsOnEveryPath: a transaction that began on one
+// tablegroup does not start a reservation on another through any path that can: an extended
+// protocol portal, COPY FROM STDIN, and COPY TO STDOUT. Each fails with 40001, ends the
+// transaction, and sends nothing to a pooler.
+func TestScatterConn_TheTransactionRuleHoldsOnEveryPath(t *testing.T) {
+	ctx := context.Background()
+	begun := func(t *testing.T) (*mockGateway, *ScatterConn, *handler.MultigatewayConnectionState, *server.Conn) {
+		gw := &mockGateway{callbackResult: &sqltypes.Result{CommandTag: "SELECT 1"}}
+		sc := NewScatterConn(gw, slog.Default())
+		state := handler.NewMultigatewayConnectionState()
+		conn := newTestConn()
+		beginTransactionOn(t, sc, gw, conn, state, "old")
+		return gw, sc, state, conn
+	}
+	paths := map[string]func(t *testing.T, gw *mockGateway, sc *ScatterConn, state *handler.MultigatewayConnectionState, conn *server.Conn) (called bool, err error){
+		"portal": func(t *testing.T, gw *mockGateway, sc *ScatterConn, state *handler.MultigatewayConnectionState, conn *server.Conn) (bool, error) {
+			err := sc.PortalStreamExecute(ctx, "new", "", conn, state, testPortalInfo(), 0, false, engine.PlanExecInfo{}, false,
+				func(context.Context, *sqltypes.Result) error { return nil })
+			return gw.portalCalled, err
+		},
+		"copy from stdin": func(t *testing.T, gw *mockGateway, sc *ScatterConn, state *handler.MultigatewayConnectionState, conn *server.Conn) (bool, error) {
+			_, _, err := sc.CopyInitiate(ctx, conn, "new", "", "COPY t FROM STDIN", state, func(context.Context, *sqltypes.Result) error { return nil })
+			return gw.copyReadyCalled, err
+		},
+		"copy to stdout": func(t *testing.T, gw *mockGateway, sc *ScatterConn, state *handler.MultigatewayConnectionState, conn *server.Conn) (bool, error) {
+			_, _, _, err := sc.CopyOutInitiate(ctx, conn, "new", "", "COPY t TO STDOUT", state)
+			return gw.copyOutReadyCalled, err
+		},
+	}
+	for name, run := range paths {
+		t.Run(name+": transaction on another tablegroup", func(t *testing.T) {
+			gw, sc, state, conn := begun(t)
+			called, err := run(t, gw, sc, state, conn)
+			requireEndedWith40001(t, err)
+			require.Contains(t, err.Error(), `"old"`)
+			require.False(t, called, "nothing is sent to a pooler")
+			require.Equal(t, protocol.TxnStatusFailed, conn.TxnStatus())
+		})
+		t.Run(name+": transaction whose reservation was lost", func(t *testing.T) {
+			gw, sc, state, conn := begun(t)
+			state.ClearReservedConnection(protoutil.NewTarget("", "old", "", querypb.Mode_MODE_WRITABLE))
+			called, err := run(t, gw, sc, state, conn)
+			requireEndedWith40001(t, err)
+			require.Contains(t, err.Error(), "is gone")
+			require.False(t, called)
+			require.Equal(t, protocol.TxnStatusFailed, conn.TxnStatus())
+		})
+	}
+}
+
+// beginTransactionOn runs a BEGIN and a first statement on tg1 so that the session holds a
+// transaction reservation there, the way a client's does.
+func beginTransactionOn(t *testing.T, sc *ScatterConn, gw *mockGateway, conn *server.Conn, state *handler.MultigatewayConnectionState, tg string) {
+	t.Helper()
+	conn.SetTxnStatus(protocol.TxnStatusInBlock)
+	state.PendingBeginQuery = "BEGIN"
+	gw.streamExecuteReturnState = &querypb.ReservedState{
+		ReservedConnectionId: 77,
+		PoolerId:             &clustermetadatapb.ID{Cell: "cell1", Name: "pooler1"},
+		ReservationReasons:   protoutil.ReasonTransaction,
+	}
+	require.NoError(t, sc.StreamExecute(context.Background(), conn, tg, "", "SELECT 1", nil, state, engine.PlanExecInfo{}, false,
+		func(_ context.Context, _ *sqltypes.Result) error { return nil }))
+	require.Equal(t, uint64(77), state.GetMatchingShardState(protoutil.NewTarget("", tg, "", querypb.Mode_MODE_WRITABLE)).ReservedState.GetReservedConnectionId())
+	gw.streamExecuteCalled = false
+}
+
+// requireEndedWith40001 requires the error that ends a transaction and invites a retry of all
+// of it.
+func requireEndedWith40001(t *testing.T, err error) {
+	t.Helper()
+	var pgErr *mterrors.PgDiagnostic
+	require.ErrorAs(t, err, &pgErr)
+	require.Equal(t, mterrors.PgSSSerializationFailure, pgErr.Code)
+}
+
+// requireRollbackThenANewTransactionOn: after the 40001 the client rolls back, and a new
+// transaction starts and runs on the tablegroup that has the traffic.
+func requireRollbackThenANewTransactionOn(t *testing.T, sc *ScatterConn, gw *mockGateway, conn *server.Conn, state *handler.MultigatewayConnectionState, tg string) {
+	t.Helper()
+	require.NoError(t, sc.ConcludeTransaction(context.Background(), conn, state,
+		multipoolerpb.TransactionConclusion_TRANSACTION_CONCLUSION_ROLLBACK, nil, false, false,
+		func(context.Context, *sqltypes.Result) error { return nil }), "there is nothing left to roll back on a pooler")
+	conn.SetTxnStatus(protocol.TxnStatusIdle)
+	beginTransactionOn(t, sc, gw, conn, state, tg)
 }

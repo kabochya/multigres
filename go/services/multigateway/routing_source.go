@@ -22,6 +22,10 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"github.com/multigres/multigres/go/common/constants"
+	clustermetadatapb "github.com/multigres/multigres/go/pb/clustermetadata"
+	multipoolerservicepb "github.com/multigres/multigres/go/pb/multipoolerservice"
+	"github.com/multigres/multigres/go/pb/query"
 	"github.com/multigres/multigres/go/services/multigateway/executor"
 	"github.com/multigres/multigres/go/services/multigateway/poolergateway"
 	"github.com/multigres/multigres/go/tools/viperutil"
@@ -32,14 +36,15 @@ import (
 // is decided elsewhere (the sharding design), and how the gateway learns it is not decided
 // here: nothing is registered by default, and application SQL then goes to the default
 // tablegroup, as it always did. The gateway owns what an update does (the routing view,
-// the planner's tablegroup), so a source never touches those.
+// the planner's tablegroup, the requests that are waiting), so a source never touches
+// those.
 type RoutingSource interface {
 	// RegisterFlags adds the source's flags, configured in reg so that the config file and
 	// the environment apply to them as to every other flag of the gateway.
 	RegisterFlags(fs *pflag.FlagSet, reg *viperutil.Registry)
 	// Start begins following; it must not block, and stops what it started when ctx ends.
 	// A source that was not configured does nothing.
-	Start(ctx context.Context, sink RoutingSink, logger *slog.Logger) error
+	Start(ctx context.Context, sink RoutingSink, control ControlPlane, logger *slog.Logger) error
 }
 
 // RoutingSink is where a source pushes the routing it learns.
@@ -54,13 +59,13 @@ type RoutingSink interface {
 	// Update records the application tablegroup of a database at a version. A version at
 	// or below the one applied is ignored, so an older read arriving late changes nothing.
 	// It reports whether the application tablegroup changed.
-	//
-	// Swapping the tablegroup of a database while client transactions are open on the
-	// previous one is not safe without a fence: the rest of such a transaction would run on
-	// the new tablegroup, or on a backend the old tablegroup no longer serves from. A source
-	// that swaps has to make sure none is open, which this interface does not do. The static
-	// prototype source never swaps after startup.
 	Update(database, tablegroup string, version int64) (changed bool, err error)
+}
+
+// ControlPlane is how a source reaches the default primary, over the control path: a closed
+// application gate does not hold such a request back.
+type ControlPlane interface {
+	DefaultPrimary(database string) (multipoolerservicepb.MultipoolerServiceClient, error)
 }
 
 // routingSourceFactories build the registered sources. Each gateway builds its own, so that
@@ -73,7 +78,7 @@ func RegisterRoutingSource(newSource func() RoutingSource) {
 	routingSourceFactories = append(routingSourceFactories, newSource)
 }
 
-// gatewayRouting is the gateway's side of the sink.
+// gatewayRouting is the gateway's side of the sink and the control plane.
 type gatewayRouting struct {
 	executor *executor.Executor
 	pg       *poolergateway.PoolerGateway
@@ -95,7 +100,8 @@ func (g *gatewayRouting) Follow(database string) error {
 	routing := poolergateway.NewAppRouting(database)
 	// Until the first update the planner targets a pending tablegroup that fails closed.
 	g.executor.SetApplicationTableGroup(database, poolergateway.PendingAppTableGroup)
-	// Plan against the new tablegroup in the same step as the routing view changes.
+	// Plan against the new tablegroup first, in the same step as the routing view changes,
+	// then release what was held for the old one.
 	routing.OnChangeInStep(func(_, tg string) {
 		g.executor.SetApplicationTableGroup(database, tg)
 	})
@@ -112,4 +118,16 @@ func (g *gatewayRouting) Update(database, tablegroup string, version int64) (boo
 		return false, fmt.Errorf("the application routing of database %q is not being followed", database)
 	}
 	return routing.Update(tablegroup, version), nil
+}
+
+func (g *gatewayRouting) DefaultPrimary(database string) (multipoolerservicepb.MultipoolerServiceClient, error) {
+	conn, err := g.pg.GetConnection(&query.Target{
+		ShardKey: &clustermetadatapb.ShardKey{Database: database, TableGroup: constants.DefaultTableGroup, Shard: constants.DefaultShard},
+		Mode:     query.Mode_MODE_WRITABLE,
+		Control:  true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return conn.ServiceClient(), nil
 }

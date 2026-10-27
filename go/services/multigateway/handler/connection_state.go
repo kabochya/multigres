@@ -100,6 +100,12 @@ type MultigatewayConnectionState struct {
 	// so it genuinely belongs to connection state.
 	PendingBeginQuery string
 
+	// copyTarget is the target the active COPY was established on. Routing can
+	// re-resolve a COPY's target while it waits to start (application routing
+	// moving), so the data phase must use the target the reservation was recorded
+	// under, not rebuild one from the statement's plan. Guarded by mu.
+	copyTarget *query.Target
+
 	// ActiveTransactionBeginQuery stores the BEGIN/START statement that describes
 	// the current transaction's characteristics. PendingBeginQuery is consumed when
 	// the first backend reservation starts the transaction; this copy survives that
@@ -396,6 +402,27 @@ func NewShardState(target *query.Target) *ShardState {
 	return &ShardState{
 		Target: target,
 	}
+}
+
+// SetCopyTarget records the target the active COPY was established on.
+func (m *MultigatewayConnectionState) SetCopyTarget(t *query.Target) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.copyTarget = t
+}
+
+// CopyTarget returns the target the active COPY was established on, or nil.
+func (m *MultigatewayConnectionState) CopyTarget() *query.Target {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.copyTarget
+}
+
+// ClearCopyTarget forgets the active COPY's target.
+func (m *MultigatewayConnectionState) ClearCopyTarget() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.copyTarget = nil
 }
 
 // GetMatchingShardState gets the shardState (if any) that matches the target specified.

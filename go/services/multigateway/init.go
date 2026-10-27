@@ -440,7 +440,8 @@ func (mg *Multigateway) Init(ctx context.Context, ts topoclient.Store) error {
 					TableGroup: constants.DefaultTableGroup,
 					Shard:      constants.DefaultShard,
 				},
-				Mode: querypb.Mode_MODE_WRITABLE,
+				Mode:    querypb.Mode_MODE_WRITABLE,
+				Control: true,
 			})
 			if err != nil || conn == nil {
 				return nil
@@ -477,7 +478,7 @@ func (mg *Multigateway) Init(ctx context.Context, ts topoclient.Store) error {
 	// application's traffic goes and tells the gateway.
 	routing := &gatewayRouting{executor: mg.executor, pg: mg.poolerGateway}
 	for _, src := range mg.routingSources {
-		if err := src.Start(mg.shutdownCtx, routing, logger); err != nil {
+		if err := src.Start(mg.shutdownCtx, routing, routing, logger); err != nil {
 			return fmt.Errorf("start routing source: %w", err)
 		}
 	}

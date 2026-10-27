@@ -742,9 +742,11 @@ func (p *Planner) planUnlistenStmt(sql string, stmt *ast.UnlistenStmt) (*engine.
 
 // planNotifyStmt plans NOTIFY. LISTEN subscribes on the default cohort and stays
 // there, so a NOTIFY is always sent there; anywhere else it would never be delivered.
-// It is control traffic: application routing never moves it.
+// It is control traffic: it writes no table data, so a fenced default tablegroup
+// still serves it.
 //
-// While the application tablegroup is not the default one, a NOTIFY inside a transaction is not sent when it is
+// While the application tablegroup is not the default one (before a cutover into
+// it, or after a rollback), a NOTIFY inside a transaction is not sent when it is
 // issued but after the transaction has committed, and is discarded by a rollback (see
 // engine.NotifyPrimitive). Once the application tablegroup is the default one,
 // application tables, triggers, NOTIFY and LISTEN are all on its primary: a NOTIFY
