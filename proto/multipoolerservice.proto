@@ -704,6 +704,13 @@ message StreamPoolerHealthResponse {
   // replication_lag_ns is the current replication lag in nanoseconds,
   // measured via heartbeat timestamps. Zero on a leader or when unknown.
   int64 replication_lag_ns = 6;
+
+  // backend_ready is true while an unmanaged pooler's external backend is
+  // reachable, writable, and matches the identity of its backing connection.
+  // It is false while unverified, on an identity mismatch, and on any managed
+  // pooler (whose readiness is reported through serving_status and
+  // routing_state).
+  bool backend_ready = 7;
 }
 
 // BackingConnection is the configuration of an external PostgreSQL. It names one
