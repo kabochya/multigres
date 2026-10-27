@@ -119,6 +119,10 @@ type PoolerGateway struct {
 	// gateway shuts the cache down, which tears down everything in turn.
 	cache *poolerwatch.PoolerCache[*poolerConnection]
 
+	// appRouting, when set, steers application targets to the tablegroup the
+	// application's traffic goes to. See app_routing.go.
+	appRouting *AppRouting
+
 	// logger for debugging
 	logger *slog.Logger
 }
@@ -371,12 +375,15 @@ func (pg *PoolerGateway) withBuffering(
 	inner func(conn *poolerConnection) error,
 ) error {
 	bufferedOnce := false
-	// Buffer operations are keyed on the target's full ShardKey
-	// (database + tableGroup + shard) — no need to copy field-by-field.
-	sk := target.GetShardKey()
 
 	var err error
 	for range constants.MaxBufferingRetries + 1 {
+		// Re-resolve the application tablegroup on every attempt, so that a retry uses the
+		// routing as it is then.
+		rewriteErr := pg.appRouting.Rewrite(target)
+		// Buffer operations are keyed on the target's full ShardKey
+		// (database + tableGroup + shard) — no need to copy field-by-field.
+		sk := target.GetShardKey()
 		if pg.buffer != nil && !bufferedOnce && modeRequiresLeader(target.GetMode()) {
 			var retryDone buffer.RetryDoneFunc
 			var bufErr error
@@ -409,7 +416,11 @@ func (pg *PoolerGateway) withBuffering(
 		}
 
 		var conn *poolerConnection
-		conn, err = pg.loadBalancer.getConnection(target)
+		if rewriteErr != nil {
+			err = rewriteErr
+		} else {
+			conn, err = pg.loadBalancer.getConnection(target)
+		}
 		if err != nil {
 			if classifyError(err, target, retryReadOnlyError) == actionBuffer {
 				continue
@@ -692,7 +703,7 @@ func (pg *PoolerGateway) GetAuthCredentials(ctx context.Context, req *multipoole
 	target := &query.Target{
 		ShardKey: &clustermetadatapb.ShardKey{
 			Database:   req.GetDatabase(),
-			TableGroup: "default", // TODO: discover the auth tablegroup from cluster config
+			TableGroup: pg.appRouting.AuthTableGroup(req.GetDatabase()), // the application tablegroup once routing is known
 			Shard:      constants.DefaultShard,
 		},
 		Mode: query.Mode_MODE_WRITABLE,
