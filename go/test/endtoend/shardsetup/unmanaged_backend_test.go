@@ -157,6 +157,22 @@ func seedExternalTablegroup(t *testing.T, s *ShardSetup, tablegroup, connection,
 	return id, resp.GetOperationId()
 }
 
+// activateTablegroup completes a tablegroup's creation in the catalog by hand: its shards, the
+// tablegroup and its operation become active and done, as the completion of a creation will do
+// once the catalog has one, which routing rules need of the tablegroup they target.
+func activateTablegroup(t *testing.T, s *ShardSetup, id int64) {
+	t.Helper()
+	conn := s.ConnectPrimaryAdmin(t)
+	for _, stmt := range []string{
+		`UPDATE multigres.shard SET state = 'active' WHERE tablegroup_id = $1`,
+		`UPDATE multigres.tablegroup SET state = 'active' WHERE tablegroup_id = $1`,
+		`UPDATE multigres.operation SET state = 'done' WHERE kind = 'create_tablegroup' AND (request->>'tablegroup_id')::bigint = $1`,
+	} {
+		_, err := conn.Exec(t.Context(), stmt, id)
+		require.NoError(t, err, stmt)
+	}
+}
+
 // unmanagedPooler is a running unmanaged multipooler process.
 type unmanagedPooler struct {
 	name     string
