@@ -3396,9 +3396,15 @@ type CreateTableGroupRequest struct {
 	// if_not_exists makes an already-active tablegroup of this name a no-op
 	// (already_exists is set on the response) instead of an error, and joins a
 	// creation of this name already in flight whatever its layout.
-	IfNotExists   bool `protobuf:"varint,3,opt,name=if_not_exists,json=ifNotExists,proto3" json:"if_not_exists,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	IfNotExists bool `protobuf:"varint,3,opt,name=if_not_exists,json=ifNotExists,proto3" json:"if_not_exists,omitempty"`
+	// backing_connection names the connection (in the catalog's connections
+	// table) of an external PostgreSQL that serves the tablegroup instead of
+	// multigres-managed shards. Empty means a managed tablegroup. The binding is
+	// fixed at creation. An external tablegroup has exactly one shard, 0-inf,
+	// and the default tablegroup never has a binding.
+	BackingConnection string `protobuf:"bytes,4,opt,name=backing_connection,json=backingConnection,proto3" json:"backing_connection,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *CreateTableGroupRequest) Reset() {
@@ -3450,6 +3456,13 @@ func (x *CreateTableGroupRequest) GetIfNotExists() bool {
 		return x.IfNotExists
 	}
 	return false
+}
+
+func (x *CreateTableGroupRequest) GetBackingConnection() string {
+	if x != nil {
+		return x.BackingConnection
+	}
+	return ""
 }
 
 // CreateTableGroupResponse identifies the operation that creates the tablegroup.
@@ -3999,9 +4012,14 @@ type TableGroup struct {
 	Name         string          `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	State        TableGroupState `protobuf:"varint,3,opt,name=state,proto3,enum=multipoolermanagerdata.TableGroupState" json:"state,omitempty"`
 	// shards is the shard layout in canonical order.
-	Shards        []string `protobuf:"bytes,4,rep,name=shards,proto3" json:"shards,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Shards []string `protobuf:"bytes,4,rep,name=shards,proto3" json:"shards,omitempty"`
+	// backing_connection is the name of the connection of the external
+	// PostgreSQL that serves the tablegroup. Empty for a managed tablegroup.
+	// Provisioners start one unmanaged pooler for a tablegroup that has one,
+	// and no pgctld, multiorch or backups.
+	BackingConnection string `protobuf:"bytes,5,opt,name=backing_connection,json=backingConnection,proto3" json:"backing_connection,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *TableGroup) Reset() {
@@ -4060,6 +4078,13 @@ func (x *TableGroup) GetShards() []string {
 		return x.Shards
 	}
 	return nil
+}
+
+func (x *TableGroup) GetBackingConnection() string {
+	if x != nil {
+		return x.BackingConnection
+	}
+	return ""
 }
 
 var File_multipoolermanagerdata_proto protoreflect.FileDescriptor
@@ -4246,11 +4271,12 @@ const file_multipoolermanagerdata_proto_rawDesc = "" +
 	"\x0fSettingMismatch\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12)\n" +
-	"\x10requires_restart\x18\x03 \x01(\bR\x0frequiresRestart\"i\n" +
+	"\x10requires_restart\x18\x03 \x01(\bR\x0frequiresRestart\"\x98\x01\n" +
 	"\x17CreateTableGroupRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
 	"\x06shards\x18\x02 \x03(\tR\x06shards\x12\"\n" +
-	"\rif_not_exists\x18\x03 \x01(\bR\vifNotExists\"\x89\x01\n" +
+	"\rif_not_exists\x18\x03 \x01(\bR\vifNotExists\x12-\n" +
+	"\x12backing_connection\x18\x04 \x01(\tR\x11backingConnection\"\x89\x01\n" +
 	"\x18CreateTableGroupResponse\x12!\n" +
 	"\foperation_id\x18\x01 \x01(\tR\voperationId\x12#\n" +
 	"\rtablegroup_id\x18\x02 \x01(\x03R\ftablegroupId\x12%\n" +
@@ -4286,13 +4312,14 @@ const file_multipoolermanagerdata_proto_rawDesc = "" +
 	"\x12cancelled_creation\x18\x04 \x01(\bR\x11cancelledCreation\"\x18\n" +
 	"\x16ListTableGroupsRequest\"`\n" +
 	"\x17ListTableGroupsResponse\x12E\n" +
-	"\ftable_groups\x18\x01 \x03(\v2\".multipoolermanagerdata.TableGroupR\vtableGroups\"\x9c\x01\n" +
+	"\ftable_groups\x18\x01 \x03(\v2\".multipoolermanagerdata.TableGroupR\vtableGroups\"\xcb\x01\n" +
 	"\n" +
 	"TableGroup\x12#\n" +
 	"\rtablegroup_id\x18\x01 \x01(\x03R\ftablegroupId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12=\n" +
 	"\x05state\x18\x03 \x01(\x0e2'.multipoolermanagerdata.TableGroupStateR\x05state\x12\x16\n" +
-	"\x06shards\x18\x04 \x03(\tR\x06shards*\xa4\x01\n" +
+	"\x06shards\x18\x04 \x03(\tR\x06shards\x12-\n" +
+	"\x12backing_connection\x18\x05 \x01(\tR\x11backingConnection*\xa4\x01\n" +
 	"\x0ePostgresStatus\x12\x1b\n" +
 	"\x17POSTGRES_STATUS_UNKNOWN\x10\x00\x12\x1c\n" +
 	"\x18POSTGRES_STATUS_STARTING\x10\x01\x12\x1b\n" +

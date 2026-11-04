@@ -83,6 +83,8 @@ CREATE TABLE IF NOT EXISTS multigres.connections (
 	owner_role    text NOT NULL DEFAULT '',
 	created_at    timestamptz NOT NULL DEFAULT now()
 )
+== table
+ALTER TABLE multigres.tablegroup ADD COLUMN IF NOT EXISTS backing_connection_id bigint REFERENCES multigres.connections (connection_id)
 == seed
 INSERT INTO multigres.catalog_state (format_version) VALUES (0) ON CONFLICT (singleton) DO NOTHING
 == seed

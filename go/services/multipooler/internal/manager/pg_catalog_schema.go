@@ -194,6 +194,13 @@ var catalogTables = []string{
 	updated_at       timestamptz NOT NULL DEFAULT now()
 )`,
 	connectionsTableSQL,
+	// A tablegroup served by an external PostgreSQL names that postgres's
+	// connection here; NULL is a managed tablegroup. It is set when the
+	// tablegroup is created and never updated, and the default tablegroup never
+	// has one. It is appended rather than added to the CREATE TABLE above:
+	// existing catalogs already have that table, and the connections table it
+	// references is declared after it.
+	`ALTER TABLE multigres.tablegroup ADD COLUMN IF NOT EXISTS backing_connection_id bigint REFERENCES multigres.connections (connection_id)`,
 }
 
 // catalogSeed inserts the catalog's initial rows. Every insert is idempotent
