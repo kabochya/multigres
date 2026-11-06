@@ -179,10 +179,9 @@ PostgreSQL fronted by unmanaged poolers of tablegroup `srctg`, shard `0-inf`.
    CREATE TABLEGROUP srctg CONNECTION src;
    ```
 
-   `srctg` has one shard, `0-inf`, served by an unmanaged pooler, and becomes
-   `active` once that pooler serves. `CREATE TABLEGROUP ... CONNECTION` is not
-   available yet; until it is, `srctg` must already exist, be `active` and be
-   bound to the connection.
+   `srctg` has one shard, `0-inf`, served by one unmanaged pooler. The
+   `CREATE TABLEGROUP` statement returns once `srctg` is `active`, which is once
+   that pooler serves.
 
 3. Quiesce the application, then route `default` to `srctg`. The call returns
    the new routing version, and running it again changes nothing:
