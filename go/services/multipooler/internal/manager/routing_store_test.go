@@ -286,12 +286,12 @@ func TestEnsureImportTarget(t *testing.T) {
 		},
 		{
 			name: "done operation", tablegroup: "srctg",
-			results: map[string]*sqltypes.Result{selectOperationForUpdateSQL: opRow(importOperationKind, opStateDone, 2, "srctg")},
+			results: map[string]*sqltypes.Result{selectOperationForUpdateSQL: opRow(importOperationKind, operationStateDone, 2, "srctg")},
 			code:    mtrpcpb.Code_FAILED_PRECONDITION, contains: "is done",
 		},
 		{
 			name: "failed operation", tablegroup: "srctg",
-			results: map[string]*sqltypes.Result{selectOperationForUpdateSQL: opRow(importOperationKind, opStateFailed, 2, "srctg")},
+			results: map[string]*sqltypes.Result{selectOperationForUpdateSQL: opRow(importOperationKind, operationStateFailed, 2, "srctg")},
 			code:    mtrpcpb.Code_FAILED_PRECONDITION, contains: "is failed",
 		},
 		{

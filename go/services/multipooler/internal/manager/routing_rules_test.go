@@ -195,13 +195,13 @@ func TestPlanRoutingRuleChange_UnusableCatalog(t *testing.T) {
 		},
 		{
 			name:     "done operation",
-			modify:   func(cat *routingCatalog) { cat.operation.state = opStateDone },
+			modify:   func(cat *routingCatalog) { cat.operation.state = operationStateDone },
 			spec:     spec("default", "srctg", "0-inf"),
 			contains: "is done and may not change routing",
 		},
 		{
 			name:     "failed operation",
-			modify:   func(cat *routingCatalog) { cat.operation.state = opStateFailed },
+			modify:   func(cat *routingCatalog) { cat.operation.state = operationStateFailed },
 			spec:     spec("default", "srctg", "0-inf"),
 			contains: "is failed and may not change routing",
 		},

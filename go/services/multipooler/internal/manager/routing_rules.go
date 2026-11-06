@@ -51,21 +51,15 @@ const (
 // only kind that may route the default tablegroup (see validateRuleChange).
 const importOperationKind = "import"
 
-// The multigres.operation states of an operation that has finished, whatever
-// its kind. A cancelled operation ends failed.
-const (
-	opStateDone   = "done"
-	opStateFailed = "failed"
-)
-
-// terminalOperationStates are the states of an operation that has finished:
-// it may no longer change routing.
-var terminalOperationStates = []string{opStateDone, opStateFailed}
+// terminalOperationStates are the multigres.operation states of an operation
+// that has finished, whatever its kind (see tablegroup_ops.go): it may no
+// longer change routing. A cancelled operation ends failed.
+var terminalOperationStates = []string{operationStateDone, operationStateFailed}
 
 // unfinishedOperationSQL holds for a multigres.operation row whose state is
 // none of terminalOperationStates. The internal query service takes no array
 // arguments, so the list is spelled out from the same constants.
-const unfinishedOperationSQL = `state NOT IN ('` + opStateDone + `', '` + opStateFailed + `')`
+const unfinishedOperationSQL = `state NOT IN ('` + operationStateDone + `', '` + operationStateFailed + `')`
 
 // catalogTablegroup is a multigres.tablegroup row.
 type catalogTablegroup struct {
