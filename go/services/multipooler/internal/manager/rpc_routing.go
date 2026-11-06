@@ -124,26 +124,37 @@ func (pm *MultipoolerManager) DeleteRoutingRules(ctx context.Context, req *multi
 	return &multipoolermanagerdatapb.DeleteRoutingRulesResponse{RoutingVersion: version}, nil
 }
 
-// EnsureImportTarget creates, if absent, an import operation and the
-// tablegroup it imports into with its full-range shard.
+// EnsureImportTarget makes an import route the database's default tablegroup
+// to its target tablegroup: it creates the import operation if absent and
+// writes the default rule unless it is already in place. The target must
+// already exist, be active and be bound to a backing connection (CREATE
+// TABLEGROUP ... CONNECTION). It switches the database's application
+// traffic, so the application must be quiesced first.
+//
+// Unlike SetRoutingRules it takes no expected routing version: its result,
+// the import's single default rule, does not depend on anything the caller
+// read before, so it is checked under the catalog_state lock instead.
 //
 // It is temporary, for the first version of imports, and will be deprecated:
-// tablegroup creation (the equivalent of CREATE TABLEGROUP) plus the import's
-// PREPARE step (registering its tables, the default rule and fencing) will
-// replace it.
+// a routing statement plus the import's PREPARE step (registering its tables,
+// the default rule and fencing) will replace it.
 func (pm *MultipoolerManager) EnsureImportTarget(ctx context.Context, req *multipoolermanagerdatapb.EnsureImportTargetRequest) (*multipoolermanagerdatapb.EnsureImportTargetResponse, error) {
 	if err := pm.requireCatalogPrimary(req.GetDatabase()); err != nil {
 		return nil, err
 	}
+	var write routingWrite
 	err := pm.inRoutingTx(ctx, setReadCommittedSQL, func(ctx context.Context, tx executor.InternalTx) error {
-		return ensureImportTarget(ctx, tx, req.GetOperationId(), req.GetTablegroup())
+		var err error
+		write, err = ensureImportTarget(ctx, tx, req.GetOperationId(), req.GetTablegroup())
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
+	pm.metrics.recordRoutingRules(ctx, req.GetDatabase(), write.rules)
 	pm.logger.InfoContext(ctx, "ensured import target",
-		"operation_id", req.GetOperationId(), "tablegroup", req.GetTablegroup())
-	return &multipoolermanagerdatapb.EnsureImportTargetResponse{}, nil
+		"operation_id", req.GetOperationId(), "tablegroup", req.GetTablegroup(), "routing_version", write.version)
+	return &multipoolermanagerdatapb.EnsureImportTargetResponse{RoutingVersion: write.version}, nil
 }
 
 // applyRoutingRuleChange writes change in its own READ COMMITTED transaction

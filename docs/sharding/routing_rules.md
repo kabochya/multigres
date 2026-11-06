@@ -138,13 +138,16 @@ The catalog primary serves the RPCs; multiadmin forwards them to it.
 | `SetRoutingRules`    | `PUT /api/v1/databases/{database}/routing/operations/{operation_id}/rules`                             | MultipoolerManager |
 | `DeleteRoutingRules` | `DELETE /api/v1/databases/{database}/routing/operations/{operation_id}/rules?expectedRoutingVersion=N` | MultipoolerManager |
 
-`EnsureImportTarget` creates, if absent, the import operation, the tablegroup
-it imports into and that tablegroup's `0-inf` shard. It changes no routing.
-It refuses a tablegroup another unfinished operation acts on.
+`EnsureImportTarget` routes `default` to an import's target tablegroup: it
+creates the import operation if absent and writes the `default` rule unless it
+is already in place, validated like any rule write. The target must already
+exist, be `active` and be bound to a backing connection, and no other
+unfinished operation may act on it. It takes no expected routing version,
+since its result does not depend on anything the caller read before; it
+switches the application's traffic, so **quiesce the application first**.
 The RPC is temporary, for the first version of imports, and will be
-deprecated. Tablegroup creation (the equivalent of `CREATE TABLEGROUP`) plus
-the import's PREPARE step (registering its tables, the default rule and
-fencing) will replace it.
+deprecated. A routing statement plus the import's PREPARE step (registering
+its tables, the default rule and fencing) will replace it.
 
 Errors: a pooler that is not the catalog primary answers `UNAVAILABLE` (find
 the primary and retry); a stale expected version or a change the catalog does
@@ -169,33 +172,32 @@ PostgreSQL fronted by unmanaged poolers of tablegroup `srctg`, shard `0-inf`.
    psql "$APP_DEFAULT_PRIMARY_URL" --file=roles.sql
    ```
 
-2. Create the import operation and the target tablegroup:
+2. Store the external PostgreSQL's connection and create `srctg` bound to it:
+
+   ```sql
+   CREATE CONNECTION src OPTIONS (host 'source.example.com', dbname 'app');
+   CREATE TABLEGROUP srctg CONNECTION src;
+   ```
+
+   `srctg` has one shard, `0-inf`, served by an unmanaged pooler, and becomes
+   `active` once that pooler serves. `CREATE TABLEGROUP ... CONNECTION` is not
+   available yet; until it is, `srctg` must already exist, be `active` and be
+   bound to the connection.
+
+3. Quiesce the application, then route `default` to `srctg`. The call returns
+   the new routing version, and running it again changes nothing:
 
    ```bash
    curl -X PUT "$MULTIADMIN/api/v1/databases/app/routing/operations/$OP/import-target" -H 'Content-Type: application/json' \
      -d '{"tablegroup": "srctg"}'
    ```
 
-3. Read the current routing version:
-
-   ```bash
-   curl "$MULTIADMIN/api/v1/databases/app/routing"
-   ```
-
-4. Quiesce the application, then route `default` to `srctg`, passing the version
-   from step 3:
-
-   ```bash
-   curl -X PUT "$MULTIADMIN/api/v1/databases/app/routing/operations/$OP/rules" -H 'Content-Type: application/json' \
-     -d '{"rules": [{"fromTablegroup": "default", "toTablegroup": "srctg", "toShard": "0-inf"}], "expectedRoutingVersion": "0"}'
-   ```
-
-5. Within one poll interval, every gateway sends `app`'s application traffic
+4. Within one poll interval, every gateway sends `app`'s application traffic
    to `srctg`. Verify through a gateway, for example by reading a row that only
    the external PostgreSQL has, and check `GET .../routing` lists the rule.
 
-6. Deleting the rule undoes step 4. It is safe only while the application
-   does not yet rely on `srctg`, for example right after the check in step 5:
+5. Deleting the rule undoes step 3. It is safe only while the application
+   does not yet rely on `srctg`, for example right after the check in step 4:
    quiesce the application and delete the rule, passing the version the
    previous call returned. Once the application runs on `srctg`, deleting the
    rule sends its traffic to `default`, which does not have the external

@@ -4059,8 +4059,8 @@ export class DeleteRoutingRulesResponse extends Message<DeleteRoutingRulesRespon
 }
 
 /**
- * EnsureImportTargetRequest creates, if they do not exist, an import
- * operation and the tablegroup it imports into, with its single 0-inf shard.
+ * EnsureImportTargetRequest routes the default tablegroup to an import's
+ * target tablegroup, creating the import operation if it does not exist.
  *
  * @generated from message multipoolermanagerdata.EnsureImportTargetRequest
  */
@@ -4081,8 +4081,9 @@ export class EnsureImportTargetRequest extends Message<EnsureImportTargetRequest
 
   /**
    * tablegroup is the tablegroup the import serves the source database from.
-   * It may not be the default tablegroup, nor one another unfinished
-   * operation acts on, such as a tablegroup being created.
+   * It must exist, be active and be bound to a backing connection (created
+   * with CREATE TABLEGROUP ... CONNECTION), and no other unfinished operation
+   * may act on it. It may not be the default tablegroup.
    *
    * @generated from field: string tablegroup = 3;
    */
@@ -4119,12 +4120,17 @@ export class EnsureImportTargetRequest extends Message<EnsureImportTargetRequest
 }
 
 /**
- * EnsureImportTargetResponse confirms the operation, the tablegroup and its
- * shard exist.
+ * EnsureImportTargetResponse returns the routing version once the import's
+ * default rule is in place.
  *
  * @generated from message multipoolermanagerdata.EnsureImportTargetResponse
  */
 export class EnsureImportTargetResponse extends Message<EnsureImportTargetResponse> {
+  /**
+   * @generated from field: int64 routing_version = 1;
+   */
+  routingVersion = protoInt64.zero;
+
   constructor(data?: PartialMessage<EnsureImportTargetResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -4133,6 +4139,7 @@ export class EnsureImportTargetResponse extends Message<EnsureImportTargetRespon
   static readonly runtime: typeof proto3 = proto3;
   static readonly typeName = "multipoolermanagerdata.EnsureImportTargetResponse";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "routing_version", kind: "scalar", T: 3 /* ScalarType.INT64 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EnsureImportTargetResponse {

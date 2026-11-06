@@ -144,6 +144,7 @@ func seedExternalTablegroup(t *testing.T, s *ShardSetup, tablegroup, connection,
 	t.Cleanup(func() {
 		ctx := context.Background()
 		for _, stmt := range []string{
+			`DELETE FROM multigres.routing_rule WHERE to_tablegroup_id = $1`,
 			`DELETE FROM multigres.shard WHERE tablegroup_id = $1`,
 			`DELETE FROM multigres.operation WHERE kind = 'create_tablegroup' AND (request->>'tablegroup_id')::bigint = $1`,
 			`DELETE FROM multigres.tablegroup WHERE tablegroup_id = $1`,

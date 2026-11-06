@@ -200,8 +200,8 @@ func (s *managerService) DeleteRoutingRules(ctx context.Context, req *multipoole
 	return resp, nil
 }
 
-// EnsureImportTarget creates an import's operation and target tablegroup if
-// absent. Only the catalog primary serves it.
+// EnsureImportTarget routes the default tablegroup to an import's target
+// tablegroup. Only the catalog primary serves it.
 func (s *managerService) EnsureImportTarget(ctx context.Context, req *multipoolermanagerdatapb.EnsureImportTargetRequest) (*multipoolermanagerdatapb.EnsureImportTargetResponse, error) {
 	resp, err := s.manager.EnsureImportTarget(ctx, req)
 	if err != nil {

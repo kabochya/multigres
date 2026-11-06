@@ -96,13 +96,10 @@ VALUES ($1::uuid, $2, $3, $4::jsonb)`
 WHERE (request->>'tablegroup_id')::bigint = $1 AND operation_id <> $2::uuid AND ` + unfinishedOperationSQL + `
 LIMIT 1`
 
-	selectTablegroupByNameSQL = `SELECT tablegroup_id, state FROM multigres.tablegroup WHERE name = $1`
-
-	insertTablegroupSQL = `INSERT INTO multigres.tablegroup (name, state) VALUES ($1, 'active') RETURNING tablegroup_id`
-
-	selectShardNamesSQL = `SELECT shard_name FROM multigres.shard WHERE tablegroup_id = $1 ORDER BY shard_name`
-
-	insertFullShardSQL = `INSERT INTO multigres.shard (tablegroup_id, shard_name, state) VALUES ($1, $2, 'active')`
+	// selectImportTargetSQL reads the tablegroup an import routes to: its
+	// id, its state and whether it is bound to a backing connection.
+	selectImportTargetSQL = `SELECT tablegroup_id, state, backing_connection_id IS NOT NULL
+FROM multigres.tablegroup WHERE name = $1`
 )
 
 // importOperationInitialState is the state a new import operation starts in.
@@ -342,36 +339,43 @@ func readRoutingSnapshot(ctx context.Context, tx executor.InternalTx) (*multipoo
 	return resp, nil
 }
 
-// ensureImportTarget creates, in tx, the import operation operationID and the
-// tablegroup it imports into with its single full-range shard, each only if it
-// does not exist. It changes no routing, so the routing version stays, but it
-// locks catalog_state first like a rule write: rule validation reads
-// operation, tablegroup and shard rows, which must not change under it.
+// ensureImportTarget makes, in tx, the import operation operationID route the
+// default tablegroup to tablegroup's 0-inf shard. tablegroup must already
+// exist, be active and be bound to a backing connection, and no other
+// unfinished operation may act on it. The operation is created if it does
+// not exist; the default rule is written if it is not already the operation's
+// rule set, through the same validation as a rule write. It returns the
+// routing version and the database's rule count afterwards.
 //
 // It backs the EnsureImportTarget RPC, which is temporary, for the first
-// version of imports, and will be deprecated: tablegroup creation (the
-// equivalent of CREATE TABLEGROUP) plus the import's PREPARE step
-// (registering its tables, the default rule and fencing) will replace it.
-func ensureImportTarget(ctx context.Context, tx executor.InternalTx, operationID, tablegroup string) error {
+// version of imports, and will be deprecated: a routing statement plus the
+// import's PREPARE step (registering its tables, the default rule and
+// fencing) will replace it.
+func ensureImportTarget(ctx context.Context, tx executor.InternalTx, operationID, tablegroup string) (routingWrite, error) {
 	if _, err := uuid.Parse(operationID); err != nil {
-		return mterrors.Errorf(mtrpcpb.Code_INVALID_ARGUMENT, "invalid operation id %q: %v", operationID, err)
+		return routingWrite{}, mterrors.Errorf(mtrpcpb.Code_INVALID_ARGUMENT, "invalid operation id %q: %v", operationID, err)
 	}
 	if tablegroup == constants.DefaultTableGroup {
-		return mterrors.Errorf(mtrpcpb.Code_INVALID_ARGUMENT, "an import cannot target the %s tablegroup", constants.DefaultTableGroup)
+		return routingWrite{}, mterrors.Errorf(mtrpcpb.Code_INVALID_ARGUMENT, "an import cannot target the %s tablegroup", constants.DefaultTableGroup)
 	}
 	if err := keyrange.ValidateTableGroupAndShard(tablegroup, constants.DefaultShard); err != nil {
-		return mterrors.Errorf(mtrpcpb.Code_INVALID_ARGUMENT, "invalid tablegroup: %v", err)
+		return routingWrite{}, mterrors.Errorf(mtrpcpb.Code_INVALID_ARGUMENT, "invalid tablegroup: %v", err)
 	}
 
-	if _, err := tx.Query(ctx, lockRoutingStateSQL); err != nil {
-		return mterrors.Wrap(err, "failed to lock catalog state")
+	result, err := tx.Query(ctx, lockRoutingStateSQL)
+	if err != nil {
+		return routingWrite{}, mterrors.Wrap(err, "failed to lock catalog state")
+	}
+	var routingVersion, planEpoch int64
+	if err := executor.ScanSingleRow(result, &routingVersion, &planEpoch); err != nil {
+		return routingWrite{}, mterrors.Wrap(err, "failed to read routing version")
 	}
 
 	// An existing operation must be this import. Its tablegroup is checked
 	// once the tablegroup's id is known.
-	result, err := tx.QueryArgs(ctx, selectOperationForUpdateSQL, operationID)
+	result, err = tx.QueryArgs(ctx, selectOperationForUpdateSQL, operationID)
 	if err != nil {
-		return mterrors.Wrap(err, "failed to read operation")
+		return routingWrite{}, mterrors.Wrap(err, "failed to read operation")
 	}
 	opExists := len(result.Rows) > 0
 	var opTablegroupID *int64
@@ -379,83 +383,79 @@ func ensureImportTarget(ctx context.Context, tx executor.InternalTx, operationID
 	if opExists {
 		var kind, state string
 		if err := executor.ScanRow(result.Rows[0], &kind, &state, &opTablegroupID, &opTablegroupName); err != nil {
-			return mterrors.Wrap(err, "failed to read operation")
+			return routingWrite{}, mterrors.Wrap(err, "failed to read operation")
 		}
 		switch {
 		case kind != importOperationKind:
-			return mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION, "operation %s is a %s, not an import", operationID, kind)
+			return routingWrite{}, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION, "operation %s is a %s, not an import", operationID, kind)
 		case slices.Contains(terminalOperationStates, state):
-			return mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION, "operation %s is %s", operationID, state)
+			return routingWrite{}, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION, "operation %s is %s", operationID, state)
 		}
 	}
 
-	var tablegroupID int64
-	result, err = tx.QueryArgs(ctx, selectTablegroupByNameSQL, tablegroup)
+	// The tablegroup is created beforehand, bound to the connection of the
+	// external PostgreSQL (CREATE TABLEGROUP ... CONNECTION), and is active
+	// once its unmanaged pooler serves.
+	result, err = tx.QueryArgs(ctx, selectImportTargetSQL, tablegroup)
 	if err != nil {
-		return mterrors.Wrap(err, "failed to read tablegroup")
+		return routingWrite{}, mterrors.Wrap(err, "failed to read tablegroup")
 	}
-	tablegroupExists := len(result.Rows) > 0
-	if tablegroupExists {
-		var state string
-		if err := executor.ScanRow(result.Rows[0], &tablegroupID, &state); err != nil {
-			return mterrors.Wrap(err, "failed to read tablegroup")
-		}
-		if state == "dropping" {
-			return mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION, "tablegroup %q is being dropped", tablegroup)
-		}
+	if len(result.Rows) == 0 {
+		return routingWrite{}, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION, "tablegroup %q does not exist", tablegroup)
 	}
-	if opExists && (!tablegroupExists || opTablegroupID == nil || *opTablegroupID != tablegroupID) {
-		return mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
+	var tablegroupID int64
+	var state string
+	var bound bool
+	if err := executor.ScanRow(result.Rows[0], &tablegroupID, &state, &bound); err != nil {
+		return routingWrite{}, mterrors.Wrap(err, "failed to read tablegroup")
+	}
+	if opExists && (opTablegroupID == nil || *opTablegroupID != tablegroupID) {
+		return routingWrite{}, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
 			"operation %s imports into tablegroup %q, not %q", operationID, derefString(opTablegroupName), tablegroup)
 	}
+	switch {
+	case state != tableGroupStateActive:
+		return routingWrite{}, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION, "tablegroup %q is %s, not active", tablegroup, state)
+	case !bound:
+		return routingWrite{}, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
+			"tablegroup %q is not bound to a connection; an import routes to a tablegroup created with CONNECTION", tablegroup)
+	}
 
-	if tablegroupExists {
-		// One tablegroup serves one operation at a time: a second import, or
-		// an import of a tablegroup still being created, fails here rather
-		// than later as overlapping rules. Registered tables do not count: an
-		// import registers its own tables under the tablegroup, and a re-run
-		// of this call must stay idempotent.
-		result, err = tx.QueryArgs(ctx, selectOtherOperationOnTablegroupSQL, tablegroupID, operationID)
-		if err != nil {
-			return mterrors.Wrap(err, "failed to read operations")
-		}
-		if len(result.Rows) > 0 {
-			return mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
-				"tablegroup %q is already the target of operation %s", tablegroup, string(result.Rows[0].Values[0]))
-		}
-	} else {
-		result, err = tx.QueryArgs(ctx, insertTablegroupSQL, tablegroup)
-		if err != nil {
-			return mterrors.Wrap(err, "failed to create tablegroup")
-		}
-		if err := executor.ScanSingleRow(result, &tablegroupID); err != nil {
-			return mterrors.Wrap(err, "failed to create tablegroup")
-		}
+	// One tablegroup serves one operation at a time: a second import fails
+	// here rather than later as overlapping rules. Registered tables do not
+	// count: an import registers its own tables under the tablegroup, and a
+	// re-run of this call must stay idempotent.
+	result, err = tx.QueryArgs(ctx, selectOtherOperationOnTablegroupSQL, tablegroupID, operationID)
+	if err != nil {
+		return routingWrite{}, mterrors.Wrap(err, "failed to read operations")
+	}
+	if len(result.Rows) > 0 {
+		return routingWrite{}, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
+			"tablegroup %q is already the target of operation %s", tablegroup, string(result.Rows[0].Values[0]))
 	}
 
 	if !opExists {
 		request, err := json.Marshal(importOperationRequest{TableGroupID: tablegroupID, Name: tablegroup})
 		if err != nil {
-			return mterrors.Wrap(err, "failed to encode import request")
+			return routingWrite{}, mterrors.Wrap(err, "failed to encode import request")
 		}
 		if _, err := tx.QueryArgs(ctx, insertOperationSQL,
 			operationID, importOperationKind, importOperationInitialState, string(request)); err != nil {
-			return mterrors.Wrap(err, "failed to create import operation")
+			return routingWrite{}, mterrors.Wrap(err, "failed to create import operation")
 		}
 	}
 
-	result, err = tx.QueryArgs(ctx, selectShardNamesSQL, tablegroupID)
-	if err != nil {
-		return mterrors.Wrap(err, "failed to read shards")
-	}
-	switch {
-	case len(result.Rows) == 0:
-		if _, err := tx.QueryArgs(ctx, insertFullShardSQL, tablegroupID, constants.DefaultShard); err != nil {
-			return mterrors.Wrap(err, "failed to create shard")
-		}
-	case len(result.Rows) > 1 || string(result.Rows[0].Values[0]) != constants.DefaultShard:
-		return mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION,
-			"tablegroup %q already has shards other than %s", tablegroup, constants.DefaultShard)
-	}
-	return nil
+	// The import's one rule sends all of the default tablegroup's traffic to
+	// the target. The catalog_state lock is held, so the version read above
+	// is current: a rule already in effect is a no-op, anything else is
+	// replaced and bumps the version.
+	return applyRoutingRuleChange(ctx, tx, routingRuleChange{
+		operationID: operationID,
+		rules: []shardRuleSpec{{
+			fromTablegroup: constants.DefaultTableGroup,
+			toTablegroup:   tablegroup,
+			toShard:        constants.DefaultShard,
+		}},
+		expectedRoutingVersion: routingVersion,
+	})
 }

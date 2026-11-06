@@ -221,18 +221,19 @@ func TestRoutingRules_ImportRoutesTheApplication(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("a default to srctg rule sends the application to the external PostgreSQL", func(t *testing.T) {
-		admin.do(http.MethodPut, "/api/v1/databases/postgres/routing/operations/"+routingImportOpID+"/import-target",
-			map[string]any{"tablegroup": routingTablegroup})
-		version, _ := admin.routingVersion()
-		// The write is the next version after the one it is conditional on.
-		current, err := strconv.ParseInt(version, 10, 64)
+		// The rule is a newer routing version than the one in place, and ensuring it again changes
+		// nothing. Nothing says what version is in place: a completed tablegroup creation advances it.
+		before, _ := admin.routingVersion()
+		current, err := strconv.ParseInt(before, 10, 64)
 		require.NoError(t, err)
-		resp := admin.do(http.MethodPut, "/api/v1/databases/postgres/routing/operations/"+routingImportOpID+"/rules",
-			map[string]any{
-				"rules":                  []map[string]any{{"fromTablegroup": "default", "toTablegroup": routingTablegroup, "toShard": "0-inf"}},
-				"expectedRoutingVersion": version,
-			})
-		assert.Equal(t, strconv.FormatInt(current+1, 10), resp["routingVersion"])
+		resp := admin.do(http.MethodPut, "/api/v1/databases/postgres/routing/operations/"+routingImportOpID+"/import-target",
+			map[string]any{"tablegroup": routingTablegroup})
+		written, err := strconv.ParseInt(fmt.Sprint(resp["routingVersion"]), 10, 64)
+		require.NoError(t, err)
+		assert.Greater(t, written, current, "ensuring the import target writes its default rule")
+		again := admin.do(http.MethodPut, "/api/v1/databases/postgres/routing/operations/"+routingImportOpID+"/import-target",
+			map[string]any{"tablegroup": routingTablegroup})
+		assert.Equal(t, resp["routingVersion"], again["routingVersion"], "running it again changes nothing")
 
 		require.Eventually(t, func() bool {
 			side, err := servingSide(t, s)

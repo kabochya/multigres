@@ -3113,7 +3113,7 @@ const file_multiadminservice_proto_rawDesc = "" +
 	"\x03404\x12#\x12!\n" +
 	"\x1f#/components/responses/RPCError\x82\xd3\xe4\x93\x02F*D/api/v1/databases/{database}/routing/operations/{operation_id}/rules\x12\xd9\x03\n" +
 	"\x12EnsureImportTarget\x121.multipoolermanagerdata.EnsureImportTargetRequest\x1a2.multipoolermanagerdata.EnsureImportTargetResponse\"\xdb\x02\xbaG\x80\x02\n" +
-	"\arouting\x12>Create an import's operation and target tablegroup (temporary)B\xb4\x01\x12.\n" +
+	"\arouting\x12>Route the default tablegroup to an import's target (temporary)B\xb4\x01\x12.\n" +
 	"\adefault\x12#\x12!\n" +
 	"\x1f#/components/responses/RPCError\x12*\n" +
 	"\x03400\x12#\x12!\n" +

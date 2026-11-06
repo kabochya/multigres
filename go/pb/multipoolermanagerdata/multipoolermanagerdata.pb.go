@@ -4753,8 +4753,8 @@ func (x *DeleteRoutingRulesResponse) GetRoutingVersion() int64 {
 	return 0
 }
 
-// EnsureImportTargetRequest creates, if they do not exist, an import
-// operation and the tablegroup it imports into, with its single 0-inf shard.
+// EnsureImportTargetRequest routes the default tablegroup to an import's
+// target tablegroup, creating the import operation if it does not exist.
 type EnsureImportTargetRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// database must be the database the pooler serves.
@@ -4762,8 +4762,9 @@ type EnsureImportTargetRequest struct {
 	// operation_id is the import operation (a UUID).
 	OperationId string `protobuf:"bytes,2,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
 	// tablegroup is the tablegroup the import serves the source database from.
-	// It may not be the default tablegroup, nor one another unfinished
-	// operation acts on, such as a tablegroup being created.
+	// It must exist, be active and be bound to a backing connection (created
+	// with CREATE TABLEGROUP ... CONNECTION), and no other unfinished operation
+	// may act on it. It may not be the default tablegroup.
 	Tablegroup    string `protobuf:"bytes,3,opt,name=tablegroup,proto3" json:"tablegroup,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4820,12 +4821,13 @@ func (x *EnsureImportTargetRequest) GetTablegroup() string {
 	return ""
 }
 
-// EnsureImportTargetResponse confirms the operation, the tablegroup and its
-// shard exist.
+// EnsureImportTargetResponse returns the routing version once the import's
+// default rule is in place.
 type EnsureImportTargetResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	RoutingVersion int64                  `protobuf:"varint,1,opt,name=routing_version,json=routingVersion,proto3" json:"routing_version,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *EnsureImportTargetResponse) Reset() {
@@ -4856,6 +4858,13 @@ func (x *EnsureImportTargetResponse) ProtoReflect() protoreflect.Message {
 // Deprecated: Use EnsureImportTargetResponse.ProtoReflect.Descriptor instead.
 func (*EnsureImportTargetResponse) Descriptor() ([]byte, []int) {
 	return file_multipoolermanagerdata_proto_rawDescGZIP(), []int{61}
+}
+
+func (x *EnsureImportTargetResponse) GetRoutingVersion() int64 {
+	if x != nil {
+		return x.RoutingVersion
+	}
+	return 0
 }
 
 var File_multipoolermanagerdata_proto protoreflect.FileDescriptor
@@ -5140,8 +5149,9 @@ const file_multipoolermanagerdata_proto_rawDesc = "" +
 	"\foperation_id\x18\x02 \x01(\tR\voperationId\x12\x1e\n" +
 	"\n" +
 	"tablegroup\x18\x03 \x01(\tR\n" +
-	"tablegroup\"\x1c\n" +
-	"\x1aEnsureImportTargetResponse*\xa4\x01\n" +
+	"tablegroup\"E\n" +
+	"\x1aEnsureImportTargetResponse\x12'\n" +
+	"\x0frouting_version\x18\x01 \x01(\x03R\x0eroutingVersion*\xa4\x01\n" +
 	"\x0ePostgresStatus\x12\x1b\n" +
 	"\x17POSTGRES_STATUS_UNKNOWN\x10\x00\x12\x1c\n" +
 	"\x18POSTGRES_STATUS_STARTING\x10\x01\x12\x1b\n" +

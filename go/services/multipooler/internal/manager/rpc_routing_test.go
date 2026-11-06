@@ -255,18 +255,22 @@ func TestEnsureImportTarget_ReadCommittedAndCommits(t *testing.T) {
 	pm, m := newRoutingTestManager(t, constants.DefaultTableGroup, constants.DefaultShard, true)
 	var queries []string
 	record := func(q string) { queries = append(queries, q) }
-	m.AddQueryPatternWithCallback(exactPattern(insertTablegroupSQL),
-		mock.MakeQueryResult([]string{"tablegroup_id"}, [][]any{{2}}), record)
+	m.AddQueryPatternWithCallback(exactPattern(selectImportTargetSQL),
+		mock.MakeQueryResult([]string{"tablegroup_id", "state", "bound"}, [][]any{{2, "active", true}}), record)
+	addRoutingCatalog(m, record)
 	m.AddQueryPatternWithCallback(".*", mock.MakeQueryResult(nil, nil), record)
 
-	_, err := pm.EnsureImportTarget(context.Background(), &multipoolermanagerdatapb.EnsureImportTargetRequest{
+	resp, err := pm.EnsureImportTarget(context.Background(), &multipoolermanagerdatapb.EnsureImportTargetRequest{
 		Database: routingTestDatabase, OperationId: importOp, Tablegroup: "srctg",
 	})
 	require.NoError(t, err)
+	assert.Equal(t, int64(6), resp.GetRoutingVersion())
 	assert.Equal(t, []string{
 		"BEGIN", setReadCommittedSQL, lockRoutingStateSQL,
-		selectOperationForUpdateSQL, selectTablegroupByNameSQL, insertTablegroupSQL, insertOperationSQL,
-		selectShardNamesSQL, insertFullShardSQL,
+		selectOperationForUpdateSQL, selectImportTargetSQL, selectOtherOperationOnTablegroupSQL, insertOperationSQL,
+		lockRoutingStateSQL, selectTablegroupsSQL, selectShardsSQL, selectRoutingRulesSQL, countDefaultTablesSQL,
+		selectOperationSQL, selectOtherOperationsSQL,
+		deleteOperationRulesSQL, insertRoutingRuleSQL, bumpRoutingVersionSQL,
 		"COMMIT",
 	}, queries)
 }

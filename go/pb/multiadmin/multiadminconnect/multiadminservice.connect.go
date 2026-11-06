@@ -361,12 +361,15 @@ type MultiadminServiceClient interface {
 	SetRoutingRules(context.Context, *connect.Request[multipoolermanagerdata.SetRoutingRulesRequest]) (*connect.Response[multipoolermanagerdata.SetRoutingRulesResponse], error)
 	// DeleteRoutingRules deletes every routing rule of an operation.
 	DeleteRoutingRules(context.Context, *connect.Request[multipoolermanagerdata.DeleteRoutingRulesRequest]) (*connect.Response[multipoolermanagerdata.DeleteRoutingRulesResponse], error)
-	// EnsureImportTarget creates, if absent, an import operation and the
-	// tablegroup it imports into with its 0-inf shard. It changes no routing.
+	// EnsureImportTarget routes the database's default tablegroup to an
+	// import's target tablegroup, which must already exist, be active and be
+	// bound to a backing connection. It creates the import operation if absent
+	// and writes the default rule unless it is already in place, without an
+	// expected routing version. It switches the application's traffic, so the
+	// application must be quiesced first.
 	// This RPC is temporary, for the first version of imports, and will be
-	// deprecated. Tablegroup creation (the equivalent of CREATE TABLEGROUP)
-	// plus the import's PREPARE step (registering its tables, the default rule
-	// and fencing) will replace it.
+	// deprecated. A routing statement plus the import's PREPARE step
+	// (registering its tables, the default rule and fencing) will replace it.
 	EnsureImportTarget(context.Context, *connect.Request[multipoolermanagerdata.EnsureImportTargetRequest]) (*connect.Response[multipoolermanagerdata.EnsureImportTargetResponse], error)
 }
 
@@ -995,12 +998,15 @@ type MultiadminServiceHandler interface {
 	SetRoutingRules(context.Context, *connect.Request[multipoolermanagerdata.SetRoutingRulesRequest]) (*connect.Response[multipoolermanagerdata.SetRoutingRulesResponse], error)
 	// DeleteRoutingRules deletes every routing rule of an operation.
 	DeleteRoutingRules(context.Context, *connect.Request[multipoolermanagerdata.DeleteRoutingRulesRequest]) (*connect.Response[multipoolermanagerdata.DeleteRoutingRulesResponse], error)
-	// EnsureImportTarget creates, if absent, an import operation and the
-	// tablegroup it imports into with its 0-inf shard. It changes no routing.
+	// EnsureImportTarget routes the database's default tablegroup to an
+	// import's target tablegroup, which must already exist, be active and be
+	// bound to a backing connection. It creates the import operation if absent
+	// and writes the default rule unless it is already in place, without an
+	// expected routing version. It switches the application's traffic, so the
+	// application must be quiesced first.
 	// This RPC is temporary, for the first version of imports, and will be
-	// deprecated. Tablegroup creation (the equivalent of CREATE TABLEGROUP)
-	// plus the import's PREPARE step (registering its tables, the default rule
-	// and fencing) will replace it.
+	// deprecated. A routing statement plus the import's PREPARE step
+	// (registering its tables, the default rule and fencing) will replace it.
 	EnsureImportTarget(context.Context, *connect.Request[multipoolermanagerdata.EnsureImportTargetRequest]) (*connect.Response[multipoolermanagerdata.EnsureImportTargetResponse], error)
 }
 

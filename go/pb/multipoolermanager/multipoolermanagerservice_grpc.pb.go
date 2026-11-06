@@ -123,13 +123,20 @@ type MultipoolerManagerClient interface {
 	// DeleteRoutingRules deletes every routing rule of an operation, with the
 	// same rules as SetRoutingRules.
 	DeleteRoutingRules(ctx context.Context, in *multipoolermanagerdata.DeleteRoutingRulesRequest, opts ...grpc.CallOption) (*multipoolermanagerdata.DeleteRoutingRulesResponse, error)
-	// EnsureImportTarget creates, if absent, an import operation and the
-	// tablegroup it imports into with its 0-inf shard. It changes no routing.
-	// Served only by the catalog primary, like SetRoutingRules.
+	// EnsureImportTarget routes a database's default tablegroup to an import's
+	// target tablegroup: it creates the import operation if absent and writes
+	// the default rule unless it is already in place. The target must already
+	// exist, be active and be bound to a backing connection. Served only by the
+	// catalog primary, like SetRoutingRules, and validated like it.
+	//
+	// It takes no expected routing version: its result does not depend on what
+	// the caller read before, so it is checked under the catalog lock instead.
+	// It switches the database's application traffic, so until the pooler
+	// admission fence exists the application must be quiesced first.
+	//
 	// This RPC is temporary, for the first version of imports, and will be
-	// deprecated. Tablegroup creation (the equivalent of CREATE TABLEGROUP)
-	// plus the import's PREPARE step (registering its tables, the default rule
-	// and fencing) will replace it.
+	// deprecated. A routing statement plus the import's PREPARE step
+	// (registering its tables, the default rule and fencing) will replace it.
 	EnsureImportTarget(ctx context.Context, in *multipoolermanagerdata.EnsureImportTargetRequest, opts ...grpc.CallOption) (*multipoolermanagerdata.EnsureImportTargetResponse, error)
 	// ReloadConfig triggers a PostgreSQL configuration reload (SIGHUP via pgctld)
 	// on this multipooler's local PostgreSQL and confirms it took effect by
@@ -466,13 +473,20 @@ type MultipoolerManagerServer interface {
 	// DeleteRoutingRules deletes every routing rule of an operation, with the
 	// same rules as SetRoutingRules.
 	DeleteRoutingRules(context.Context, *multipoolermanagerdata.DeleteRoutingRulesRequest) (*multipoolermanagerdata.DeleteRoutingRulesResponse, error)
-	// EnsureImportTarget creates, if absent, an import operation and the
-	// tablegroup it imports into with its 0-inf shard. It changes no routing.
-	// Served only by the catalog primary, like SetRoutingRules.
+	// EnsureImportTarget routes a database's default tablegroup to an import's
+	// target tablegroup: it creates the import operation if absent and writes
+	// the default rule unless it is already in place. The target must already
+	// exist, be active and be bound to a backing connection. Served only by the
+	// catalog primary, like SetRoutingRules, and validated like it.
+	//
+	// It takes no expected routing version: its result does not depend on what
+	// the caller read before, so it is checked under the catalog lock instead.
+	// It switches the database's application traffic, so until the pooler
+	// admission fence exists the application must be quiesced first.
+	//
 	// This RPC is temporary, for the first version of imports, and will be
-	// deprecated. Tablegroup creation (the equivalent of CREATE TABLEGROUP)
-	// plus the import's PREPARE step (registering its tables, the default rule
-	// and fencing) will replace it.
+	// deprecated. A routing statement plus the import's PREPARE step
+	// (registering its tables, the default rule and fencing) will replace it.
 	EnsureImportTarget(context.Context, *multipoolermanagerdata.EnsureImportTargetRequest) (*multipoolermanagerdata.EnsureImportTargetResponse, error)
 	// ReloadConfig triggers a PostgreSQL configuration reload (SIGHUP via pgctld)
 	// on this multipooler's local PostgreSQL and confirms it took effect by

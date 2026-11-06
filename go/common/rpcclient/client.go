@@ -227,8 +227,8 @@ type MultipoolerClient interface {
 	// catalog primary pooler.
 	DeleteRoutingRules(ctx context.Context, pooler *clustermetadatapb.Multipooler, request *multipoolermanagerdatapb.DeleteRoutingRulesRequest) (*multipoolermanagerdatapb.DeleteRoutingRulesResponse, error)
 
-	// EnsureImportTarget creates an import's operation and target tablegroup
-	// on the catalog primary pooler, if absent.
+	// EnsureImportTarget routes the default tablegroup to an import's target
+	// tablegroup on the catalog primary pooler.
 	EnsureImportTarget(ctx context.Context, pooler *clustermetadatapb.Multipooler, request *multipoolermanagerdatapb.EnsureImportTargetRequest) (*multipoolermanagerdatapb.EnsureImportTargetResponse, error)
 
 	//
