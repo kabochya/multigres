@@ -16,7 +16,6 @@ package manager
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/multigres/multigres/go/common/backingconn"
@@ -24,12 +23,11 @@ import (
 	mtrpcpb "github.com/multigres/multigres/go/pb/mtrpc"
 	multipoolerservicepb "github.com/multigres/multigres/go/pb/multipoolerservice"
 	"github.com/multigres/multigres/go/services/multipooler/internal/executor"
-	"github.com/multigres/multigres/go/services/multipooler/internal/migration"
 )
 
-// connectionStore reads the connection directory from the sharding catalog on
-// the default primary, through the admin pool: the named connections of
-// multigres.connections, read by the same store the migrator uses.
+// connectionStore reads how a tablegroup is served from the sharding catalog on the default
+// primary, through the admin pool: the tablegroup row, and the named connection of
+// multigres.connections it is bound to, the table the migrator shares.
 type connectionStore struct {
 	queryService func() executor.InternalQueryService
 }
@@ -38,33 +36,43 @@ func newConnectionStore(pm *MultipoolerManager) *connectionStore {
 	return &connectionStore{queryService: pm.internalQueryService}
 }
 
-// BackingConnection reads the named connection and decodes its stored form, a
-// libpq connection string in the dsn column (a postgres:// URI or keyword=value
-// pairs, the form the migrator stores), into the structured connection the
-// contract carries. A dsn that does not name exactly one server is refused.
+// TableGroupBinding reads the tablegroup's row and the connection it is bound to, and decodes
+// the stored form of that connection, a libpq connection string in the dsn column (a
+// postgres:// URI or keyword=value pairs, the form the migrator stores), into the structured
+// connection the contract carries. A dsn that does not name exactly one server is refused. A
+// managed tablegroup has no connection, and one being dropped is served to no one.
 //
-// A failure to read the row is UNAVAILABLE when the query service is missing or the connection
-// to the database is lost, which the caller retries; a catalog without the connections table is
-// FAILED_PRECONDITION, a fact about where the call was made; anything else is passed on.
-func (s *connectionStore) BackingConnection(ctx context.Context, name string) (*multipoolerservicepb.BackingConnection, bool, error) {
+// A failure to read is UNAVAILABLE when the query service is missing or the connection to the
+// database is lost, which the caller retries; anything else is passed on.
+func (s *connectionStore) TableGroupBinding(ctx context.Context, tablegroupID int64) (*multipoolerservicepb.BackingConnection, bool, error) {
 	qs := s.queryService()
 	if qs == nil {
 		return nil, false, mterrors.New(mtrpcpb.Code_UNAVAILABLE, "internal query service not available")
 	}
-	stored, err := migration.NewStore(qs).GetConnectionByRef(ctx, migration.Ref{Name: name})
+	res, err := qs.QueryAdminArgs(ctx,
+		"SELECT t.state, c.connection_id IS NOT NULL, coalesce(c.name, ''), coalesce(c.dsn, '') FROM multigres.tablegroup t "+
+			"LEFT JOIN multigres.connections c ON c.connection_id = t.backing_connection_id WHERE t.tablegroup_id = $1", tablegroupID)
 	switch {
-	case errors.Is(err, migration.ErrConnectionNotFound):
-		return nil, false, nil
 	case mterrors.IsConnectionError(err):
-		return nil, false, mterrors.Errorf(mtrpcpb.Code_UNAVAILABLE, "read connection %q: %v", name, err)
-	case errors.Is(err, migration.ErrNoConnectionsTable):
-		// Not the catalog shard, or the catalog's table is not created yet: a fact about the
-		// state this call expects, as for the migrator's own connection RPCs.
-		return nil, false, mterrors.New(mtrpcpb.Code_FAILED_PRECONDITION, migration.NoConnectionsTableMessage)
+		return nil, false, mterrors.Errorf(mtrpcpb.Code_UNAVAILABLE, "read tablegroup %d: %v", tablegroupID, err)
 	case err != nil:
 		return nil, false, err
 	}
-	conn, err := parseBackingDSN(stored.DSN)
+	if len(res.Rows) == 0 {
+		return nil, false, nil
+	}
+	var state, name, dsn string
+	var bound bool
+	if err := executor.ScanRow(res.Rows[0], &state, &bound, &name, &dsn); err != nil {
+		return nil, false, mterrors.Wrap(err, "read tablegroup row")
+	}
+	if state == tableGroupStateDropping {
+		return nil, false, mterrors.Errorf(mtrpcpb.Code_FAILED_PRECONDITION, "tablegroup %d is being dropped", tablegroupID)
+	}
+	if !bound {
+		return nil, true, nil
+	}
+	conn, err := parseBackingDSN(dsn)
 	if err != nil {
 		return nil, false, mterrors.Wrap(err, fmt.Sprintf("connection %q", name))
 	}

@@ -18,18 +18,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"slices"
 
 	"github.com/multigres/multigres/go/common/backingconn"
-	"github.com/multigres/multigres/go/common/topoclient"
-	clustermetadatapb "github.com/multigres/multigres/go/pb/clustermetadata"
-	"github.com/multigres/multigres/go/services/multipooler/internal/manager"
 )
 
 // backingConnection is the resolved configuration of the external PostgreSQL an
-// unmanaged pooler fronts. It is loaded by name (--backing-connection); no
-// endpoint or credential is ever supplied directly on the command line.
+// unmanaged pooler fronts. It is read from the sharding catalog, by the id of the pooler's
+// tablegroup; no endpoint or credential is ever supplied directly on the command line.
 type backingConnection struct {
 	Name           string
 	Host           string
@@ -50,66 +46,46 @@ func (c *backingConnection) Validate() error {
 
 // checkBackingDatabase refuses a backing connection that serves another database than the
 // pooler's own: the pooler advertises --database to the cluster and dials the connection's.
-func checkBackingDatabase(name string, backend *manager.ExternalBackend, database string) error {
-	if backend.Database != database {
-		return fmt.Errorf("backing connection %q serves database %q, which does not match --database %q", name, backend.Database, database)
+func checkBackingDatabase(conn *backingConnection, database string) error {
+	if conn.Database != database {
+		return fmt.Errorf("backing connection %q serves database %q, which does not match --database %q", conn.Name, conn.Database, database)
 	}
 	return nil
 }
 
-// connectionSource gives a pooler the configuration of the external PostgreSQL it
-// fronts, by the name given in --backing-connection. Where that configuration lives is
-// not decided here: the default is a source that refuses, so an unmanaged pooler does not
-// start, with a clear error, until one is set.
+// connectionSource tells a pooler how its tablegroup is served, by the tablegroup's catalog id:
+// by the external PostgreSQL whose connection it returns, or by managed shards. The pooler's own
+// source asks the default primary of its database.
 type connectionSource interface {
-	BackingConnection(ctx context.Context, name string) (*backingConnection, error)
+	// TableGroupBinding returns the connection of the tablegroup, or managed when the tablegroup
+	// has none. A source that says neither has said nothing: it is never taken for managed.
+	TableGroupBinding(ctx context.Context, tablegroupID int64) (conn *backingConnection, managed bool, err error)
 }
 
-// unconfiguredSource is the default source.
-type unconfiguredSource struct{}
-
-func (unconfiguredSource) BackingConnection(_ context.Context, name string) (*backingConnection, error) {
-	return nil, fmt.Errorf("backing connection %q: no source of backing connections is configured", name)
-}
-
-// errInvalidBackingConnection marks a connection that a source returned and that can never be
-// used as it is: none at all, incomplete, or naming more than one server. Asking again gets
-// the same answer.
+// errInvalidBackingConnection marks an answer of a source that can never be used as it is: it
+// says nothing, or its connection is incomplete or names more than one server. Asking again
+// gets the same answer until the catalog is corrected.
 var errInvalidBackingConnection = errors.New("invalid backing connection")
 
-// fetchBackingConnection asks a source for a connection and returns it only if it is usable:
-// a source that answers with nothing, or with a connection that is not complete or names more
-// than one server, is refused, whoever the source is.
-func fetchBackingConnection(ctx context.Context, source connectionSource, name string) (*backingConnection, error) {
-	conn, err := source.BackingConnection(ctx, name)
-	if err != nil {
-		return nil, err
-	}
-	if conn == nil {
-		return nil, fmt.Errorf("%w: backing connection %q: the source returned none", errInvalidBackingConnection, name)
+// fetchBinding asks a source how a tablegroup is served and returns the answer only if it is
+// usable: a source that answers with nothing, or with a connection that is not complete or names
+// more than one server, is refused, whoever the source is.
+func fetchBinding(ctx context.Context, source connectionSource, tablegroupID int64) (conn *backingConnection, managed bool, err error) {
+	conn, managed, err = source.TableGroupBinding(ctx, tablegroupID)
+	switch {
+	case err != nil:
+		return nil, false, err
+	case managed && conn != nil:
+		return nil, false, fmt.Errorf("%w: tablegroup %d: the source returned a connection for a managed tablegroup", errInvalidBackingConnection, tablegroupID)
+	case managed:
+		return nil, true, nil
+	case conn == nil:
+		return nil, false, fmt.Errorf("%w: tablegroup %d: the source said neither that it is managed nor which connection serves it", errInvalidBackingConnection, tablegroupID)
 	}
 	if err := conn.Validate(); err != nil {
-		return nil, fmt.Errorf("%w: backing connection %q: %w", errInvalidBackingConnection, name, err)
+		return nil, false, fmt.Errorf("%w: backing connection %q: %w", errInvalidBackingConnection, conn.Name, err)
 	}
-	return conn, nil
-}
-
-// leadershipModeFor derives the pooler's leadership mode. A pooler that names a
-// backing connection fronts an external PostgreSQL and is unmanaged; a static
-// leader (minigres) leads its shard without consensus; every other pooler owns
-// its postgres through pgctld and is elected by consensus. A static leader
-// manages its own postgres, so it cannot also name a backing connection.
-func leadershipModeFor(backingConnection string, staticLeader bool) (clustermetadatapb.LeadershipMode, error) {
-	switch {
-	case backingConnection != "" && staticLeader:
-		return 0, errors.New("--backing-connection cannot be used by a static leader, which manages its own postgres")
-	case backingConnection != "":
-		return clustermetadatapb.LeadershipMode_LEADERSHIP_MODE_UNMANAGED, nil
-	case staticLeader:
-		return clustermetadatapb.LeadershipMode_LEADERSHIP_MODE_STATIC, nil
-	default:
-		return clustermetadatapb.LeadershipMode_LEADERSHIP_MODE_CONSENSUS, nil
-	}
+	return conn, false, nil
 }
 
 // The flags that describe a postgres managed through pgctld. A managed pooler adopts the first
@@ -132,54 +108,18 @@ func managedPostgresFlags() []string {
 	return slices.Concat(pgctldRequiredFlags, pgctldOptionalFlags, managedOnlyFlags)
 }
 
-// validateBackendFlags rejects flags that describe a pgctld-managed local
-// postgres when --backing-connection is set, rather than silently ignoring
-// them: the endpoint of an unmanaged pooler comes only from its backing
-// connection, and it has no pgctld or backups to configure.
-func validateBackendFlags(backingConnection string, explicit func(name string) bool) error {
-	if backingConnection == "" {
+// validateBackendFlags rejects flags that describe a pgctld-managed local postgres when the
+// pooler is unmanaged, rather than silently ignoring them: the endpoint of an unmanaged pooler
+// comes only from the backing connection its tablegroup is bound to in the catalog, and it has no
+// pgctld or backups to configure.
+func validateBackendFlags(unmanaged bool, explicit func(name string) bool) error {
+	if !unmanaged {
 		return nil
 	}
 	for _, name := range managedPostgresFlags() {
 		if explicit(name) {
-			return fmt.Errorf("--%s configures a pgctld-managed postgres and cannot be combined with --backing-connection; an unmanaged pooler takes its endpoint from the backing connection and has no pgctld or backups", name)
+			return fmt.Errorf("--%s configures a pgctld-managed postgres, but this pooler is unmanaged: its tablegroup is bound to a backing connection in the catalog, so it takes its endpoint from there and has no pgctld or backups", name)
 		}
-	}
-	return nil
-}
-
-// requireUnchangedManagement refuses to start a pooler under an id whose topology record is
-// unmanaged when the pooler is managed, or the other way round. A managed member of a cohort
-// and an unmanaged front for an external database are different components even under the
-// same name; letting a restart flip one into the other would leave the orchestrator's view of
-// that id describing the wrong thing. A missing record is a first start.
-//
-// A read that fails for another reason refuses an unmanaged pooler, whose bootstrap needs the
-// topology anyway, and lets a managed one start, so that a managed pooler still starts while the
-// topology is unreachable, as it does without this check. The invariant does not rest on this
-// read: RegisterMultipooler refuses to change whether an existing record is managed
-// (topoclient.ErrManagementChanged), so such a pooler never overwrites the record once the
-// topology is back; this check only makes the common case fail at startup.
-func requireUnchangedManagement(ctx context.Context, ts topoclient.Store, id *clustermetadatapb.ID, mode clustermetadatapb.LeadershipMode, logger *slog.Logger) error {
-	if ts == nil {
-		return nil
-	}
-	info, err := ts.GetMultipooler(ctx, id)
-	switch {
-	case errors.Is(err, &topoclient.TopoError{Code: topoclient.NoNode}):
-		return nil
-	case err != nil && !topoclient.IsManagedLeadershipMode(mode):
-		return fmt.Errorf("read the topology record of pooler %s to check whether it is unmanaged: %w", topoclient.ComponentIDString(id), err)
-	case err != nil:
-		logger.WarnContext(ctx, "could not read this pooler's topology record to check whether it is unmanaged; starting anyway",
-			"pooler_id", topoclient.ComponentIDString(id), "error", err)
-		return nil
-	}
-	recorded := info.GetLeadershipMode()
-	if topoclient.IsManagedLeadershipMode(recorded) != topoclient.IsManagedLeadershipMode(mode) {
-		return fmt.Errorf("pooler %s is registered in the topology as %s and cannot start as %s: "+
-			"start it under a new name, or delete its topology record first",
-			topoclient.ComponentIDString(id), recorded, mode)
 	}
 	return nil
 }

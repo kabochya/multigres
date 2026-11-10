@@ -100,7 +100,8 @@ type Config struct {
 
 	// ExternalBackend is the external PostgreSQL an unmanaged pooler fronts: required for an
 	// unmanaged pooler, refused for a managed one. It is the resolved form of
-	// --backing-connection, and the one place the endpoint of an unmanaged pooler is kept:
+	// the backing connection of the pooler's tablegroup in the catalog, and the one place the
+	// endpoint of an unmanaged pooler is kept:
 	// what the pooler dials, probes and validates TLS against.
 	ExternalBackend *ExternalBackend
 }
